@@ -69,8 +69,8 @@ Optional settings:
 AP_SSID="GofroNET WiFi"
 AP_CHANNEL=36
 WG_ADDRESS=10.202.0.2/32
-GAME_SUBNET=10.203.1.0/29
-GAME_GATEWAY=10.203.1.1/29
+GAME_SUBNET=10.203.1.0/24
+GAME_GATEWAY=10.203.1.1/24
 ```
 
 The installer prints the Pi public key and the exact `maxos-server add-peer` command.
@@ -83,7 +83,7 @@ Run the command printed by the Pi installer. Its shape is:
 sudo maxos-server add-peer \
   --public-key "CLIENT_PUBLIC_KEY" \
   --tunnel-ip "10.202.0.2/32" \
-  --subnet "10.203.1.0/29"
+  --subnet "10.203.1.0/24"
 ```
 
 Inspect peers:

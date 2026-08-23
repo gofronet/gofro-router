@@ -2,10 +2,10 @@
 set -euo pipefail
 WG_INTERFACE="${WG_INTERFACE:-gt0}"
 WG_ADDRESS="${WG_ADDRESS:-10.202.0.2/32}"
-GAME_SUBNET="${GAME_SUBNET:-10.203.1.0/29}"
-GAME_GATEWAY="${GAME_GATEWAY:-10.203.1.1/29}"
+GAME_SUBNET="${GAME_SUBNET:-10.203.1.0/24}"
+GAME_GATEWAY="${GAME_GATEWAY:-10.203.1.1/24}"
 DHCP_START="${DHCP_START:-10.203.1.2}"
-DHCP_END="${DHCP_END:-10.203.1.6}"
+DHCP_END="${DHCP_END:-10.203.1.250}"
 AP_SSID="${AP_SSID:-GofroNET WiFi}"
 AP_CHANNEL="${AP_CHANNEL:-36}"
 PI_AGENT_BINARY="${PI_AGENT_BINARY:-target/release/pi-agent}"
@@ -27,7 +27,7 @@ die() {
 [[ $WG_ADDRESS =~ ^[0-9a-fA-F:./]+$ ]] || die "invalid WG_ADDRESS"
 [[ $GAME_SUBNET =~ ^[0-9.]+/[0-9]+$ ]] || die "invalid GAME_SUBNET"
 [[ $GAME_GATEWAY =~ ^[0-9.]+/[0-9]+$ ]] || die "invalid GAME_GATEWAY"
-[[ ${GAME_SUBNET##*/} == 29 && ${GAME_GATEWAY##*/} == 29 ]] || die "only /29 game networks are supported"
+[[ ${GAME_SUBNET##*/} == 24 && ${GAME_GATEWAY##*/} == 24 ]] || die "only /24 game networks are supported"
 [[ $SERVER_PUBLIC_KEY =~ ^[a-zA-Z0-9+/]{43}=$ ]] || die "invalid SERVER_PUBLIC_KEY"
 [[ $SERVER_ENDPOINT != *$'\n'* && $SERVER_ENDPOINT != *' '* ]] || die "invalid SERVER_ENDPOINT"
 [[ $SERVER_ENDPOINT != *'"'* && $SERVER_ENDPOINT != *'\\'* ]] || die "invalid SERVER_ENDPOINT"
@@ -42,8 +42,12 @@ die() {
 [[ -f $UPDATE_PUBLIC_KEY ]] || die "update public key not found"
 [[ -f $MIGRATION_SCRIPT ]] || die "migration script not found"
 GAME_PREFIX=${GAME_SUBNET%.*}
-[[ $GAME_GATEWAY == "${GAME_PREFIX}.1/29" ]] || die "GAME_GATEWAY must be the first host in GAME_SUBNET"
-[[ $DHCP_START == "${GAME_PREFIX}.2" && $DHCP_END == "${GAME_PREFIX}.6" ]] || die "DHCP range must cover hosts .2 through .6"
+IFS=. read -r o1 o2 o3 extra <<< "$GAME_PREFIX"
+[[ -z ${extra:-} ]] || die "GAME_SUBNET must contain four IPv4 octets"
+for octet in "$o1" "$o2" "$o3"; do [[ $octet =~ ^(0|[1-9][0-9]{0,2})$ ]] && (( 10#$octet <= 255 )) || die "invalid GAME_SUBNET octet"; done
+[[ $GAME_SUBNET == "${GAME_PREFIX}.0/24" ]] || die "GAME_SUBNET must be a canonical /24 network"
+[[ $GAME_GATEWAY == "${GAME_PREFIX}.1/24" ]] || die "GAME_GATEWAY must be the first host in GAME_SUBNET"
+[[ $DHCP_START == "${GAME_PREFIX}.2" && $DHCP_END == "${GAME_PREFIX}.250" ]] || die "DHCP range must cover hosts .2 through .250"
 read -ra route <<< "$(ip -4 route get 1.1.1.1)"
 for ((i = 0; i < ${#route[@]} - 1; i++)); do
   if [[ ${route[i]} == dev ]]; then
@@ -84,7 +88,7 @@ server=1.1.1.1@${GAME_GATEWAY_IP}
 server=8.8.8.8@${GAME_GATEWAY_IP}
 address=/gofrowifi.net/${GAME_GATEWAY_IP}
 local=/gofrowifi.net/
-dhcp-range=${DHCP_START},${DHCP_END},255.255.255.248,12h
+dhcp-range=${DHCP_START},${DHCP_END},255.255.255.0,12h
 dhcp-option=3,${GAME_GATEWAY_IP}
 dhcp-option=6,${GAME_GATEWAY_IP}
 EOF
@@ -104,7 +108,6 @@ MTU = 1420
 Table = off
 PostUp = sysctl -w net.ipv4.conf.%i.rp_filter=2; ip route replace default dev %i table 100 metric 10
 PostDown = ip route del default dev %i table 100 metric 10 || true
-
 [Peer]
 PublicKey = ${SERVER_PUBLIC_KEY}
 Endpoint = 127.0.0.1:51822
@@ -144,7 +147,6 @@ table inet maxos_pi {
     iifname "wlan0" ip protocol icmp accept
     iifname "wlan0" drop
   }
-
   chain forward {
     type filter hook forward priority filter; policy accept;
     iifname "${WG_INTERFACE}" oifname "wlan0" ct state established,related accept
@@ -163,7 +165,6 @@ table inet maxos_pi {
     iifname "wlan0" ip protocol icmp accept
     iifname "wlan0" drop
   }
-
   chain forward {
     type filter hook forward priority filter; policy accept;
     iifname "${UPLINK_INTERFACE}" oifname "wlan0" ct state established,related accept
@@ -178,7 +179,6 @@ table inet maxos_pi {
   }
 }
 EOF
-
 cat > /usr/local/lib/maxos-game-mode <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
