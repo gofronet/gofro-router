@@ -17,20 +17,20 @@ VPN mode keeps the kill switch: if `gt0` is down, table 100 has an unreachable d
 - Pi connected to the home router through Ethernet
 - Ubuntu or Debian VPS with a public IPv4 address
 - Rust 1.85 or newer on the machines used to build the binaries
+- Bun 1.3.14 for the embedded web UI
 - UDP port `8443` allowed by the VPS provider and host firewall
 
 ## Build
 
 ```bash
-bun --cwd web install
-bun --cwd web run build
+(cd web && bun install --frozen-lockfile && bun run build)
 cargo build --workspace --release
 ```
 
 Build the web bundle before the Rust binaries because `pi-agent` embeds the generated assets.
 
 The Cargo workspace keeps each deployable process separate: `pi-agent`, `maxos-server`,
-`wg-relay`, and `udp-lab`. Shared WireGuard command handling lives in `tunnel-core`.
+`wg-relay`, and `gofro-updater`. Shared WireGuard command handling lives in `tunnel-core`.
 
 ## 1. Set up the VPS
 
@@ -54,7 +54,7 @@ sudo WAN_INTERFACE=ens3 WG_PORT=51820 RELAY_PORT=8443 ./deploy/server/install.sh
 The Pi must use Ethernet as its uplink before running this command. The installer refuses to continue when `wlan0` is the active uplink.
 
 ```bash
-cargo build --release -p pi-agent -p wg-relay
+cargo build --release -p pi-agent -p wg-relay -p gofro-updater
 sudo \
   SERVER_PUBLIC_KEY="SERVER_PUBLIC_KEY" \
   SERVER_ENDPOINT="VPS_IP:8443" \
@@ -116,35 +116,20 @@ systemctl status maxos-wg-relay-server
 sudo nft list table inet maxos_server
 ```
 
-## Plaintext UDP lab
-
-`udp-lab` is an intentionally insecure TUN-over-UDP benchmark. It has no encryption, authentication, replay protection, key rotation, or production use.
-
-On the VPS, restrict the provider firewall to the Pi's current public IP, then run:
-
-```bash
-cargo build --release -p udp-lab
-sudo ./target/release/udp-lab server --peer-ip HOME_PUBLIC_IP
-```
-
-On the Pi:
-
-```bash
-cargo build --release -p udp-lab
-sudo ./target/release/udp-lab client --server VPS_IP:51900
-ping 10.99.0.1
-```
-
-The lab sends plaintext inner IP packets and remains separate from production. `wg-relay` only wraps already encrypted WireGuard datagrams to avoid protocol fingerprinting.
-
 ## Development checks
 
 ```bash
 cargo fmt --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-bun --cwd web run check
-bun --cwd web run build
-bash -n deploy/pi/install.sh
+bash -c 'cd web && bun run check && bun run build'
+bash -n deploy/pi/*.sh
 bash -n deploy/server/install.sh
 ```
+
+## Automatic updates
+
+The Pi checks signed stable GitHub releases every six hours. Updates switch all
+application binaries atomically and roll back after a failed service, API, or
+previously healthy VPN check. See [RELEASING.md](RELEASING.md) for release,
+signature rotation, migration, and recovery procedures.

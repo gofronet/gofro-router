@@ -10,6 +10,9 @@ AP_SSID="${AP_SSID:-GofroNET WiFi}"
 AP_CHANNEL="${AP_CHANNEL:-36}"
 PI_AGENT_BINARY="${PI_AGENT_BINARY:-target/release/pi-agent}"
 RELAY_BINARY="${RELAY_BINARY:-target/release/wg-relay}"
+UPDATER_BINARY="${UPDATER_BINARY:-target/release/gofro-updater}"
+UPDATE_PUBLIC_KEY="${UPDATE_PUBLIC_KEY:-deploy/pi/update-public.pem}"
+MIGRATION_SCRIPT="${MIGRATION_SCRIPT:-deploy/pi/migrate.sh}"
 die() {
   printf 'error: %s\n' "$*" >&2
   exit 1
@@ -35,6 +38,9 @@ die() {
 [[ $WIFI_COUNTRY =~ ^[A-Z]{2}$ ]] || die "WIFI_COUNTRY must be a two-letter uppercase code"
 [[ -f $PI_AGENT_BINARY ]] || die "build pi-agent first or set PI_AGENT_BINARY"
 [[ -f $RELAY_BINARY ]] || die "build wg-relay first or set RELAY_BINARY"
+[[ -f $UPDATER_BINARY ]] || die "build gofro-updater first or set UPDATER_BINARY"
+[[ -f $UPDATE_PUBLIC_KEY ]] || die "update public key not found"
+[[ -f $MIGRATION_SCRIPT ]] || die "migration script not found"
 GAME_PREFIX=${GAME_SUBNET%.*}
 [[ $GAME_GATEWAY == "${GAME_PREFIX}.1/29" ]] || die "GAME_GATEWAY must be the first host in GAME_SUBNET"
 [[ $DHCP_START == "${GAME_PREFIX}.2" && $DHCP_END == "${GAME_PREFIX}.6" ]] || die "DHCP range must cover hosts .2 through .6"
@@ -46,18 +52,15 @@ for ((i = 0; i < ${#route[@]} - 1; i++)); do
   fi
 done
 [[ ${UPLINK_INTERFACE:-} != wlan0 ]] || die "refusing to replace wlan0 while it is the active uplink; connect Ethernet first"
-
 apt-get update
-apt-get install -y --no-install-recommends network-manager wireguard-tools dnsmasq nftables iw
+apt-get install -y --no-install-recommends network-manager wireguard-tools dnsmasq nftables iw curl ca-certificates openssl coreutils tar
 systemctl is-active --quiet NetworkManager || die "NetworkManager is not active"
 ip link show wlan0 >/dev/null 2>&1 || die "wlan0 not found"
-
 if command -v raspi-config >/dev/null; then
   raspi-config nonint do_wifi_country "$WIFI_COUNTRY"
 else
   iw reg set "$WIFI_COUNTRY"
 fi
-
 GAME_GATEWAY_IP=${GAME_GATEWAY%/*}
 nmcli connection delete maxos-game-ap >/dev/null 2>&1 || true
 nmcli connection add type wifi ifname wlan0 con-name maxos-game-ap ssid "$AP_SSID"
@@ -73,7 +76,6 @@ nmcli connection modify maxos-game-ap \
   ipv4.never-default yes \
   ipv6.method disabled \
   connection.autoconnect no
-
 cat > /etc/dnsmasq.d/maxos-game-tunnel.conf <<EOF
 interface=wlan0
 bind-dynamic
@@ -87,14 +89,12 @@ dhcp-option=3,${GAME_GATEWAY_IP}
 dhcp-option=6,${GAME_GATEWAY_IP}
 EOF
 systemctl enable dnsmasq
-
 install -d -m 700 /etc/wireguard
 if [[ ! -s /etc/wireguard/client.key ]]; then
   umask 077
   wg genkey > /etc/wireguard/client.key
 fi
 wg pubkey < /etc/wireguard/client.key > /etc/wireguard/client.pub
-
 cat > "/etc/wireguard/${WG_INTERFACE}.conf" <<EOF
 [Interface]
 Address = ${WG_ADDRESS}
@@ -112,12 +112,10 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 10
 EOF
 chmod 600 "/etc/wireguard/${WG_INTERFACE}.conf"
-
 cat > /etc/sysctl.d/99-maxos-game-tunnel.conf <<'EOF'
 net.ipv4.ip_forward = 1
 EOF
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
-
 install -d -m 700 /etc/maxos-game-tunnel
 if [[ ! -s /etc/maxos-game-tunnel/controller.json ]]; then
   cat > /etc/maxos-game-tunnel/controller.json <<EOF
@@ -137,7 +135,6 @@ EOF
   chmod 600 /etc/maxos-game-tunnel/controller.json
 fi
 printf '%s\n' "$SERVER_ENDPOINT" > /etc/maxos-game-tunnel/relay-endpoint
-
 cat > /etc/maxos-game-tunnel/pi-vpn.nft <<EOF
 table inet maxos_pi {
   chain input {
@@ -157,7 +154,6 @@ table inet maxos_pi {
   }
 }
 EOF
-
 cat > /etc/maxos-game-tunnel/pi-bypass.nft <<EOF
 table inet maxos_pi {
   chain input {
@@ -279,11 +275,15 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/pi-agent --listen ${GAME_GATEWAY_IP}:80 --interface ${WG_INTERFACE}
 Restart=on-failure
 RestartSec=2
+KillSignal=SIGINT
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
+UPDATER_BINARY="$UPDATER_BINARY" UPDATE_PUBLIC_KEY="$UPDATE_PUBLIC_KEY" \
+  MIGRATION_SCRIPT="$MIGRATION_SCRIPT" STATUS_ADDRESS="$GAME_GATEWAY_IP" \
+  WG_INTERFACE="$WG_INTERFACE" deploy/pi/install-updater.sh
 systemctl daemon-reload
 systemctl enable maxos-game-network.service maxos-wg-relay-client.service "wg-quick@${WG_INTERFACE}.service" pi-agent.service
 systemctl restart maxos-game-network.service

@@ -60,16 +60,28 @@ pub(crate) fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn index() -> Html<&'static str> {
-    Html(UI)
+async fn index() -> impl IntoResponse {
+    ([(header::CACHE_CONTROL, "no-store")], Html(UI))
 }
 
 async fn javascript() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "application/javascript")], UI_JS)
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        UI_JS,
+    )
 }
 
 async fn stylesheet() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/css")], UI_CSS)
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        UI_CSS,
+    )
 }
 
 async fn status(State(state): State<AppState>) -> Result<Json<AgentStatus>, ApiError> {
@@ -172,6 +184,7 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
         .sample(peer.as_ref(), readings);
 
     Ok(AgentStatus {
+        version: env!("CARGO_PKG_VERSION"),
         vpn_enabled: config.vpn_enabled,
         tunnel_active,
         interface: state.interface.clone(),

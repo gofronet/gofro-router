@@ -29,6 +29,7 @@ export type Device = {
 };
 
 export type Status = {
+  version: string;
   vpn_enabled: boolean;
   tunnel_active: boolean;
   interface: string;

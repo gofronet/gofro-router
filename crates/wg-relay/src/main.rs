@@ -8,7 +8,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(about = "Obfuscated UDP transport for WireGuard datagrams")]
+#[command(about = "Obfuscated UDP transport for WireGuard datagrams", version)]
 struct Args {
     #[command(subcommand)]
     mode: Mode,

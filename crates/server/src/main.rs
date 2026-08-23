@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use tunnel_core::{run, wireguard_peers};
 
 #[derive(Debug, Parser)]
-#[command(about = "Manage peers on the gaming tunnel WireGuard server")]
+#[command(about = "Manage peers on the gaming tunnel WireGuard server", version)]
 struct Args {
     #[arg(long, default_value = "gt0", global = true)]
     interface: String,

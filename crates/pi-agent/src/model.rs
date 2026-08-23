@@ -48,6 +48,7 @@ pub(crate) struct ApInput {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AgentStatus {
+    pub(crate) version: &'static str,
     pub(crate) vpn_enabled: bool,
     pub(crate) tunnel_active: bool,
     pub(crate) interface: String,

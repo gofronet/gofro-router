@@ -20,7 +20,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
-#[command(about = "Local controller for the Raspberry Pi gaming tunnel")]
+#[command(about = "Local controller for the Raspberry Pi gaming tunnel", version)]
 struct Args {
     #[arg(long, default_value = "10.203.1.1:80")]
     listen: SocketAddr,
