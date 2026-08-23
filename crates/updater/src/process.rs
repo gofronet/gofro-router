@@ -24,6 +24,7 @@ pub(crate) fn self_check() -> Result<()> {
         ("openssl", &["version"][..]),
         ("sha256sum", &["--version"][..]),
         ("tar", &["--version"][..]),
+        ("flock", &["--version"][..]),
         ("systemctl", &["--version"][..]),
     ] {
         checked(
@@ -81,13 +82,17 @@ pub(crate) fn curl_download(url: &str, destination: &Path, maximum: u64) -> Resu
     Ok(())
 }
 
-pub(crate) fn status_api() -> Result<Vec<u8>> {
+pub(crate) fn status_address() -> Result<Ipv4Addr> {
     let address = fs::read_to_string(crate::paths::STATUS_ADDRESS)
         .context("failed to read local status address")?;
-    let address: Ipv4Addr = address
+    address
         .trim()
         .parse()
-        .context("local status address is not valid IPv4")?;
+        .context("local status address is not valid IPv4")
+}
+
+pub(crate) fn status_api() -> Result<Vec<u8>> {
+    let address = status_address()?;
     let url = format!("http://{address}/api/status");
     Ok(checked(
         Command::new("curl")
@@ -201,4 +206,52 @@ pub(crate) fn service_active(service: &str) -> Result<bool> {
         .status()
         .with_context(|| format!("failed to query service {service}"))?
         .success())
+}
+
+pub(crate) fn updater_busy() -> Result<bool> {
+    for service in ["gofro-updater.service", "gofro-updater-check.service"] {
+        let output = checked(
+            Command::new("systemctl").args(["show", "--property=ActiveState", "--value", service]),
+            "query updater service state",
+        )?;
+        if !matches!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "inactive" | "failed"
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn start_updater(check_only: bool) -> Result<()> {
+    let service = if check_only {
+        "gofro-updater-check.service"
+    } else {
+        "gofro-updater.service"
+    };
+    checked(
+        Command::new("systemctl").args(["start", "--no-block", service]),
+        "start updater service",
+    )?;
+    Ok(())
+}
+
+pub(crate) fn updater_api() -> Result<Vec<u8>> {
+    let url = format!("http://{}:8080/api/status", status_address()?);
+    Ok(checked(
+        Command::new("curl").args([
+            "--connect-timeout",
+            "1",
+            "--max-time",
+            "2",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--",
+            &url,
+        ]),
+        "updater API request",
+    )?
+    .stdout)
 }

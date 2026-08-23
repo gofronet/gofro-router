@@ -59,4 +59,14 @@ export type Status = {
   devices: Device[];
 };
 
+export type UpdateState = 'idle' | 'checking' | 'available' | 'downloading' | 'installing' | 'success' | 'error';
+
+export type UpdateStatus = {
+  schema: 1;
+  installed_version: string;
+  state: UpdateState;
+  version?: string;
+  message?: string;
+};
+
 export type Mutate = (kind: string, path: string, init: RequestInit) => Promise<boolean>;

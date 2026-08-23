@@ -39,10 +39,22 @@ for file in "$UPDATER_BINARY" "$UPDATE_PUBLIC_KEY" "$MIGRATION_SCRIPT" "$PI_AGEN
   [[ -f $file ]] || die "$file not found"
 done
 "$UPDATER_BINARY" --self-check >/dev/null
+UPDATER_VERSION=$(binary_version "$UPDATER_BINARY") || die "updater does not report a version"
 SOURCE_VERSION=$(binary_version "$PI_AGENT" || true)
 if [[ -z $SOURCE_VERSION ]]; then
   [[ $BOOTSTRAP_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "set BOOTSTRAP_VERSION for a legacy agent"
   SOURCE_VERSION=$BOOTSTRAP_VERSION
+fi
+[[ ! -e $CURRENT || -L $CURRENT ]] || die "current release is not a symlink"
+if [[ -L $CURRENT ]]; then
+  EXISTING=$(readlink -f "$CURRENT")
+  [[ $EXISTING == "$RELEASES/"* && ${EXISTING#"$RELEASES/"} != */* ]] || die "invalid current release link"
+  EXISTING_VERSION=$(binary_version "$CURRENT/pi-agent" || true)
+  if [[ -z $EXISTING_VERSION ]]; then
+    [[ $BOOTSTRAP_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "current agent does not report a version"
+    EXISTING_VERSION=$BOOTSTRAP_VERSION
+  fi
+  [[ $EXISTING_VERSION == 0.1.0 || $EXISTING_VERSION == "$UPDATER_VERSION" ]] || die "upgrade existing devices through a signed release"
 fi
 
 install -d -m 755 "$RELEASES" "$STATE" /etc/maxos-game-tunnel
@@ -75,12 +87,16 @@ if [[ -z $CURRENT_VERSION ]]; then
   CURRENT_VERSION=$BOOTSTRAP_VERSION
 fi
 [[ ${RESOLVED##*/} == "$CURRENT_VERSION" ]] || die "current release directory does not match its version"
+[[ $CURRENT_VERSION == 0.1.0 || $CURRENT_VERSION == "$UPDATER_VERSION" ]] || die "upgrade existing devices through a signed release"
 if [[ $CURRENT_VERSION == 0.1.0 ]]; then
   install -m 755 "$UPDATER_BINARY" "$CURRENT/gofro-updater"
   install -m 755 "$MIGRATION_SCRIPT" "$CURRENT/migrate.sh"
 else
   [[ -x $CURRENT/gofro-updater && -x $CURRENT/migrate.sh ]] || die "current release is incomplete"
 fi
+for rules in /etc/maxos-game-tunnel/pi-vpn.nft /etc/maxos-game-tunnel/pi-bypass.nft; do
+  [[ ! -f $rules ]] || sed -i 's/tcp dport { 53, 80 }/tcp dport { 53, 80, 8080 }/' "$rules"
+done
 ln -sfn "$CURRENT/pi-agent" /usr/local/bin/pi-agent
 ln -sfn "$CURRENT/wg-relay" /usr/local/bin/wg-relay
 install -m 755 "$UPDATER_BINARY" /usr/local/bin/gofro-updater
@@ -117,14 +133,48 @@ After=network-online.target gofro-update-recovery.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/gofro-updater
-ExecStopPost=/usr/local/bin/gofro-updater --recover-runtime
+ExecStart=/usr/bin/flock /run/gofro-updater.lock /usr/local/bin/gofro-updater
+ExecStopPost=/usr/bin/flock /run/gofro-updater.lock /usr/local/bin/gofro-updater --recover-runtime
 TimeoutStartSec=15min
 TimeoutStopSec=15min
 Nice=10
 IOSchedulingClass=idle
 PrivateTmp=yes
 ProtectHome=yes
+EOF
+
+cat > /etc/systemd/system/gofro-updater-check.service <<'EOF'
+[Unit]
+Description=Check for Gofro Router updates
+Requires=gofro-update-recovery.service
+Wants=network-online.target
+After=network-online.target gofro-update-recovery.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flock /run/gofro-updater.lock /usr/local/bin/gofro-updater --check
+ExecStopPost=/usr/bin/flock /run/gofro-updater.lock /usr/local/bin/gofro-updater --recover-runtime
+TimeoutStartSec=15min
+TimeoutStopSec=15min
+PrivateTmp=yes
+ProtectHome=yes
+EOF
+
+cat > /etc/systemd/system/gofro-updater-api.service <<'EOF'
+[Unit]
+Description=Gofro Router updater API
+Requires=maxos-game-network.service
+After=network-online.target maxos-game-network.service
+
+[Service]
+ExecStart=/usr/local/lib/maxos-game-tunnel/current/gofro-updater --serve
+Restart=always
+RestartSec=2
+PrivateTmp=yes
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
 cat > /etc/systemd/system/gofro-updater.timer <<'EOF'
@@ -167,4 +217,9 @@ EOF
 
 sync -f /etc/systemd/system
 systemctl daemon-reload
-systemctl enable --now gofro-update-recovery.service gofro-updater.timer
+systemctl enable --now gofro-update-recovery.service gofro-updater-api.service gofro-updater.timer
+for _ in {1..20}; do
+  curl --fail --silent --max-time 1 "http://${STATUS_ADDRESS}:8080/api/status" >/dev/null && exit 0
+  sleep 0.25
+done
+die "updater API did not become ready"

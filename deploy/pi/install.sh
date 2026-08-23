@@ -53,7 +53,7 @@ for ((i = 0; i < ${#route[@]} - 1; i++)); do
 done
 [[ ${UPLINK_INTERFACE:-} != wlan0 ]] || die "refusing to replace wlan0 while it is the active uplink; connect Ethernet first"
 apt-get update
-apt-get install -y --no-install-recommends network-manager wireguard-tools dnsmasq nftables iw curl ca-certificates openssl coreutils tar
+apt-get install -y --no-install-recommends network-manager wireguard-tools dnsmasq nftables iw curl ca-certificates openssl coreutils tar util-linux
 systemctl is-active --quiet NetworkManager || die "NetworkManager is not active"
 ip link show wlan0 >/dev/null 2>&1 || die "wlan0 not found"
 if command -v raspi-config >/dev/null; then
@@ -140,7 +140,7 @@ table inet maxos_pi {
   chain input {
     type filter hook input priority filter; policy accept;
     iifname "wlan0" udp dport { 53, 67 } accept
-    iifname "wlan0" tcp dport { 53, 80 } accept
+    iifname "wlan0" tcp dport { 53, 80, 8080 } accept
     iifname "wlan0" ip protocol icmp accept
     iifname "wlan0" drop
   }
@@ -159,7 +159,7 @@ table inet maxos_pi {
   chain input {
     type filter hook input priority filter; policy accept;
     iifname "wlan0" udp dport { 53, 67 } accept
-    iifname "wlan0" tcp dport { 53, 80 } accept
+    iifname "wlan0" tcp dport { 53, 80, 8080 } accept
     iifname "wlan0" ip protocol icmp accept
     iifname "wlan0" drop
   }

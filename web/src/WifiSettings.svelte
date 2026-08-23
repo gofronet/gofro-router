@@ -3,25 +3,33 @@
   import ExternalLink from 'lucide-svelte/icons/external-link';
   import Globe2 from 'lucide-svelte/icons/globe-2';
   import KeyRound from 'lucide-svelte/icons/key-round';
+  import RefreshCw from 'lucide-svelte/icons/refresh-cw';
   import Route from 'lucide-svelte/icons/route';
   import Router from 'lucide-svelte/icons/router';
   import Wifi from 'lucide-svelte/icons/wifi';
-  import type { Status } from './types';
+  import type { Status, UpdateState, UpdateStatus } from './types';
 
-  let { status, busy, mutation, reconnectSsid, setMode, saveAp, resumePolling }: {
+  let { status, busy, mutation, reconnectSsid, updateStatus, updateError, updateAction, setMode, saveAp, resumePolling, checkUpdate, startUpdate }: {
     status: Status;
     busy: boolean;
     mutation: string | null;
     reconnectSsid: string | null;
+    updateStatus: UpdateStatus | null;
+    updateError: string;
+    updateAction: 'check' | 'start' | null;
     setMode: (enabled: boolean) => Promise<void>;
     saveAp: (ssid: string, password: string) => Promise<boolean>;
     resumePolling: () => Promise<void>;
+    checkUpdate: () => Promise<void>;
+    startUpdate: () => Promise<void>;
   } = $props();
 
   let ssid = $state('');
   let password = $state('');
   let validationError = $state('');
   let initialized = $state(false);
+  const activeUpdateStates: UpdateState[] = ['checking', 'downloading', 'installing'];
+  const updating = $derived(updateStatus !== null && activeUpdateStates.includes(updateStatus.state));
 
   $effect(() => {
     if (!initialized) {
@@ -43,6 +51,19 @@
     }
     validationError = '';
     if (await saveAp(nextSsid, password)) password = '';
+  }
+
+  function updateText() {
+    if (!updateStatus) return updateError ? 'Сервис обновлений недоступен' : 'Получаем состояние обновлений';
+    return {
+      idle: updateStatus.version ? 'Установлена актуальная версия' : 'Нажмите, чтобы проверить новую версию',
+      checking: 'Проверяем подписанный release',
+      available: `Доступна версия ${updateStatus.version ?? ''}`,
+      downloading: 'Скачиваем и проверяем подпись',
+      installing: 'Устанавливаем и проверяем подключение',
+      success: `Версия ${updateStatus.version ?? ''} успешно установлена`,
+      error: updateStatus.message || 'Обновление не выполнено'
+    }[updateStatus.state];
   }
 </script>
 
@@ -108,6 +129,22 @@
             <div class="flex justify-between gap-3 border-t border-[#ececef] py-3.5"><dt class="text-xs text-[#74747d]">Шлюз</dt><dd class="m-0 break-words text-right font-mono text-xs">{status.ap.address || 'Нет данных'}</dd></div>
             <div class="flex justify-between gap-3 border-t border-[#ececef] py-3.5"><dt class="text-xs text-[#74747d]">Домен</dt><dd class="m-0 break-words text-right font-mono text-xs">{status.ap.domain || 'gofrowifi.net'}</dd></div>
           </dl>
+        </article>
+        <article class="min-w-0 overflow-hidden rounded-[28px] border border-[#dedee1] bg-white p-5 shadow-sm sm:p-6" aria-labelledby="update-title">
+          <div class="mb-4.5 grid size-[50px] place-items-center rounded-2xl bg-[#f0f0f2]"><RefreshCw class={updating ? 'animate-spin' : ''} size={22} /></div>
+          <span class="text-xs text-[#74747d]">Система</span>
+          <h2 class="mb-1.5 mt-1 text-xl font-bold tracking-[-0.04em]" id="update-title">Обновление ПО</h2>
+          <p class="m-0 text-xs leading-relaxed text-[#74747d]">Текущая версия: <strong class="text-[#09090b]">{updateStatus?.installed_version ?? status.version}</strong></p>
+          <p class={`mb-4 mt-3 text-xs leading-relaxed ${updateStatus?.state === 'error' || updateError ? 'text-red-700' : 'text-[#74747d]'}`} role={updateStatus?.state === 'error' || updateError ? 'alert' : undefined}>{updateError || updateText()}</p>
+          {#if updating}
+            <progress class="mb-1 h-2 w-full overflow-hidden rounded-full accent-[#09090b]" aria-label={updateText()}></progress>
+          {:else if updateStatus?.state === 'available'}
+            <button class="min-h-12 w-full rounded-2xl border border-[#09090b] bg-[#09090b] px-4 text-xs font-bold text-white" type="button" disabled={busy} onclick={startUpdate}>{updateAction === 'start' ? 'Запускаем…' : `Установить ${updateStatus.version}`}</button>
+          {:else if updateStatus?.state === 'success'}
+            <button class="min-h-12 w-full rounded-2xl border border-[#09090b] bg-[#09090b] px-4 text-xs font-bold text-white" type="button" disabled={busy} onclick={checkUpdate}>Проверить снова</button>
+          {:else}
+            <button class="min-h-12 w-full rounded-2xl border border-[#09090b] bg-[#09090b] px-4 text-xs font-bold text-white" type="button" disabled={busy} onclick={checkUpdate}>{updateAction === 'check' ? 'Проверяем…' : 'Проверить обновления'}</button>
+          {/if}
         </article>
         <article class="flex min-w-0 gap-3 rounded-[20px] border border-[#dedee1] bg-white p-4">
           <KeyRound class="shrink-0" size={19} />

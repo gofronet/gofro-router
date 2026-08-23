@@ -8,7 +8,7 @@
   import Home from './Home.svelte';
   import Servers from './Servers.svelte';
   import WifiSettings from './WifiSettings.svelte';
-  import type { Mutate, Status } from './types';
+  import type { Mutate, Status, UpdateState, UpdateStatus } from './types';
 
   type Screen = 'home' | 'analytics' | 'servers' | 'wifi';
 
@@ -27,10 +27,20 @@
   let mutation = $state<string | null>(null);
   let screen = $state<Screen>('home');
   let reconnectSsid = $state<string | null>(null);
+  let updateStatus = $state<UpdateStatus | null>(null);
+  let updateError = $state('');
+  let updatePollError = $state('');
+  let updateAction = $state<'check' | 'start' | null>(null);
   let pollInFlight = false;
+  let updaterPollInFlight = false;
   let statusVersion = 0;
+  let updaterVersion = 0;
+  let observedInstalledVersion: string | null = null;
 
-  const busy = $derived(mutation !== null);
+  const activeUpdateStates: UpdateState[] = ['checking', 'downloading', 'installing'];
+  const updateActive = $derived(updateStatus !== null && activeUpdateStates.includes(updateStatus.state));
+  const updaterError = $derived(updateError || updatePollError);
+  const busy = $derived(mutation !== null || updateActive || updateAction !== null);
 
   function message(error: unknown) {
     return error instanceof Error ? error.message : 'Неизвестная ошибка';
@@ -41,8 +51,7 @@
     return screens.includes(hash as Screen) ? hash as Screen : 'home';
   }
 
-  async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json' } });
+  async function parseResponse<T>(response: Response): Promise<T> {
     const text = await response.text();
     let body: unknown = null;
     if (text) {
@@ -62,6 +71,14 @@
     return body as T;
   }
 
+  async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+    return parseResponse(await fetch(path, { ...init, headers: { 'Content-Type': 'application/json' } }));
+  }
+
+  async function updaterApi<T>(path: string, method = 'GET'): Promise<T> {
+    return parseResponse(await fetch(`http://${location.hostname}:8080${path}`, { method, cache: 'no-store' }));
+  }
+
   async function refresh() {
     if (pollInFlight || mutation || reconnectSsid) return;
     pollInFlight = true;
@@ -69,6 +86,7 @@
     try {
       const nextStatus = await api<Status>('/api/status');
       if (version === statusVersion) {
+        observedInstalledVersion ??= nextStatus.version;
         status = nextStatus;
         pollError = '';
       }
@@ -78,6 +96,64 @@
       loading = false;
       pollInFlight = false;
     }
+  }
+
+  async function refreshUpdate() {
+    if (updaterPollInFlight || updateAction) return;
+    updaterPollInFlight = true;
+    const version = updaterVersion;
+    try {
+      const next = await updaterApi<UpdateStatus>('/api/status');
+      if (version === updaterVersion) {
+        updateStatus = next;
+        updateError = '';
+        updatePollError = '';
+        if (next.state === 'success' && observedInstalledVersion && observedInstalledVersion !== next.installed_version) location.reload();
+        observedInstalledVersion ??= next.installed_version;
+      }
+    } catch (error) {
+      if (version === updaterVersion) updatePollError = message(error);
+    } finally {
+      updaterPollInFlight = false;
+    }
+  }
+
+  async function requestUpdate(kind: 'check' | 'start', path: string) {
+    if (updateAction || updateActive) return false;
+    updaterVersion++;
+    updateAction = kind;
+    updateError = '';
+    try {
+      updateStatus = await updaterApi<UpdateStatus>(path, 'POST');
+      return true;
+    } catch (error) {
+      updateError = message(error);
+      return false;
+    } finally {
+      updateAction = null;
+    }
+  }
+
+  async function checkUpdate() {
+    await requestUpdate('check', '/api/check');
+  }
+
+  async function startUpdate() {
+    if (!confirm('Во время установки VPN и панель будут недоступны несколько секунд. Продолжить?')) return;
+    await requestUpdate('start', '/api/start');
+  }
+
+  function updateLabel() {
+    if (!updateStatus) return '';
+    return {
+      idle: updateStatus.version ? 'Установлена актуальная версия' : 'Обновления ещё не проверялись',
+      checking: 'Проверяем наличие обновлений',
+      available: `Доступна версия ${updateStatus.version ?? ''}`,
+      downloading: 'Скачиваем и проверяем пакет',
+      installing: 'Устанавливаем обновление',
+      success: `Версия ${updateStatus.version ?? ''} установлена`,
+      error: updateStatus.message || 'Обновление не выполнено'
+    }[updateStatus.state];
   }
 
   const mutate: Mutate = async (kind, path, init) => {
@@ -129,10 +205,13 @@
     addEventListener('hashchange', onHashChange);
     scrollTo(0, 0);
     void refresh();
+    void refreshUpdate();
     const interval = window.setInterval(refresh, 2000);
+    const updaterInterval = window.setInterval(refreshUpdate, 1000);
     return () => {
       removeEventListener('hashchange', onHashChange);
       window.clearInterval(interval);
+      window.clearInterval(updaterInterval);
     };
   });
 </script>
@@ -171,8 +250,11 @@
   </header>
 
   <main class="mx-auto w-full min-w-0 max-w-[1380px] px-4 pb-[calc(5.75rem+env(safe-area-inset-bottom))] pt-6 sm:px-7 lg:px-[clamp(2.25rem,4vw,4.25rem)] lg:py-12">
+    {#if updateActive}
+      <div class="mb-4 flex items-center gap-3 rounded-2xl border border-[#c9d7eb] bg-[#f3f7fc] px-4 py-3 text-xs leading-relaxed text-[#344b6a]" role="status" aria-live="polite"><span class="size-2 shrink-0 animate-pulse rounded-full bg-[#344b6a]"></span><span class="min-w-0 flex-1">{updatePollError ? 'Связь с сервисом обновлений потеряна. Обновление может продолжаться в фоне.' : `${updateLabel()}. Не выключайте устройство.`}</span>{#if updatePollError}<button class="min-h-10 shrink-0 rounded-xl border border-[#344b6a] bg-transparent px-3 font-bold" type="button" onclick={() => void refreshUpdate()}>Переподключиться</button>{/if}</div>
+    {/if}
     {#if pollError && status}
-      <div class="mb-4 flex items-center justify-between gap-3 rounded-2xl border border-[#dfc99e] bg-[#fffaf0] px-4 py-3 text-xs leading-relaxed text-[#6d5730]" role="status"><span><strong>Нет свежих данных.</strong> Показано последнее состояние: {pollError}</span></div>
+      <div class="mb-4 flex items-center justify-between gap-3 rounded-2xl border border-[#dfc99e] bg-[#fffaf0] px-4 py-3 text-xs leading-relaxed text-[#6d5730]" role="status"><span>{updateActive ? 'Контроллер перезапускается, прогресс обновления продолжает работать.' : `Нет свежих данных. Показано последнее состояние: ${pollError}`}</span></div>
     {/if}
     {#if actionError}
       <div class="mb-4 flex items-center justify-between gap-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-xs leading-relaxed text-red-700" role="alert"><span><strong>Операция не выполнена.</strong> {actionError}</span><button class="min-h-11 border-0 bg-transparent font-bold" type="button" aria-label="Закрыть сообщение об ошибке" onclick={() => actionError = ''}>Закрыть</button></div>
@@ -180,6 +262,8 @@
 
     {#if loading}
       <section class="flex min-h-[55vh] flex-col items-center justify-center text-center" aria-live="polite"><span class="size-8 animate-spin rounded-full border-[3px] border-[#dedee1] border-t-[#09090b]"></span><strong class="mt-5">Подключаемся к GofroWiFi</strong><p class="mt-2 text-sm text-[#74747d]">Получаем состояние сети</p></section>
+    {:else if !status && updateActive}
+      <section class="flex min-h-[55vh] flex-col items-center justify-center text-center" aria-live="polite"><span class="size-8 animate-spin rounded-full border-[3px] border-[#dedee1] border-t-[#09090b]"></span><strong class="mt-5">{updateLabel()}</strong><p class="mt-2 text-sm text-[#74747d]">Панель подключится снова после перезапуска контроллера.</p></section>
     {:else if !status}
       <section class="mx-auto mt-8 flex min-h-[55vh] max-w-xl flex-col items-center justify-center rounded-[28px] border border-[#dedee1] bg-white p-8 text-center shadow-sm" role="alert"><span class="mb-5 flex size-14 items-end justify-center gap-[3px] rounded-[18px] bg-[#09090b] px-3 py-3"><i class="h-2 w-1 rounded-sm bg-white"></i><i class="h-4 w-1 rounded-sm bg-white"></i><i class="h-6 w-1 rounded-sm bg-white"></i></span><h1 class="m-0 text-2xl font-bold">Устройство не отвечает</h1><p class="mt-2 text-sm text-[#74747d]">{pollError || 'Не удалось получить состояние контроллера.'}</p><button class="mt-6 min-h-13 rounded-2xl border border-[#09090b] bg-[#09090b] px-5 font-bold text-white" type="button" onclick={refresh}>Повторить</button></section>
     {:else if screen === 'home'}
@@ -189,7 +273,7 @@
     {:else if screen === 'servers'}
       <Servers {status} {busy} {mutation} {mutate} />
     {:else}
-      <WifiSettings {status} {busy} {mutation} {reconnectSsid} {setMode} {saveAp} {resumePolling} />
+      <WifiSettings {status} {busy} {mutation} {reconnectSsid} {updateStatus} updateError={updaterError} {updateAction} {setMode} {saveAp} {resumePolling} {checkUpdate} {startUpdate} />
     {/if}
   </main>
 
