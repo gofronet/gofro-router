@@ -22,6 +22,11 @@ or is not reachable from `main`. Only release administrators can create `v*`
 tags. The signing job also requires approval in the protected `release` GitHub
 environment. Published release assets are immutable.
 
+Before upgrading any pre-`v0.3.1` device, widen its VPS peer subnet from `/29`
+to the matching `/24` by rerunning `maxos-server add-peer` with the existing
+public key, tunnel IP, and actual subnet (for example,
+`--subnet 10.203.1.0/24`). Remove the old `/29` route afterwards.
+
 ## Bootstrap existing 0.1 devices
 
 The first updater installation is intentionally manual because 0.1 has no
