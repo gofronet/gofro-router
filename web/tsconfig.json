@@ -3,6 +3,7 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "allowArbitraryExtensions": true,
     "allowJs": true,
     "checkJs": true,
     "esModuleInterop": true,
