@@ -13,8 +13,8 @@ partially uploaded release is never installed.
 3. Create and push the matching protected tag:
 
    ```bash
-   git tag v0.3.0
-   git push origin v0.3.0
+   git tag v0.3.2
+   git push origin v0.3.2
    ```
 
 The release job rejects a tag that differs from any workspace package version

@@ -1,57 +1,120 @@
-# GofroWiFi Gaming Tunnel
+<p align="center">
+  <img src="./docs/readme-hero.svg" width="100%" alt="GofroWiFi — локальная панель управления VPN, маршрутом и состоянием сети">
+</p>
 
-Raspberry Pi 5 turns its built-in Wi-Fi into a dedicated PS5 network. VPN mode routes the subnet through kernel WireGuard and an obfuscated UDP relay to a Linux VPS. Direct mode bypasses the tunnel and uses NAT on the Pi.
+<p align="center">
+  Превращает Raspberry Pi 5 в отдельную Wi‑Fi-сеть для PS5: защищённый маршрут через WireGuard и VPS или прямой доступ в интернет — с управлением из локальной web-панели.
+</p>
 
-## Packet path
+<p align="center">
+  <img alt="Rust 2024" src="https://img.shields.io/badge/Rust_2024-09090b?style=flat-square&logo=rust&logoColor=white">
+  <img alt="WireGuard" src="https://img.shields.io/badge/WireGuard-tunnel-09090b?style=flat-square&logo=wireguard&logoColor=white">
+  <img alt="Raspberry Pi 5" src="https://img.shields.io/badge/Raspberry_Pi_5-09090b?style=flat-square&logo=raspberrypi&logoColor=white">
+  <img alt="Svelte 5" src="https://img.shields.io/badge/Svelte_5-09090b?style=flat-square&logo=svelte&logoColor=white">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-09090b?style=flat-square&logo=typescript&logoColor=white">
+</p>
 
-```text
-VPN:   PS5 -> wlan0 -> gt0 -> local relay -> VPS relay -> gt0 -> VPS NAT -> Internet
-Direct: PS5 -> wlan0 -> Pi NAT -> eth0 -> home router -> Internet
+## Что это
+
+**GofroWiFi** — набор сервисов для Raspberry Pi и VPS, который создаёт отдельную Wi‑Fi-сеть для игровой консоли. Pi поднимает точку доступа, локальный агент обслуживает панель управления, а трафик направляется либо через зашифрованный WireGuard-туннель и UDP-relay, либо напрямую через NAT.
+
+В web-панели можно:
+
+- видеть состояние туннеля, активный маршрут и трафик;
+- наблюдать CPU, память, температуру, uptime и подключённые Wi‑Fi-устройства;
+- добавлять, изменять, выбирать и удалять VPN-профили;
+- явно переключаться между режимами **VPN** и **DIRECT**;
+- менять SSID и пароль точки доступа.
+
+## Как работает
+
+```mermaid
+flowchart LR
+    PS5[PS5] --> WIFI[Wi‑Fi]
+    WIFI --> PI[Raspberry Pi]
+
+    subgraph VPN[VPN]
+        PI --> GT0[gt0 · WireGuard]
+        GT0 --> RELAY[UDP relay]
+        RELAY --> VPS[VPS NAT]
+        VPS --> NET[Internet]
+    end
+
+    subgraph DIRECT[DIRECT]
+        PI --> NAT[Pi NAT]
+        NAT --> ROUTER[Домашний роутер]
+        ROUTER --> NET
+    end
+
+    KILL[Kill switch: при недоступном gt0\nтрафик к uplink блокируется] -.-> GT0
 ```
 
-VPN mode keeps the kill switch: if `gt0` is down, table 100 has an unreachable default and nftables blocks forwarding to the home uplink. Direct mode is an explicit bypass selected in the dashboard.
+| Режим | Маршрут | Назначение |
+| --- | --- | --- |
+| **VPN** | `wlan0 → gt0 → relay → VPS NAT` | Трафик идёт через VPS; kill switch сохраняется |
+| **DIRECT** | `wlan0 → Pi NAT → eth0 → домашний роутер` | Явный обход туннеля для прямого доступа |
 
-## Requirements
+## Компоненты
 
-- Raspberry Pi OS Lite 64-bit on Raspberry Pi 5
-- Pi connected to the home router through Ethernet
-- Ubuntu or Debian VPS with a public IPv4 address
-- Rust 1.85 or newer on the machines used to build the binaries
-- Bun 1.3.14 for the embedded web UI
-- UDP port `8443` allowed by the VPS provider and host firewall
+```mermaid
+flowchart TB
+    WEB[web/\nSvelte-панель управления] -->|HTTP API| AGENT[pi-agent\nточка доступа, маршрутизация и статика]
+    AGENT -->|зашифрованные WireGuard-датаграммы| RELAY[wg-relay\nобфусцированный UDP-транспорт]
+    RELAY --> SERVER[maxos-server\nWireGuard, peer-ы и NAT на VPS]
+    CORE[tunnel-core\nобщая логика туннеля] -.-> AGENT
+    CORE -.-> RELAY
+    CORE -.-> SERVER
+```
 
-## Build
+| Компонент | Ответственность |
+| --- | --- |
+| `pi-agent` | API устройства, управление точкой доступа и локальная раздача web-интерфейса |
+| `wg-relay` | Передача уже зашифрованных WireGuard-датаграмм через UDP |
+| `maxos-server` | Управление peer-ами WireGuard, настройка VPS и NAT |
+| `tunnel-core` | Общая логика команд и конфигурации туннеля |
+| `web/` | Svelte 5 SPA для состояния, профилей VPN и параметров Wi‑Fi |
+
+## Быстрый старт
+
+### Требования
+
+- Raspberry Pi 5 с Raspberry Pi OS Lite 64-bit и Ethernet-подключением к домашнему роутеру;
+- VPS на Ubuntu или Debian с публичным IPv4;
+- Rust 1.85+ для сборки сервисов;
+- Bun 1.3.14 для воспроизводимой сборки web-интерфейса;
+- открытый UDP-порт `8443` на VPS и его firewall.
+
+### Сборка
+
+Сначала соберите web-интерфейс: `pi-agent` встраивает получившиеся assets.
 
 ```bash
 (cd web && bun install --frozen-lockfile && bun run build)
 cargo build --workspace --release
 ```
 
-Build the web bundle before the Rust binaries because `pi-agent` embeds the generated assets.
+## Развёртывание
 
-The Cargo workspace keeps each deployable process separate: `pi-agent`, `maxos-server`,
-`wg-relay`, and `gofro-updater`. Shared WireGuard command handling lives in `tunnel-core`.
+### 1. VPS
 
-## 1. Set up the VPS
-
-Run from the repository root on the VPS:
+В корне репозитория на VPS:
 
 ```bash
 cargo build --release -p maxos-server -p wg-relay
 sudo ./deploy/server/install.sh
 ```
 
-The installer prints the server public key. It installs WireGuard, enables IPv4 forwarding, configures nftables NAT for `10.203.0.0/16`, and starts the WireGuard and relay services. One relay process accepts up to 256 Pi clients on the same public port and expires idle sessions after three minutes. Only the obfuscated relay port must be public.
+Скрипт выводит публичный ключ сервера, включает IPv4 forwarding, настраивает NAT для `10.203.0.0/16` и запускает WireGuard с relay. Один relay принимает до 256 клиентов на общем публичном порту и удаляет неактивные сессии через три минуты.
 
-The VPS interface is detected automatically. Override it when necessary:
+При необходимости укажите интерфейс и порты явно:
 
 ```bash
 sudo WAN_INTERFACE=ens3 WG_PORT=51820 RELAY_PORT=8443 ./deploy/server/install.sh
 ```
 
-## 2. Set up the Pi
+### 2. Raspberry Pi
 
-The Pi must use Ethernet as its uplink before running this command. The installer refuses to continue when `wlan0` is the active uplink.
+Перед установкой Pi должна использовать Ethernet как uplink: установщик остановится, если активным uplink остаётся `wlan0`.
 
 ```bash
 cargo build --release -p pi-agent -p wg-relay -p gofro-updater
@@ -63,7 +126,7 @@ sudo \
   ./deploy/pi/install.sh
 ```
 
-Optional settings:
+Доступные настройки:
 
 ```text
 AP_SSID="GofroNET WiFi"
@@ -73,11 +136,11 @@ GAME_SUBNET=10.203.1.0/24
 GAME_GATEWAY=10.203.1.1/24
 ```
 
-The installer prints the Pi public key and the exact `maxos-server add-peer` command.
+Установщик напечатает публичный ключ Pi и команду для добавления peer на VPS.
 
-## 3. Add the Pi on the VPS
+### 3. Добавьте Pi на VPS
 
-Run the command printed by the Pi installer. Its shape is:
+Выполните команду, которую вывел Pi-установщик:
 
 ```bash
 sudo maxos-server add-peer \
@@ -86,37 +149,19 @@ sudo maxos-server add-peer \
   --subnet "10.203.1.0/24"
 ```
 
-Inspect peers:
+Проверить peer-ы:
 
 ```bash
 sudo maxos-server status
 ```
 
-## 4. Connect
+### 4. Подключитесь
 
-Connect a phone to `GofroNET WiFi`, then open `http://gofrowifi.net`. Connect the PS5 to the same SSID.
+Подключите телефон к `GofroNET WiFi` и откройте [http://gofrowifi.net](http://gofrowifi.net). Затем подключите PS5 к той же сети.
 
-The mobile-first GofroWiFi dashboard provides VPN/direct switching, system and per-device analytics, editable VPN profiles, and AP name/password settings. A server profile needs the VPS relay endpoint and WireGuard public key; install the server components and add the Pi peer on every VPS before selecting it.
+## Проверка и диагностика
 
-Useful checks on the Pi:
-
-```bash
-sudo wg show
-systemctl status maxos-wg-relay-client
-ip rule
-ip route show table 100
-sudo nft list table inet maxos_pi
-```
-
-Useful checks on the VPS:
-
-```bash
-sudo wg show
-systemctl status maxos-wg-relay-server
-sudo nft list table inet maxos_server
-```
-
-## Development checks
+Полный набор проверок разработки:
 
 ```bash
 cargo fmt --check
@@ -127,11 +172,34 @@ bash -n deploy/pi/*.sh
 bash -n deploy/server/install.sh
 ```
 
-## Automatic updates
+Полезные команды на Pi:
 
-The Pi checks signed stable GitHub releases every six hours. Updates switch all
-application binaries atomically and roll back after a failed service, API, or
-previously healthy VPN check. The Wi-Fi settings page can also check and install
-an update manually while showing durable progress from the independent updater
-API. See [RELEASING.md](RELEASING.md) for release, signature rotation,
-migration, and recovery procedures.
+```bash
+sudo wg show
+systemctl status maxos-wg-relay-client
+ip rule
+ip route show table 100
+sudo nft list table inet maxos_pi
+```
+
+На VPS:
+
+```bash
+sudo wg show
+systemctl status maxos-wg-relay-server
+sudo nft list table inet maxos_server
+```
+
+## Автоматические обновления
+
+Pi проверяет подписанные стабильные GitHub releases каждые шесть часов. Обновление
+атомарно переключает все бинарные файлы и откатывается при ошибке сервисов, API
+или ранее работавшего VPN. На странице Wi-Fi обновление также можно проверить и
+установить вручную с отображением прогресса. Процедуры выпуска, миграции и
+восстановления описаны в [RELEASING.md](RELEASING.md).
+
+## Ограничения
+
+- Система рассчитана на доверенную локальную сеть: авторизация в web-клиенте пока отсутствует.
+- API web-панели доступно по относительному префиксу `/api`.
+- VPN-профиль требует relay endpoint и публичный ключ WireGuard; перед его выбором серверные компоненты и peer Pi должны быть настроены на VPS.
