@@ -67,6 +67,7 @@ Useful commands:
 systemctl list-timers gofro-updater.timer
 sudo systemctl start gofro-updater.service
 journalctl -u gofro-updater.service
+curl http://10.203.1.1:8080/api/status
 cat /var/lib/maxos-game-tunnel/update/version
 ```
 

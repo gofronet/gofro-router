@@ -11,6 +11,7 @@ use crate::process;
 
 const AGENT_SERVICE: &str = "pi-agent.service";
 const RELAY_SERVICE: &str = "maxos-wg-relay-client.service";
+const UPDATER_API_SERVICE: &str = "gofro-updater-api.service";
 const MAX_HANDSHAKE_AGE: u64 = 120;
 
 #[derive(Debug, Deserialize)]
@@ -155,6 +156,31 @@ pub(crate) fn start_agent() -> Result<()> {
 
 pub(crate) fn start_relay() -> Result<()> {
     process::systemctl("start", RELAY_SERVICE)
+}
+
+pub(crate) fn restart_updater_api() -> Result<()> {
+    process::systemctl("restart", UPDATER_API_SERVICE)
+}
+
+pub(crate) fn wait_updater_api() -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match process::updater_api().and_then(|body| {
+            let status: serde_json::Value = serde_json::from_slice(&body)?;
+            ensure!(
+                status["schema"] == 1,
+                "updater API returned an invalid schema"
+            );
+            Ok(())
+        }) {
+            Ok(()) => return Ok(()),
+            Err(error) if Instant::now() < deadline => {
+                let _ = error;
+                thread::sleep(Duration::from_millis(250));
+            }
+            Err(error) => return Err(error).context("updater API health check timed out"),
+        }
+    }
 }
 
 #[cfg(test)]

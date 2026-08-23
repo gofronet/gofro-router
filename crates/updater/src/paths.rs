@@ -5,6 +5,7 @@ use semver::Version;
 pub(crate) const UPDATE_DIR: &str = "/var/lib/maxos-game-tunnel/update";
 pub(crate) const VERSION: &str = "/var/lib/maxos-game-tunnel/update/version";
 pub(crate) const PENDING: &str = "/var/lib/maxos-game-tunnel/update/pending.json";
+pub(crate) const PROGRESS: &str = "/var/lib/maxos-game-tunnel/update/status.json";
 pub(crate) const PUBLIC_KEY: &str = "/etc/maxos-game-tunnel/update-public.pem";
 pub(crate) const STATUS_ADDRESS: &str = "/etc/maxos-game-tunnel/status-address";
 pub(crate) const RELEASES: &str = "/usr/local/lib/maxos-game-tunnel/releases";

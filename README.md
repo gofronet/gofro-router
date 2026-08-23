@@ -131,5 +131,7 @@ bash -n deploy/server/install.sh
 
 The Pi checks signed stable GitHub releases every six hours. Updates switch all
 application binaries atomically and roll back after a failed service, API, or
-previously healthy VPN check. See [RELEASING.md](RELEASING.md) for release,
-signature rotation, migration, and recovery procedures.
+previously healthy VPN check. The Wi-Fi settings page can also check and install
+an update manually while showing durable progress from the independent updater
+API. See [RELEASING.md](RELEASING.md) for release, signature rotation,
+migration, and recovery procedures.

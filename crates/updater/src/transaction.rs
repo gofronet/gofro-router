@@ -3,6 +3,7 @@ use semver::Version;
 
 use crate::{
     bundle, paths, process,
+    progress::{self, UpdateProgress, UpdateState},
     state::{self, Pending, Phase},
     status,
 };
@@ -23,6 +24,10 @@ pub(crate) fn reconcile_updater() -> Result<()> {
 
 pub(crate) fn apply(mut pending: Pending) -> Result<()> {
     state::write_pending(&pending)?;
+    progress::write(&UpdateProgress::new(
+        UpdateState::Installing,
+        Some(&pending.versions()?.1),
+    ))?;
     if let Err(original) = activate(&mut pending) {
         return match rollback(&mut pending, true) {
             Ok(()) => Err(original),
@@ -50,7 +55,8 @@ fn activate(pending: &mut Pending) -> Result<()> {
     state::switch_current(&pending.release_path)?;
     status::start_relay()?;
     status::start_agent()?;
-    status::wait(&new, pending.baseline())
+    status::wait(&new, pending.baseline())?;
+    restart_updater_api(&new)
 }
 
 fn commit(pending: &mut Pending) -> Result<()> {
@@ -68,8 +74,9 @@ fn commit(pending: &mut Pending) -> Result<()> {
 fn finish(pending: &Pending) -> Result<()> {
     let (_, new) = pending.versions()?;
     state::write_version(&new)?;
+    bundle::install_updater(&pending.release_path, &pending.new_version)?;
     state::remove_pending()?;
-    bundle::install_updater(&pending.release_path, &pending.new_version)
+    progress::write(&UpdateProgress::new(UpdateState::Success, Some(&new)))
 }
 
 pub(crate) fn recover_pending(boot: bool) -> Result<bool> {
@@ -102,6 +109,7 @@ fn recover_activation(pending: &mut Pending) -> Result<()> {
     let (_, new) = pending.versions()?;
     if state::current_points_to(&pending.release_path)?
         && status::wait(&new, pending.baseline()).is_ok()
+        && restart_updater_api(&new).is_ok()
     {
         commit(pending)?;
         println!("Finalized pending update to {new}");
@@ -128,13 +136,18 @@ fn rollback(pending: &mut Pending, start_services: bool) -> Result<()> {
         )?;
     }
     state::switch_current(&pending.previous_target)?;
+    restart_updater_api(&old)?;
     if start_services {
         status::start_relay()?;
         status::start_agent()?;
         status::wait(&old, pending.baseline())?;
     }
     state::write_version(&old)?;
-    state::remove_pending()
+    state::remove_pending()?;
+    progress::write(&UpdateProgress::error(&format!(
+        "update to {} was rolled back",
+        pending.new_version
+    )))
 }
 
 fn stop_services(baseline: &status::Baseline) -> Result<()> {
@@ -150,4 +163,27 @@ fn stop_services(baseline: &status::Baseline) -> Result<()> {
     }
     ensure!(errors.is_empty(), "failed to stop {}", errors.join("; "));
     Ok(())
+}
+
+fn restart_updater_api(version: &Version) -> Result<()> {
+    if !has_updater_api(version) {
+        return Ok(());
+    }
+    status::restart_updater_api()?;
+    status::wait_updater_api()
+}
+
+fn has_updater_api(version: &Version) -> bool {
+    version >= &Version::new(0, 3, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn updater_api_starts_at_version_0_3() {
+        assert!(!has_updater_api(&Version::new(0, 2, 0)));
+        assert!(has_updater_api(&Version::new(0, 3, 0)));
+    }
 }
