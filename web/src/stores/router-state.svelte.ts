@@ -1,31 +1,26 @@
 import { modeService } from "../features/mode/service";
+import { routingService } from "../features/routing/service";
 import { serverService } from "../features/servers/service";
 import { statusService } from "../features/status/service";
-import { updateService } from "../features/update/service";
 import { wifiService } from "../features/wifi/service";
-import type { ServerInput, Status, UpdateStatus } from "../domain/models";
-
-const activeUpdateStates = ["checking", "downloading", "installing"];
+import type {
+  RoutingConfig,
+  RoutingTest,
+  ServerInput,
+  Status,
+} from "../domain/models";
 
 export class RouterState {
   private currentStatus = $state<Status | null>(null);
   private pollInFlight = false;
   private statusVersion = 0;
   private interval: number | null = null;
-  private updatePollInFlight = false;
-  private updaterVersion = 0;
-  private updaterInterval: number | null = null;
-  private observedInstalledVersion: string | null = null;
 
   loading = $state(true);
   pollError = $state("");
   actionError = $state("");
   mutation = $state<string | null>(null);
   reconnectSsid = $state<string | null>(null);
-  updateStatus = $state<UpdateStatus | null>(null);
-  updateError = $state("");
-  updatePollError = $state("");
-  updateAction = $state<"check" | "start" | null>(null);
 
   get status(): Status {
     if (!this.currentStatus) throw new Error("Status is not loaded yet");
@@ -37,41 +32,7 @@ export class RouterState {
   }
 
   get busy(): boolean {
-    return (
-      this.mutation !== null ||
-      this.updateActive ||
-      this.updateAction !== null
-    );
-  }
-
-  get updateActive(): boolean {
-    return (
-      this.updateStatus !== null &&
-      activeUpdateStates.includes(this.updateStatus.state)
-    );
-  }
-
-  get updaterError(): string {
-    return this.updateError || this.updatePollError;
-  }
-
-  get updateText(): string {
-    if (!this.updateStatus) {
-      return this.updaterError
-        ? "Сервис обновлений недоступен"
-        : "Получаем состояние обновлений";
-    }
-    return {
-      idle: this.updateStatus.version
-        ? "Установлена актуальная версия"
-        : "Нажмите, чтобы проверить новую версию",
-      checking: "Проверяем подписанный release",
-      available: `Доступна версия ${this.updateStatus.version ?? ""}`,
-      downloading: "Скачиваем и проверяем подпись",
-      installing: "Устанавливаем и проверяем подключение",
-      success: `Версия ${this.updateStatus.version ?? ""} успешно установлена`,
-      error: this.updateStatus.message || "Обновление не выполнено",
-    }[this.updateStatus.state];
+    return this.mutation !== null;
   }
 
   private message(error: unknown): string {
@@ -109,7 +70,6 @@ export class RouterState {
     try {
       const nextStatus = await statusService.get();
       if (version === this.statusVersion) {
-        this.observedInstalledVersion ??= nextStatus.version;
         this.currentStatus = nextStatus;
         this.pollError = "";
       }
@@ -123,83 +83,21 @@ export class RouterState {
     }
   };
 
-  refreshUpdate = async (): Promise<void> => {
-    if (this.updatePollInFlight || this.updateAction) return;
-
-    this.updatePollInFlight = true;
-    const version = this.updaterVersion;
-
-    try {
-      const next = await updateService.get();
-      if (version === this.updaterVersion) {
-        this.updateStatus = next;
-        this.updateError = "";
-        this.updatePollError = "";
-        if (
-          next.state === "success" &&
-          this.observedInstalledVersion &&
-          this.observedInstalledVersion !== next.installed_version
-        ) {
-          location.reload();
-        }
-        this.observedInstalledVersion ??= next.installed_version;
-      }
-    } catch (error) {
-      if (version === this.updaterVersion) {
-        this.updatePollError = this.message(error);
-      }
-    } finally {
-      this.updatePollInFlight = false;
-    }
-  };
-
   startPolling(): void {
     if (this.interval !== null) return;
     void this.refresh();
-    void this.refreshUpdate();
-    this.interval = window.setInterval(this.refresh, 2_000);
-    this.updaterInterval = window.setInterval(this.refreshUpdate, 1_000);
+    this.interval = window.setInterval(this.refresh, 5_000);
   }
 
   stopPolling(): void {
     if (this.interval === null) return;
     window.clearInterval(this.interval);
     this.interval = null;
-    if (this.updaterInterval !== null) {
-      window.clearInterval(this.updaterInterval);
-      this.updaterInterval = null;
-    }
   }
 
   clearActionError = (): void => {
     this.actionError = "";
   };
-
-  private requestUpdate = async (
-    kind: "check" | "start",
-    operation: () => Promise<UpdateStatus>,
-  ): Promise<boolean> => {
-    if (this.updateAction || this.updateActive) return false;
-
-    this.updaterVersion++;
-    this.updateAction = kind;
-    this.updateError = "";
-    try {
-      this.updateStatus = await operation();
-      return true;
-    } catch (error) {
-      this.updateError = this.message(error);
-      return false;
-    } finally {
-      this.updateAction = null;
-    }
-  };
-
-  checkUpdate = (): Promise<boolean> =>
-    this.requestUpdate("check", updateService.check);
-
-  startUpdate = (): Promise<boolean> =>
-    this.requestUpdate("start", updateService.start);
 
   setMode = async (vpnEnabled: boolean): Promise<void> => {
     if (
@@ -243,6 +141,12 @@ export class RouterState {
     if (saved) this.reconnectSsid = ssid;
     return saved;
   };
+
+  saveRouting = (input: RoutingConfig): Promise<boolean> =>
+    this.mutate("routing", () => routingService.save(input));
+
+  testRouting = (value: string): Promise<RoutingTest> =>
+    routingService.test(value);
 
   resumePolling = async (): Promise<void> => {
     this.reconnectSsid = null;

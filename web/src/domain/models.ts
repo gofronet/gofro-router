@@ -1,9 +1,13 @@
 export type {
   Device,
+  DomainRule,
   HistoryPoint,
+  IpRule,
+  RouteTarget,
+  RoutingConfig,
+  RoutingTest,
   Server,
   ServerInput,
   Status,
-  UpdateStatus,
   WifiInput,
 } from "../api/schemas";

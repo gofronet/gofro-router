@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+[ "$#" = 1 ] || [ "$#" = 2 ] || { echo "Usage: $0 SSID [PASSWORD]" >&2; exit 2; }
+
+found=0
+for section in $(uci show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+	[ "$(uci -q get "wireless.$section.mode")" = ap ] || continue
+	uci set "wireless.$section.ssid=$1"
+	if [ "$#" = 2 ]; then
+		uci set "wireless.$section.encryption=sae-mixed"
+		uci set "wireless.$section.key=$2"
+	fi
+	found=1
+done
+[ "$found" = 1 ] || { echo 'No OpenWrt access point found' >&2; exit 1; }
+
+uci commit wireless
+(sleep 2; wifi reload) >/dev/null 2>&1 &

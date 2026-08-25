@@ -1,0 +1,8 @@
+config main 'main'
+	option listen '10.203.1.1:8080'
+	option interface 'gt0'
+	option lan_interface 'br-lan'
+	option wifi_interface ''
+	option lan_address '10.203.1.1'
+	option lan_subnet '10.203.1.0/24'
+	option dns_upstream '1.1.1.1:53'

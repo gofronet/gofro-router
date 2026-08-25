@@ -1,15 +1,14 @@
 [workspace]
 members = [
-  "crates/pi-agent",
-  "crates/server",
-  "crates/tunnel-core",
-  "crates/updater",
-  "crates/wg-relay",
+  "crates/gofro-agent",
+  "crates/gofro-relay",
+  "crates/gofro-server",
+  "crates/wireguard-status",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.3.3"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
 publish = false
@@ -18,14 +17,20 @@ publish = false
 anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
+hickory-proto = "0.25"
+idna = "1"
+ipnet = "2"
+libc = "0.2"
+prost = "0.14"
+regex = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-semver = "1"
-tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal"] }
+socket2 = { version = "0.6", features = ["all"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tun = "0.7"
-tunnel-core = { path = "crates/tunnel-core" }
+wireguard-status = { path = "crates/wireguard-status" }
 
 [profile.release]
 lto = true

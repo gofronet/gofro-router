@@ -1,0 +1,42 @@
+#!/bin/sh /etc/rc.common
+# shellcheck disable=SC2034
+
+START=99
+
+install_status_healthy() {
+	[ "$(jsonfilter -i "$status_file" -e '@.version' 2>/dev/null)" = "$1" ] || return 1
+	[ "$(jsonfilter -i "$status_file" -e '@.routing.dns_active' 2>/dev/null)" = true ] || return 1
+	[ "$(jsonfilter -i "$status_file" -e '@.routing.dataplane_active' 2>/dev/null)" = true ]
+}
+
+finalize_install() {
+	state_dir=${STATE_DIR:-/etc/gofro}
+	pending=$state_dir/install-pending
+	[ -s "$pending" ] || return 0
+
+	IFS= read -r version < "$pending" || return 1
+	case "$version" in ''|*[!0-9.]*) return 1 ;; esac
+	listen="$(uci -q get gofro.main.listen || echo 10.203.1.1:8080)"
+	status_file="$(mktemp /tmp/gofro-install-status.XXXXXX)" || return 1
+	count=0
+	while [ "$count" -lt 30 ]; do
+		if uclient-fetch -q -T 2 -O "$status_file" "http://$listen/api/status" 2>/dev/null &&
+			install_status_healthy "$version"; then
+			printf '%s\n' "$version" > "$state_dir/version.new" || return 1
+			chmod 644 "$state_dir/version.new" || return 1
+			mv -f "$state_dir/version.new" "$state_dir/version" || return 1
+			sync || return 1
+			rm -f "$pending" "$status_file" || return 1
+			sync
+			return 0
+		fi
+		count=$((count + 1))
+		sleep 1
+	done
+	rm -f "$status_file"
+	return 1
+}
+
+boot() {
+	finalize_install
+}

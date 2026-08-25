@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+[ "$#" = 2 ] || { echo "Usage: $0 ACTION INTERFACE" >&2; exit 2; }
+EXPECTED="$(uci -q get gofro.main.interface || echo gt0)"
+[ "$2" = "$EXPECTED" ] || { echo "Unknown WireGuard interface: $2" >&2; exit 2; }
+
+case "$1" in
+	start)
+		ifup "$2"
+		count=0
+		while ! ip link show "$2" >/dev/null 2>&1; do
+			[ "$count" -lt 10 ] || exit 1
+			sleep 1
+			count=$((count + 1))
+		done
+		mkdir -p /etc/wireguard
+		umask 077
+		wg showconf "$2" > "/etc/wireguard/$2.conf"
+		;;
+	stop) ifdown "$2" ;;
+	status) ip link show "$2" >/dev/null 2>&1 ;;
+	save)
+		mkdir -p /etc/wireguard
+		umask 077
+		wg showconf "$2" > "/etc/wireguard/$2.conf.tmp"
+		mv "/etc/wireguard/$2.conf.tmp" "/etc/wireguard/$2.conf"
+		;;
+	*) echo "Unknown action: $1" >&2; exit 2 ;;
+esac

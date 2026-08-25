@@ -3,6 +3,7 @@
 
   import ChartNoAxesCombined from "lucide-svelte/icons/chart-no-axes-combined";
   import House from "lucide-svelte/icons/house";
+  import Route from "lucide-svelte/icons/route";
   import ServerCog from "lucide-svelte/icons/server-cog";
   import WifiCog from "lucide-svelte/icons/wifi-cog";
 
@@ -19,6 +20,7 @@
       icon: ChartNoAxesCombined,
     },
     { path: "/servers" as const, label: "Серверы", icon: ServerCog },
+    { path: "/routing" as const, label: "Маршруты", icon: Route },
     { path: "/wifi" as const, label: "Wi-Fi", icon: WifiCog },
   ];
 
@@ -27,7 +29,6 @@
   const loading = $derived(app.loading);
   const pollError = $derived(app.pollError);
   const actionError = $derived(app.actionError);
-  const updateActive = $derived(app.updateActive);
 </script>
 
 <svelte:head>
@@ -44,7 +45,7 @@
     <a
       class="flex min-h-12 items-center gap-3 text-xl font-bold tracking-[-0.045em] no-underline"
       href={p("/")}
-      aria-label="GofroWiFi, главная"
+      aria-label="Gofro Router, главная"
     >
       <span
         class="flex size-12 items-end justify-center gap-0.75 rounded-2xl bg-[#09090b] px-2.5 py-3 shadow-lg shadow-black/10"
@@ -53,7 +54,7 @@
         ></i><i class="h-6 w-1 rounded-sm bg-white"></i></span
       >
       <span class="flex flex-wrap"
-        ><strong class="font-extrabold">Gofro</strong>WiFi<small
+        ><strong class="font-extrabold">Gofro</strong> Router<small
           class="mt-1 block basis-full text-[0.6rem] font-medium tracking-[0.08em] text-[#74747d]"
           >network appliance</small
         ></span
@@ -81,7 +82,7 @@
             ? "Режим DIRECT"
             : "VPN недоступен"}</span
       >
-      <a class="text-xs text-[#74747d] no-underline" href="http://gofrowifi.net"
+      <a class="text-xs text-[#74747d] no-underline" href="http://gofrowifi.net:8080"
         >gofrowifi.net</a
       >
     </div>
@@ -93,7 +94,7 @@
     <a
       class="flex min-h-12 items-center gap-2.5 text-lg font-bold tracking-[-0.045em] no-underline"
       href={p("/")}
-      aria-label="GofroWiFi, главная"
+      aria-label="Gofro Router, главная"
     >
       <span
         class="flex size-11 items-end justify-center gap-0.75 rounded-[15px] bg-[#09090b] px-2.5 py-2.5 shadow-lg shadow-black/10"
@@ -101,7 +102,7 @@
           class="h-3.5 w-1 rounded-sm bg-white"
         ></i><i class="h-5 w-1 rounded-sm bg-white"></i></span
       >
-      <span><strong class="font-extrabold">Gofro</strong>WiFi</span>
+      <span><strong class="font-extrabold">Gofro</strong> Router</span>
     </a>
     <span
       class={`flex items-center gap-2 text-xs font-bold ${status?.tunnel_active ? "text-[#09090b]" : "text-[#74747d]"}`}
@@ -115,35 +116,12 @@
   <main
     class="mx-auto w-full min-w-0 max-w-345 px-4 pb-[calc(5.75rem+env(safe-area-inset-bottom))] pt-6 sm:px-7 lg:px-[clamp(2.25rem,4vw,4.25rem)] lg:py-12"
   >
-    {#if updateActive}
-      <div
-        class="mb-4 flex items-center gap-3 rounded-2xl border border-[#c9d7eb] bg-[#f3f7fc] px-4 py-3 text-xs leading-relaxed text-[#344b6a]"
-        role="status"
-        aria-live="polite"
-      >
-        <span
-          class="size-2 shrink-0 animate-pulse rounded-full bg-[#344b6a]"
-        ></span>
-        <span class="min-w-0 flex-1"
-          >{app.updatePollError
-            ? "Связь с сервисом обновлений потеряна. Обновление может продолжаться в фоне."
-            : `${app.updateText}. Не выключайте устройство.`}</span
-        >
-        {#if app.updatePollError}<button
-            class="min-h-10 shrink-0 rounded-xl border border-[#344b6a] bg-transparent px-3 font-bold"
-            type="button"
-            onclick={app.refreshUpdate}>Переподключиться</button
-          >{/if}
-      </div>
-    {/if}
     {#if pollError && status}
       <div
         class="mb-4 flex items-center justify-between gap-3 rounded-2xl border border-[#dfc99e] bg-[#fffaf0] px-4 py-3 text-xs leading-relaxed text-[#6d5730]"
         role="status"
       >
-        <span>{updateActive
-            ? "Контроллер перезапускается, прогресс обновления продолжает работать."
-            : `Нет свежих данных. Показано последнее состояние: ${pollError}`}</span>
+        <span>Нет свежих данных. Показано последнее состояние: {pollError}</span>
       </div>
     {/if}
     {#if actionError}
@@ -168,21 +146,8 @@
       >
         <span
           class="size-8 animate-spin rounded-full border-[3px] border-[#dedee1] border-t-[#09090b]"
-        ></span><strong class="mt-5">Подключаемся к GofroWiFi</strong>
+        ></span><strong class="mt-5">Подключаемся к Gofro Router</strong>
         <p class="mt-2 text-sm text-[#74747d]">Получаем состояние сети</p>
-      </section>
-    {:else if !status && updateActive}
-      <section
-        class="flex min-h-[55vh] flex-col items-center justify-center text-center"
-        aria-live="polite"
-      >
-        <span
-          class="size-8 animate-spin rounded-full border-[3px] border-[#dedee1] border-t-[#09090b]"
-        ></span>
-        <strong class="mt-5">{app.updateText}</strong>
-        <p class="mt-2 text-sm text-[#74747d]">
-          Панель подключится снова после перезапуска контроллера.
-        </p>
       </section>
     {:else if !status}
       <section
@@ -211,14 +176,14 @@
   </main>
 
   <nav
-    class="fixed inset-x-0 bottom-0 z-50 grid min-h-[calc(4.75rem+env(safe-area-inset-bottom))] grid-cols-4 border-t border-[#dedee1] bg-white/95 px-1.5 pt-1.5 pb-[env(safe-area-inset-bottom)] shadow-[0_-8px_24px_rgba(0,0,0,0.04)] backdrop-blur-xl lg:hidden"
+    class="fixed inset-x-0 bottom-0 z-50 grid min-h-[calc(4.75rem+env(safe-area-inset-bottom))] grid-cols-5 border-t border-[#dedee1] bg-white/95 px-1.5 pt-1.5 pb-[env(safe-area-inset-bottom)] shadow-[0_-8px_24px_rgba(0,0,0,0.04)] backdrop-blur-xl lg:hidden"
     aria-label="Основная навигация"
   >
     {#each navigation as item}
       {@const Icon = item.icon}
       <a
         href={p(item.path)}
-        class={`flex min-w-0 flex-col items-center justify-center gap-1 rounded-[18px] text-[clamp(0.6rem,2.6vw,0.68rem)] font-semibold no-underline ${isActive(item.path) ? "bg-[#09090b] text-white" : "text-[#74747d]"}`}
+        class={`flex min-w-0 flex-col items-center justify-center gap-1 rounded-[18px] text-[clamp(0.54rem,2.35vw,0.66rem)] font-semibold no-underline ${isActive(item.path) ? "bg-[#09090b] text-white" : "text-[#74747d]"}`}
         aria-current={isActive(item.path) ? "page" : undefined}
       >
         <Icon size={19} strokeWidth={1.9} />

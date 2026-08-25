@@ -9,11 +9,6 @@ export const http = axios.create({
   timeout: 10_000,
 });
 
-export const updaterHttp = axios.create({
-  baseURL: `http://${location.hostname}:8080/api`,
-  timeout: 10_000,
-});
-
 export class ApiError extends Error {
   constructor(
     message: string,

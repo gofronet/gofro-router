@@ -1,0 +1,111 @@
+#!/bin/sh
+set -eu
+
+die() {
+	echo "error: $*" >&2
+	exit 1
+}
+
+[ "$(id -u)" = 0 ] || die 'run as root'
+[ "$#" = 1 ] || die 'usage: gofro-setup COUNTRY (for example: DE)'
+case "$1" in
+	[A-Z][A-Z]) country="$1" ;;
+	*) die 'country must be a two-letter uppercase code' ;;
+esac
+
+interface="$(uci -q get gofro.main.interface || echo gt0)"
+case "$interface" in ''|*[!a-zA-Z0-9_]*) die 'invalid WireGuard interface' ;; esac
+install_version=${GOFRO_INSTALL_VERSION:-}
+
+wifi_sections="$(uci show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p')"
+[ -n "$wifi_sections" ] || die 'OpenWrt has no configured Wi-Fi interface'
+wan_zone="$(uci -q show firewall | sed -n "s/^firewall\.\([^=]*\)\.name='wan'$/\1/p")"
+[ -n "$wan_zone" ] || die 'OpenWrt has no wan firewall zone'
+
+mkdir -p /etc/gofro /etc/wireguard
+chmod 700 /etc/gofro /etc/wireguard
+if [ ! -s /etc/wireguard/client.key ]; then
+	umask 077
+	wg genkey > /etc/wireguard/client.key
+fi
+wg pubkey < /etc/wireguard/client.key > /etc/wireguard/client.pub
+
+if [ ! -s /etc/gofro/ap-password ]; then
+	umask 077
+	wg genkey | cut -c1-16 > /etc/gofro/ap-password
+fi
+password="$(cat /etc/gofro/ap-password)"
+client_public_key="$(cat /etc/wireguard/client.pub)"
+
+uci set network.lan.ipaddr='10.203.1.1'
+uci set network.lan.netmask='255.255.255.0'
+uci -q delete "network.$interface" || true
+uci set "network.$interface=interface"
+uci set "network.$interface.proto=wireguard"
+uci set "network.$interface.private_key=$(cat /etc/wireguard/client.key)"
+uci add_list "network.$interface.addresses=10.202.0.2/32"
+uci set "network.$interface.listen_port=51821"
+uci set "network.$interface.mtu=1360"
+uci set "network.$interface.auto=0"
+
+uci -q del_list "firewall.$wan_zone.network=$interface" || true
+uci -q delete firewall.gofro_vpn || true
+uci set firewall.gofro_vpn='zone'
+uci set firewall.gofro_vpn.name='gofro_vpn'
+uci add_list "firewall.gofro_vpn.network=$interface"
+uci set firewall.gofro_vpn.input='REJECT'
+uci set firewall.gofro_vpn.output='ACCEPT'
+uci set firewall.gofro_vpn.forward='REJECT'
+uci -q delete firewall.gofro_lan_vpn || true
+uci set firewall.gofro_lan_vpn='forwarding'
+uci set firewall.gofro_lan_vpn.src='lan'
+uci set firewall.gofro_lan_vpn.dest='gofro_vpn'
+
+uci set dhcp.lan.start='2'
+uci set dhcp.lan.limit='249'
+uci set dhcp.lan.leasetime='12h'
+uci -q delete dhcp.@dnsmasq[0].server || true
+uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5353'
+uci set dhcp.@dnsmasq[0].noresolv='1'
+uci -q del_list dhcp.@dnsmasq[0].address='/gofrowifi.net/10.203.1.1' || true
+uci add_list dhcp.@dnsmasq[0].address='/gofrowifi.net/10.203.1.1'
+
+for section in $wifi_sections; do
+	[ "$(uci -q get "wireless.$section.mode")" = ap ] || continue
+	uci set "wireless.$section.network=lan"
+	uci set "wireless.$section.ssid=GofroNET WiFi"
+	uci set "wireless.$section.encryption=sae-mixed"
+	uci set "wireless.$section.key=$password"
+	uci set "wireless.$section.disabled=0"
+	device="$(uci -q get "wireless.$section.device" || true)"
+	[ -z "$device" ] || uci set "wireless.$device.country=$country"
+done
+
+uci commit network
+uci commit firewall
+uci commit dhcp
+uci commit wireless
+/etc/init.d/gofro-relay enable
+/etc/init.d/gofro-agent enable
+
+echo "Gofro Wi-Fi password: $password"
+echo 'After reconnecting, open http://gofrowifi.net:8080'
+echo "Client public key: $client_public_key"
+echo "VPS peer command: sudo gofro-server add-peer --public-key '$client_public_key' --tunnel-ip 10.202.0.2/32 --subnet 10.203.1.0/24"
+
+if [ -n "$install_version" ]; then
+	printf '%s\n' "$install_version" > /etc/gofro/install-pending.new
+	chmod 600 /etc/gofro/install-pending.new
+	mv -f /etc/gofro/install-pending.new /etc/gofro/install-pending
+	sync
+fi
+
+(
+	sleep 2
+	/etc/init.d/network restart
+	sleep 5
+	/etc/init.d/firewall restart
+	/etc/init.d/dnsmasq restart
+	/etc/init.d/gofro-agent restart
+	[ -z "$install_version" ] || /etc/init.d/gofro-finalize boot
+) >/dev/null 2>&1 &

@@ -1,19 +1,19 @@
-import { http, request, updaterHttp } from "./client";
+import { http, request } from "./client";
 import {
   serverInputSchema,
+  routingConfigSchema,
+  routingTestSchema,
   statusSchema,
-  updateStatusSchema,
   wifiInputSchema,
   type ServerInput,
+  type RoutingConfig,
+  type RoutingTest,
   type Status,
-  type UpdateStatus,
   type WifiInput,
 } from "./schemas";
 
 const statusRequest = (factory: () => Promise<{ data: unknown }>) =>
   request(statusSchema, factory);
-const updateRequest = (factory: () => Promise<{ data: unknown }>) =>
-  request(updateStatusSchema, factory);
 const mutation = { timeout: 0 };
 
 export const api = {
@@ -59,13 +59,13 @@ export const api = {
       return statusRequest(() => http.post("/ap", body, mutation));
     },
   },
-  update: {
-    get: (): Promise<UpdateStatus> =>
-      updateRequest(() => updaterHttp.get("/status")),
-    check: (): Promise<UpdateStatus> =>
-      updateRequest(() => updaterHttp.post("/check")),
-    start: (): Promise<UpdateStatus> =>
-      updateRequest(() => updaterHttp.post("/start")),
+  routing: {
+    save: (input: RoutingConfig): Promise<Status> => {
+      const body = routingConfigSchema.parse(input);
+      return statusRequest(() => http.post("/routing", body, mutation));
+    },
+    test: (value: string): Promise<RoutingTest> =>
+      request(routingTestSchema, () => http.post("/routing/test", { value })),
   },
 };
 
@@ -73,9 +73,13 @@ export { ApiError } from "./client";
 export type {
   Device,
   HistoryPoint,
+  DomainRule,
+  IpRule,
+  RouteTarget,
+  RoutingConfig,
+  RoutingTest,
   Server,
   ServerInput,
   Status,
-  UpdateStatus,
   WifiInput,
 } from "./schemas";
