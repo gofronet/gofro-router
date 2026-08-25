@@ -26,8 +26,8 @@
 
 ## Платформа
 
-Текущий target - Cudy TR3000-256MB V1.0 с официальным OpenWrt 25.12. Ядро,
-драйверы, Wi-Fi, NAND, firewall и обновление системы предоставляет OpenWrt.
+Поддерживаются Cudy TR3000-256MB V1.0 и Cudy LT300 V3 с официальным OpenWrt
+25.12. Ядро, драйверы, Wi-Fi, NAND, firewall и обновление системы предоставляет OpenWrt.
 Репозиторий собирает только статические бинарники и установочный архив Gofro;
 собственной ОС и образов прошивки здесь больше нет.
 
@@ -48,7 +48,7 @@ Rust workspace разделён по runtime-ролям:
 ## Установка
 
 На свежем поддерживаемом OpenWrt замените `RU` на двухбуквенный код своей
-страны и выполните одну команду:
+страны и выполните одну команду. Установщик сам определит модель и архитектуру:
 
 ```sh
 tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && uclient-fetch -q -O "$tmp" https://github.com/gofronet/gofro-router/releases/latest/download/gofro-install && sh "$tmp" --install RU
@@ -111,10 +111,12 @@ WireGuard. Это транспортная обфускация против б�
 
 ## Что понадобится
 
-- Cudy TR3000-256MB V1.0 с совместимым OpenWrt 25.12;
+- Cudy TR3000-256MB V1.0 или Cudy LT300 V3 с совместимым OpenWrt 25.12;
 - Ethernet-подключение к основному роутеру;
 - VPS с публичным IPv4;
-- release-архив `gofro-router-aarch64-openwrt-linux-musl.tar.gz`.
+
+Из-за 16 MB flash LT300 использует компактную базу только с GeoSite
+`category-ru` и GeoIP `ru`. TR3000 получает полную GeoSite/GeoIP базу.
 
 Для устройств с серийным кодом `2544` и новее нельзя использовать старый Cudy
 intermediate image: их NAND требует поддержки `F50L1G41LC`.

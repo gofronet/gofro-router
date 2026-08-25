@@ -1,8 +1,9 @@
 #!/bin/sh
 set -eu
 
-ARCHIVE=gofro-router-aarch64-openwrt-linux-musl.tar.gz
-MANIFEST=gofro-router-manifest.json
+ARCHIVE=
+MANIFEST=
+TARGET=
 DEFAULT_BASE_URL=https://github.com/gofronet/gofro-router/releases/latest/download
 BASE_URL=${GOFRO_RELEASE_URL:-$DEFAULT_BASE_URL}
 KEY=/etc/gofro/update-public.pem
@@ -59,6 +60,28 @@ MCowBQYDK2VwAyEA49UWlsfVa3Coq+iY4WJSf5UPQEwC6nalT/CeOy+gdvk=
 EOF
 }
 
+platform_for() {
+	case "$1:$2" in
+		mediatek/filogic:cudy,tr3000-256mb-v1) echo aarch64-openwrt-linux-musl ;;
+		ramips/mt76x8:cudy,lt300-v3) echo mipsel-openwrt-linux-musl ;;
+		*) return 1 ;;
+	esac
+}
+
+detect_platform() {
+	[ -r /etc/openwrt_release ] || die 'OpenWrt is required'
+	# shellcheck disable=SC1091
+	. /etc/openwrt_release
+	case "${DISTRIB_RELEASE:-}" in 25.12.*) ;; *) die 'OpenWrt 25.12 is required' ;; esac
+	IFS= read -r board < /tmp/sysinfo/board_name || die 'router model is unavailable'
+	TARGET="$(platform_for "${DISTRIB_TARGET:-}" "$board")" || die "unsupported router: $board"
+	ARCHIVE="gofro-router-$TARGET.tar.gz"
+	case "$TARGET" in
+		aarch64-openwrt-linux-musl) MANIFEST=gofro-router-manifest.json ;;
+		*) MANIFEST="gofro-router-manifest-$TARGET.json" ;;
+	esac
+}
+
 [ "$(id -u)" = 0 ] || die 'run as root'
 case "${1:-}" in
 	'') mode=update ;;
@@ -70,15 +93,9 @@ case "${1:-}" in
 	*) die 'usage: gofro-update [--install COUNTRY]' ;;
 esac
 
+detect_platform
+
 if [ "$mode" = install ]; then
-	[ "$(uname -m)" = aarch64 ] || die 'Gofro requires an AArch64 router'
-	[ -r /etc/openwrt_release ] || die 'OpenWrt is required'
-	# shellcheck disable=SC1091
-	. /etc/openwrt_release
-	case "${DISTRIB_RELEASE:-}" in 25.12.*) ;; *) die 'OpenWrt 25.12 is required' ;; esac
-	[ "${DISTRIB_TARGET:-}" = mediatek/filogic ] || die 'the mediatek/filogic target is required'
-	IFS= read -r board < /tmp/sysinfo/board_name || die 'router model is unavailable'
-	[ "$board" = cudy,tr3000-256mb-v1 ] || die 'the Cudy TR3000 256MB v1 is required'
 	[ ! -e /etc/gofro/version ] || die 'Gofro is already installed'
 else
 	[ -s "$KEY" ] || die 'update public key is missing'
@@ -109,7 +126,7 @@ archive="$(jsonfilter -i "$TMP/$MANIFEST" -e '@.archive')"
 sha256="$(jsonfilter -i "$TMP/$MANIFEST" -e '@.sha256')"
 [ "$schema" = 1 ] || die 'release schema is invalid'
 valid_version "$version" || die 'release version is invalid'
-[ "$target" = aarch64-openwrt-linux-musl ] || die 'release target is invalid'
+[ "$target" = "$TARGET" ] || die 'release target is invalid'
 [ "$archive" = "$ARCHIVE" ] || die 'release archive is invalid'
 case "$sha256" in ''|*[!0-9a-f]*) die 'release checksum is invalid' ;; esac
 [ "${#sha256}" = 64 ] || die 'release checksum is invalid'

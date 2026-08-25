@@ -1,8 +1,8 @@
 # OpenWrt installation
 
 Gofro installs on official OpenWrt 25.12 without replacing the firmware. The
-release archive contains static ARM64 binaries, OpenWrt services, geodata and
-the installer.
+bootstrap selects a signed bundle for Cudy TR3000-256MB V1 (AArch64) or Cudy
+LT300 V3 (MIPS little-endian).
 
 ## Install
 
@@ -17,6 +17,10 @@ The bootstrap downloads the signed release manifest, verifies the archive, adds
 the required OpenWrt packages, changes the LAN address to `10.203.1.1`, and
 prints the generated Wi-Fi password. Reconnect to `GofroNET WiFi` and open
 `http://gofrowifi.net:8080`.
+
+The LT300 bundle contains only the default `category-ru` GeoSite and `ru` GeoIP
+entries because the device has 16 MB flash and 64 MB RAM. The TR3000 bundle
+contains the complete databases.
 
 Do not use an old Cudy intermediate image on routers with serial code `2544` or
 newer. Their NAND requires `F50L1G41LC` support.

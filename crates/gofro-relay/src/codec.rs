@@ -1,6 +1,6 @@
 use std::{
     net::UdpSocket,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail};
 pub(crate) const BUFFER_SIZE: usize = 4096;
 const HEADER_SIZE: usize = 10;
 const MAX_PADDING: usize = 31;
-const SEED_STEP: u64 = 0x9e37_79b9_7f4a_7c15;
-static PACKET_COUNTER: AtomicU64 = AtomicU64::new(SEED_STEP);
+const SEED_STEP: u32 = 0x9e37_79b9;
+static PACKET_COUNTER: AtomicU32 = AtomicU32::new(SEED_STEP);
 
 pub(crate) fn send_encoded(socket: &UdpSocket, plain: &[u8]) -> Result<()> {
     let mut encoded = [0_u8; BUFFER_SIZE];
@@ -75,7 +75,7 @@ fn packet_seed() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
-    PACKET_COUNTER.fetch_add(SEED_STEP, Ordering::Relaxed) ^ time
+    u64::from(PACKET_COUNTER.fetch_add(SEED_STEP, Ordering::Relaxed)) ^ time
 }
 
 fn next_byte(state: &mut u64) -> u8 {

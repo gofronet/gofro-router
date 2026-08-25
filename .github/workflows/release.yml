@@ -15,7 +15,7 @@ jobs:
   build:
     name: Build OpenWrt bundle
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -59,6 +59,7 @@ jobs:
           sh deploy/openwrt/tests/health.sh
           sh deploy/openwrt/tests/transaction.sh
           sh deploy/openwrt/tests/version.sh
+          python3 deploy/openwrt/tests/geodata_filter.py
 
       - name: Build web UI
         working-directory: web
@@ -67,33 +68,72 @@ jobs:
           bun run check
           bun run build
 
-      - name: Download OpenWrt SDK
+      - name: Download OpenWrt SDKs
         env:
-          SDK_FILE: openwrt-sdk-25.12.0-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-          SDK_SHA256: 7e45a85b4af8af53ff17ca610ad6a7df312568cb52b730f93a21a91899f33139
+          AARCH64_SDK: openwrt-sdk-25.12.0-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+          AARCH64_SHA256: 7e45a85b4af8af53ff17ca610ad6a7df312568cb52b730f93a21a91899f33139
+          MIPSEL_SDK: openwrt-sdk-25.12.0-ramips-mt76x8_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+          MIPSEL_SHA256: 29d8fc7fc61e42ae365681e56b57fbdd8b6d3a3c135a66cb122c8da04fe54062
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends zstd
-          curl --fail --location --retry 3 \
-            "https://downloads.openwrt.org/releases/25.12.0/targets/mediatek/filogic/$SDK_FILE" \
-            -o "$RUNNER_TEMP/$SDK_FILE"
-          printf '%s  %s\n' "$SDK_SHA256" "$RUNNER_TEMP/$SDK_FILE" | sha256sum -c -
-          tar --use-compress-program=unzstd -xf "$RUNNER_TEMP/$SDK_FILE" -C "$RUNNER_TEMP"
+          download_sdk() {
+            local target=$1 file=$2 sha256=$3
+            curl --fail --location --retry 3 \
+              "https://downloads.openwrt.org/releases/25.12.0/targets/$target/$file" \
+              -o "$RUNNER_TEMP/$file"
+            printf '%s  %s\n' "$sha256" "$RUNNER_TEMP/$file" | sha256sum -c -
+            tar --use-compress-program=unzstd -xf "$RUNNER_TEMP/$file" -C "$RUNNER_TEMP"
+          }
+          download_sdk mediatek/filogic "$AARCH64_SDK" "$AARCH64_SHA256"
+          download_sdk ramips/mt76x8 "$MIPSEL_SDK" "$MIPSEL_SHA256"
 
       - name: Cross-compile static binaries
         run: |
+          set -euo pipefail
           rustup target add aarch64-unknown-linux-musl
-          TOOLCHAIN=$(printf '%s\n' "$RUNNER_TEMP"/openwrt-sdk-*/staging_dir/toolchain-aarch64_cortex-a53_gcc-*_musl)
-          CC=$TOOLCHAIN/bin/aarch64-openwrt-linux-musl-gcc
-          export CC_aarch64_unknown_linux_musl=$CC
-          export AR_aarch64_unknown_linux_musl=$TOOLCHAIN/bin/aarch64-openwrt-linux-musl-gcc-ar
-          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=$CC
+          rustup toolchain install nightly-2025-03-18 --profile minimal --component rust-src
+          AARCH64_TOOLCHAIN=$(printf '%s\n' "$RUNNER_TEMP"/openwrt-sdk-25.12.0-mediatek-*/staging_dir/toolchain-aarch64_cortex-a53_gcc-*_musl)
+          STAGING_DIR=$(dirname "$AARCH64_TOOLCHAIN")
+          export STAGING_DIR
+          AARCH64_CC=$AARCH64_TOOLCHAIN/bin/aarch64-openwrt-linux-musl-gcc
+          export CC_aarch64_unknown_linux_musl=$AARCH64_CC
+          export AR_aarch64_unknown_linux_musl=$AARCH64_TOOLCHAIN/bin/aarch64-openwrt-linux-musl-gcc-ar
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=$AARCH64_CC
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-cpu=cortex-a53 -C target-feature=+crt-static'
           export CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target/openwrt
           cargo build --locked --release --target aarch64-unknown-linux-musl \
             -p gofro-agent -p gofro-relay
+          MIPSEL_TOOLCHAIN=$(printf '%s\n' "$RUNNER_TEMP"/openwrt-sdk-25.12.0-ramips-*/staging_dir/toolchain-mipsel_24kc_gcc-*_musl)
+          STAGING_DIR=$(dirname "$MIPSEL_TOOLCHAIN")
+          export STAGING_DIR
+          MIPSEL_CC=$MIPSEL_TOOLCHAIN/bin/mipsel-openwrt-linux-musl-gcc
+          MIPSEL_GCC_LIB=$(dirname "$($MIPSEL_CC -print-file-name=crtbegin.o)")
+          MIPSEL_LINK_DIR=$RUNNER_TEMP/mipsel-link
+          MIPSEL_LINKER=$RUNNER_TEMP/mipsel-linker
+          mkdir "$MIPSEL_LINK_DIR"
+          ln -s "$MIPSEL_TOOLCHAIN/lib/crt1.o" "$MIPSEL_LINK_DIR/crt1.o"
+          ln -s "$MIPSEL_TOOLCHAIN/lib/crti.o" "$MIPSEL_LINK_DIR/crti.o"
+          ln -s "$MIPSEL_TOOLCHAIN/lib/crtn.o" "$MIPSEL_LINK_DIR/crtn.o"
+          ln -s "$MIPSEL_GCC_LIB/crtbegin.o" "$MIPSEL_LINK_DIR/crtbegin.o"
+          ln -s "$MIPSEL_GCC_LIB/crtend.o" "$MIPSEL_LINK_DIR/crtend.o"
+          ln -s "$($MIPSEL_CC -print-file-name=libgcc_eh.a)" "$MIPSEL_LINK_DIR/libunwind.a"
+          printf '#!/bin/sh\ncd "%s"\nexec "%s" -L"%s" "$@"\n' \
+            "$MIPSEL_LINK_DIR" "$MIPSEL_CC" "$MIPSEL_LINK_DIR" > "$MIPSEL_LINKER"
+          chmod 755 "$MIPSEL_LINKER"
+          export CC_mipsel_unknown_linux_musl=$MIPSEL_CC
+          export AR_mipsel_unknown_linux_musl=$MIPSEL_TOOLCHAIN/bin/mipsel-openwrt-linux-musl-gcc-ar
+          export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=$MIPSEL_LINKER
+          export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-cpu=mips32r2 -C target-feature=+crt-static'
+          export CARGO_PROFILE_RELEASE_OPT_LEVEL=z
+          cargo +nightly-2025-03-18 build -Z build-std=std,panic_abort \
+            -Z build-std-features=panic_immediate_abort --locked --release \
+            --target mipsel-unknown-linux-musl -p gofro-agent -p gofro-relay
           file target/openwrt/aarch64-unknown-linux-musl/release/gofro-agent | grep -q 'statically linked'
           file target/openwrt/aarch64-unknown-linux-musl/release/gofro-relay | grep -q 'statically linked'
+          file target/openwrt/mipsel-unknown-linux-musl/release/gofro-agent | grep -q 'MIPS.*statically linked'
+          file target/openwrt/mipsel-unknown-linux-musl/release/gofro-relay | grep -q 'MIPS.*statically linked'
 
       - name: Package bundle
         env:
@@ -104,36 +144,61 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=${GITHUB_REF_NAME#v}
-          TARGET=aarch64-unknown-linux-musl
-          ARCHIVE=gofro-router-aarch64-openwrt-linux-musl.tar.gz
           DIST=$RUNNER_TEMP/dist
-          BUNDLE=$RUNNER_TEMP/bundle
-          mkdir -p "$DIST" "$BUNDLE"
-          cp -R deploy/openwrt/root deploy/openwrt/defaults "$BUNDLE/"
-          install -m 755 deploy/openwrt/install.sh "$BUNDLE/install.sh"
-          install -m 644 deploy/openwrt/update-public.pem "$BUNDLE/update-public.pem"
-          printf '%s\n' "$VERSION" > "$BUNDLE/VERSION"
-          install -D -m 755 "target/openwrt/$TARGET/release/gofro-agent" "$BUNDLE/root/usr/bin/gofro-agent"
-          install -D -m 755 "target/openwrt/$TARGET/release/gofro-relay" "$BUNDLE/root/usr/bin/gofro-relay"
-          install -D -m 644 GEODATA-LICENSES.md "$BUNDLE/root/usr/share/gofro/GEODATA-LICENSES.md"
+          GEODATA=$RUNNER_TEMP/geodata
+          mkdir -p "$DIST" "$GEODATA"
           curl --fail --location --retry 3 \
             "https://github.com/v2fly/domain-list-community/releases/download/$GEOSITE_VERSION/dlc.dat" \
-            -o "$BUNDLE/root/usr/share/gofro/geosite.dat"
+            -o "$GEODATA/geosite.dat"
           curl --fail --location --retry 3 \
             "https://github.com/v2fly/geoip/releases/download/$GEOIP_VERSION/geoip.dat" \
-            -o "$BUNDLE/root/usr/share/gofro/geoip.dat"
-          printf '%s  %s\n' "$GEOSITE_SHA256" "$BUNDLE/root/usr/share/gofro/geosite.dat" |
+            -o "$GEODATA/geoip.dat"
+          printf '%s  %s\n' "$GEOSITE_SHA256" "$GEODATA/geosite.dat" |
             sha256sum -c -
-          printf '%s  %s\n' "$GEOIP_SHA256" "$BUNDLE/root/usr/share/gofro/geoip.dat" |
+          printf '%s  %s\n' "$GEOIP_SHA256" "$GEODATA/geoip.dat" |
             sha256sum -c -
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$GITHUB_SHA")
-          tar -C "$BUNDLE" --owner=0 --group=0 --numeric-owner \
-            --mtime="@$SOURCE_DATE_EPOCH" -czf "$DIST/$ARCHIVE" \
-            VERSION defaults install.sh root update-public.pem
-          SHA=$(sha256sum "$DIST/$ARCHIVE" | cut -d ' ' -f1)
-          jq -S -n --arg version "$VERSION" --arg archive "$ARCHIVE" --arg sha256 "$SHA" \
-            '{schema: 1, version: $version, target: "aarch64-openwrt-linux-musl", archive: $archive, sha256: $sha256}' \
-            > "$DIST/gofro-router-manifest.json"
+
+          package() {
+            local rust_target=$1 release_target=$2 manifest=$3 compact=$4
+            local archive="gofro-router-$release_target.tar.gz"
+            local bundle="$RUNNER_TEMP/bundle-$release_target"
+            mkdir -p "$bundle"
+            cp -R deploy/openwrt/root deploy/openwrt/defaults "$bundle/"
+            install -m 755 deploy/openwrt/install.sh "$bundle/install.sh"
+            install -m 644 deploy/openwrt/update-public.pem "$bundle/update-public.pem"
+            printf '%s\n' "$VERSION" > "$bundle/VERSION"
+            printf '%s\n' "$release_target" > "$bundle/TARGET"
+            install -D -m 755 "target/openwrt/$rust_target/release/gofro-agent" "$bundle/root/usr/bin/gofro-agent"
+            install -D -m 755 "target/openwrt/$rust_target/release/gofro-relay" "$bundle/root/usr/bin/gofro-relay"
+            install -D -m 644 GEODATA-LICENSES.md "$bundle/root/usr/share/gofro/GEODATA-LICENSES.md"
+            if [[ $compact == true ]]; then
+              python3 deploy/openwrt/filter_geodata.py "$GEODATA/geosite.dat" \
+                "$bundle/root/usr/share/gofro/geosite.dat" category-ru
+              python3 deploy/openwrt/filter_geodata.py "$GEODATA/geoip.dat" \
+                "$bundle/root/usr/share/gofro/geoip.dat" ru
+            else
+              install -m 644 "$GEODATA/geosite.dat" "$bundle/root/usr/share/gofro/geosite.dat"
+              install -m 644 "$GEODATA/geoip.dat" "$bundle/root/usr/share/gofro/geoip.dat"
+            fi
+            tar -C "$bundle" --owner=0 --group=0 --numeric-owner \
+              --mtime="@$SOURCE_DATE_EPOCH" -czf "$DIST/$archive" \
+              TARGET VERSION defaults install.sh root update-public.pem
+            if [[ $compact == true ]]; then
+              [[ $(du -sb "$bundle" | cut -f1) -le 6291456 ]]
+              [[ $(stat -c %s "$DIST/$archive") -le 3145728 ]]
+            fi
+            local sha
+            sha=$(sha256sum "$DIST/$archive" | cut -d ' ' -f1)
+            jq -S -n --arg version "$VERSION" --arg target "$release_target" \
+              --arg archive "$archive" --arg sha256 "$sha" \
+              '{schema: 1, version: $version, target: $target, archive: $archive, sha256: $sha256}' \
+              > "$DIST/$manifest"
+          }
+          package aarch64-unknown-linux-musl aarch64-openwrt-linux-musl \
+            gofro-router-manifest.json false
+          package mipsel-unknown-linux-musl mipsel-openwrt-linux-musl \
+            gofro-router-manifest-mipsel-openwrt-linux-musl.json true
           install -m 755 deploy/openwrt/root/usr/sbin/gofro-update "$DIST/gofro-install"
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
@@ -170,34 +235,42 @@ jobs:
           install -m 600 /dev/null "$KEY"
           trap 'rm -f "$KEY"' EXIT
           printf '%s' "$UPDATE_SIGNING_KEY" > "$KEY"
-          openssl pkeyutl -sign -inkey "$KEY" -rawin \
-            -in "$DIST/gofro-router-manifest.json" \
-            -out "$DIST/gofro-router-manifest.json.sig"
-          openssl pkeyutl -verify -pubin -inkey deploy/openwrt/update-public.pem -rawin \
-            -in "$DIST/gofro-router-manifest.json" \
-            -sigfile "$DIST/gofro-router-manifest.json.sig"
+          for manifest in "$DIST"/gofro-router-manifest*.json; do
+            openssl pkeyutl -sign -inkey "$KEY" -rawin \
+              -in "$manifest" -out "$manifest.sig"
+            openssl pkeyutl -verify -pubin -inkey deploy/openwrt/update-public.pem -rawin \
+              -in "$manifest" -sigfile "$manifest.sig"
+          done
 
       - name: Validate release assets
         run: |
           set -euo pipefail
           DIST=$RUNNER_TEMP/dist
           VERSION=${GITHUB_REF_NAME#v}
-          ARCHIVE=$DIST/gofro-router-aarch64-openwrt-linux-musl.tar.gz
-          MANIFEST=$DIST/gofro-router-manifest.json
-          SHA=$(sha256sum "$ARCHIVE" | cut -d ' ' -f1)
-          jq -e --arg version "$VERSION" --arg sha256 "$SHA" '
-            type == "object" and
-            keys == ["archive", "schema", "sha256", "target", "version"] and
-            .schema == 1 and .version == $version and
-            .target == "aarch64-openwrt-linux-musl" and
-            .archive == "gofro-router-aarch64-openwrt-linux-musl.tar.gz" and
-            .sha256 == $sha256
-          ' "$MANIFEST"
+          validate() {
+            local target=$1 manifest=$2
+            local archive="gofro-router-$target.tar.gz"
+            local sha
+            sha=$(sha256sum "$DIST/$archive" | cut -d ' ' -f1)
+            jq -e --arg version "$VERSION" --arg target "$target" \
+              --arg archive "$archive" --arg sha256 "$sha" '
+                type == "object" and
+                keys == ["archive", "schema", "sha256", "target", "version"] and
+                .schema == 1 and .version == $version and .target == $target and
+                .archive == $archive and .sha256 == $sha256
+              ' "$DIST/$manifest"
+            local members
+            members=$(tar -tzf "$DIST/$archive")
+            grep -qx TARGET <<< "$members"
+            grep -qx VERSION <<< "$members"
+            grep -qx install.sh <<< "$members"
+            grep -qx root/usr/sbin/gofro-update <<< "$members"
+            [[ $(tar -xOzf "$DIST/$archive" TARGET) == "$target" ]]
+          }
+          validate aarch64-openwrt-linux-musl gofro-router-manifest.json
+          validate mipsel-openwrt-linux-musl \
+            gofro-router-manifest-mipsel-openwrt-linux-musl.json
           test -s "$DIST/gofro-install"
-          MEMBERS=$(tar -tzf "$ARCHIVE")
-          grep -qx VERSION <<< "$MEMBERS"
-          grep -qx install.sh <<< "$MEMBERS"
-          grep -qx root/usr/sbin/gofro-update <<< "$MEMBERS"
 
       - name: Publish immutable release
         env:
@@ -207,8 +280,11 @@ jobs:
           DIST=$RUNNER_TEMP/dist
           ASSETS=(
             "$DIST/gofro-router-aarch64-openwrt-linux-musl.tar.gz"
+            "$DIST/gofro-router-mipsel-openwrt-linux-musl.tar.gz"
             "$DIST/gofro-router-manifest.json"
             "$DIST/gofro-router-manifest.json.sig"
+            "$DIST/gofro-router-manifest-mipsel-openwrt-linux-musl.json"
+            "$DIST/gofro-router-manifest-mipsel-openwrt-linux-musl.json.sig"
             "$DIST/gofro-install"
           )
           if STATE=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null); then
