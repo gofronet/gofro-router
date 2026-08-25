@@ -32,7 +32,11 @@ switch_current "$previous"
 (
 	# shellcheck disable=SC2317,SC2329
 	ln() { return 1; }
-	switch_current "$RELEASES/0.4.0" && exit 1
+	set +e
+	switch_current "$RELEASES/0.4.0"
+	status=$?
+	set -e
+	[ "$status" -ne 0 ]
 )
 [ "$(readlink "$CURRENT")" = "$RELEASES/0.3.0" ]
 
@@ -57,6 +61,10 @@ switch_current "$RELEASES/0.4.0"
 (
 	# shellcheck disable=SC2317,SC2329
 	mv() { return 1; }
-	recover_update && exit 1
+	set +e
+	recover_update
+	status=$?
+	set -e
+	[ "$status" -ne 0 ]
 )
 [ -e "$STATE_DIR/update-previous" ]
