@@ -30,7 +30,7 @@ switch_current "$previous"
 
 # A failed switch must report failure and keep the active release unchanged.
 (
-	# shellcheck disable=SC2329
+	# shellcheck disable=SC2317,SC2329
 	ln() { return 1; }
 	switch_current "$RELEASES/0.4.0" && exit 1
 )
@@ -55,7 +55,7 @@ recover_update
 printf '%s\n' "$previous" > "$STATE_DIR/update-previous"
 switch_current "$RELEASES/0.4.0"
 (
-	# shellcheck disable=SC2329
+	# shellcheck disable=SC2317,SC2329
 	mv() { return 1; }
 	recover_update && exit 1
 )

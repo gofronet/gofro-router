@@ -20,7 +20,7 @@ die() {
 	exit 1
 }
 
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 cleanup() {
 	status=$?
 	trap - EXIT HUP INT TERM
@@ -96,7 +96,9 @@ link_runtime() {
 		if [ -L "$destination" ] && [ "$(readlink "$destination")" = "$CURRENT/$path" ]; then
 			continue
 		fi
-		[ ! -e "$destination" ] && [ ! -L "$destination" ] || die "$destination already exists"
+		if [ -e "$destination" ] || [ -L "$destination" ]; then
+			die "$destination already exists"
+		fi
 		ln -s "$CURRENT/$path" "$destination"
 	done
 }
