@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+[ "$#" = 2 ] || { echo "Usage: $0 ACTION SERVICE" >&2; exit 2; }
+[ "$2" = gofro-relay ] || { echo "Unknown service: $2" >&2; exit 2; }
+
+case "$1" in
+	start|stop|restart|status) exec /etc/init.d/gofro-relay "$1" ;;
+	*) echo "Unknown action: $1" >&2; exit 2 ;;
+esac

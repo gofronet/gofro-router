@@ -76,7 +76,7 @@
   }
 </script>
 
-<svelte:head><title>Серверы · GofroWiFi</title></svelte:head>
+<svelte:head><title>Серверы · Gofro Router</title></svelte:head>
 
 <section class="grid min-w-0 gap-5 lg:gap-6" aria-labelledby="servers-title">
   <header
@@ -287,7 +287,7 @@
             required
             maxlength="40"
             autocomplete="off"
-            placeholder="Frankfurt Gaming"
+            placeholder="Frankfurt"
           />
         </label>
         <label>

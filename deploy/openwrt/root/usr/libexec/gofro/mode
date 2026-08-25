@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+DIRECT_MARK=0x10000
+VPN_MARK=0x20000
+MARK_MASK=0x30000
+
+clear_rules() {
+	while ip rule del pref 90 2>/dev/null; do :; done
+	while ip rule del pref 81 2>/dev/null; do :; done
+	while ip rule del pref 80 2>/dev/null; do :; done
+}
+
+lan_interface="$(uci -q get gofro.main.lan_interface || echo br-lan)"
+lan_address="$(uci -q get gofro.main.lan_address || echo 10.203.1.1)"
+lan_subnet="$(uci -q get gofro.main.lan_subnet || echo 10.203.1.0/24)"
+
+clear_rules
+case "${1:-}" in
+	vpn)
+		ip route replace "$lan_subnet" dev "$lan_interface" table 100
+		ip route replace unreachable default table 100 metric 32767
+		ip rule add pref 80 fwmark "$DIRECT_MARK/$MARK_MASK" lookup main
+		ip rule add pref 81 fwmark "$VPN_MARK/$MARK_MASK" lookup 100
+		ip rule add pref 90 from "$lan_address" lookup 100
+		;;
+	bypass) ;;
+	*) echo "Usage: $0 vpn|bypass" >&2; exit 2 ;;
+esac

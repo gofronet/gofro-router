@@ -1,0 +1,36 @@
+#!/bin/sh /etc/rc.common
+# shellcheck disable=SC2034
+
+START=89
+
+recover_update() {
+	app_root=${APP_ROOT:-/usr/lib/gofro}
+	releases=$app_root/releases
+	current=$app_root/current
+	state_dir=${STATE_DIR:-/etc/gofro}
+	pending=$state_dir/update-previous
+	[ -s "$pending" ] || return 0
+
+	IFS= read -r previous < "$pending" || return 1
+	version=${previous#"$releases/"}
+	case "$version" in ''|*/*|*[!0-9.]*) return 1 ;; esac
+	[ "$previous" = "$releases/$version" ] || return 1
+	[ -d "$previous" ] || return 1
+
+	current_tmp=$app_root/current.new.$$
+	version_tmp=$state_dir/version.new
+	rm -f "$current_tmp" "$version_tmp"
+	ln -s "$previous" "$current_tmp" || return 1
+	mv -fT "$current_tmp" "$current" || return 1
+	sync || return 1
+	printf '%s\n' "$version" > "$version_tmp" || return 1
+	chmod 644 "$version_tmp" || return 1
+	mv -f "$version_tmp" "$state_dir/version" || return 1
+	sync || return 1
+	rm -f "$pending" || return 1
+	sync
+}
+
+boot() {
+	recover_update
+}

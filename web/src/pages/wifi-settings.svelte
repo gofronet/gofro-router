@@ -3,7 +3,6 @@
     import ExternalLink from "lucide-svelte/icons/external-link";
     import Globe2 from "lucide-svelte/icons/globe-2";
     import KeyRound from "lucide-svelte/icons/key-round";
-    import RefreshCw from "lucide-svelte/icons/refresh-cw";
     import Route from "lucide-svelte/icons/route";
     import Router from "lucide-svelte/icons/router";
     import Wifi from "lucide-svelte/icons/wifi";
@@ -15,11 +14,7 @@
     const busy = $derived(app.busy);
     const mutation = $derived(app.mutation);
     const reconnectSsid = $derived(app.reconnectSsid);
-    const updateStatus = $derived(app.updateStatus);
-    const updateError = $derived(app.updaterError);
-    const updateAction = $derived(app.updateAction);
-    const updating = $derived(app.updateActive);
-    const { setMode, saveAp, resumePolling, checkUpdate, startUpdate } = app;
+    const { setMode, saveAp, resumePolling } = app;
 
     let ssid = $state("");
     let password = $state("");
@@ -49,18 +44,9 @@
         if (await saveAp(nextSsid, password)) password = "";
     }
 
-    async function installUpdate() {
-        if (
-            confirm(
-                "Во время установки VPN и панель будут недоступны несколько секунд. Продолжить?",
-            )
-        ) {
-            await startUpdate();
-        }
-    }
 </script>
 
-<svelte:head><title>Wi-Fi · GofroWiFi</title></svelte:head>
+<svelte:head><title>Wi-Fi · Gofro Router</title></svelte:head>
 
 <section class="grid min-w-0 gap-5 lg:gap-6" aria-labelledby="wifi-title">
     <header class="min-w-0 px-0.5 py-2">
@@ -113,8 +99,8 @@
             </p>
             <a
                 class="mb-5 flex min-h-14 w-full max-w-md items-center justify-center gap-2.5 rounded-2xl border border-[#3b3b40] bg-[#202024] px-4 font-mono text-xs text-white no-underline"
-                href="http://gofrowifi.net"
-                ><Globe2 size={19} />http://gofrowifi.net<ExternalLink
+                href="http://gofrowifi.net:8080"
+                ><Globe2 size={19} />http://gofrowifi.net:8080<ExternalLink
                     size={16}
                 /></a
             >
@@ -125,7 +111,7 @@
             >
             <small
                 class="mt-3.5 max-w-md text-[0.68rem] leading-relaxed text-[#aaaab1]"
-                >Автообновление приостановлено, поэтому это сообщение останется
+                >Автоопрос приостановлен, поэтому это сообщение останется
                 на экране.</small
             >
         </article>
@@ -288,65 +274,31 @@
                 </article>
                 <article
                     class="min-w-0 overflow-hidden rounded-[28px] border border-[#dedee1] bg-white p-5 shadow-sm sm:p-6"
-                    aria-labelledby="update-title"
+                    aria-labelledby="system-title"
                 >
                     <div
                         class="mb-4.5 grid size-12.5 place-items-center rounded-2xl bg-[#f0f0f2]"
                     >
-                        <RefreshCw
-                            class={updating ? "animate-spin" : ""}
-                            size={22}
-                        />
+                        <Router size={22} />
                     </div>
                     <span class="text-xs text-[#74747d]">Система</span>
                     <h2
                         class="mb-1.5 mt-1 text-xl font-bold tracking-[-0.04em]"
-                        id="update-title"
+                        id="system-title"
                     >
-                        Обновление ПО
+                        OpenWrt
                     </h2>
                     <p class="m-0 text-xs leading-relaxed text-[#74747d]">
-                        Текущая версия: <strong class="text-[#09090b]"
-                            >{updateStatus?.installed_version ??
-                                status.version}</strong
+                        Версия Gofro: <strong class="text-[#09090b]"
+                            >{status.version}</strong
                         >
                     </p>
                     <p
-                        class={`mb-4 mt-3 text-xs leading-relaxed ${updateStatus?.state === "error" || updateError ? "text-red-700" : "text-[#74747d]"}`}
-                        role={updateStatus?.state === "error" || updateError
-                            ? "alert"
-                            : undefined}
+                        class="mb-0 mt-3 text-xs leading-relaxed text-[#74747d]"
                     >
-                        {updateError || app.updateText}
+                        Для установки подписанного обновления выполните
+                        <code>gofro-update</code> по SSH.
                     </p>
-                    {#if updating}
-                        <progress
-                            class="mb-1 h-2 w-full overflow-hidden rounded-full accent-[#09090b]"
-                            aria-label={app.updateText}
-                        ></progress>
-                    {:else if updateStatus?.state === "available"}
-                        <button
-                            class="min-h-12 w-full rounded-2xl border border-[#09090b] bg-[#09090b] px-4 text-xs font-bold text-white"
-                            type="button"
-                            disabled={busy}
-                            onclick={installUpdate}
-                            >{updateAction === "start"
-                                ? "Запускаем…"
-                                : `Установить ${updateStatus.version}`}</button
-                        >
-                    {:else}
-                        <button
-                            class="min-h-12 w-full rounded-2xl border border-[#09090b] bg-[#09090b] px-4 text-xs font-bold text-white"
-                            type="button"
-                            disabled={busy}
-                            onclick={checkUpdate}
-                            >{updateAction === "check"
-                                ? "Проверяем…"
-                                : updateStatus?.state === "success"
-                                  ? "Проверить снова"
-                                  : "Проверить обновления"}</button
-                        >
-                    {/if}
                 </article>
                 <article
                     class="flex min-w-0 gap-3 rounded-[20px] border border-[#dedee1] bg-white p-4"

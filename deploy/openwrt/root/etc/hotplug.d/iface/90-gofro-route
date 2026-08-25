@@ -1,0 +1,9 @@
+#!/bin/sh
+
+expected="$(uci -q get gofro.main.interface || echo gt0)"
+[ "$INTERFACE" = "$expected" ] || exit 0
+
+case "$ACTION" in
+	ifup) ip route replace default dev "${DEVICE:-$expected}" table 100 metric 10 ;;
+	ifdown) ip route del default dev "${DEVICE:-$expected}" table 100 2>/dev/null || true ;;
+esac

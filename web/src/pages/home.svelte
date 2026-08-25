@@ -31,7 +31,7 @@
   }
 </script>
 
-<svelte:head><title>Главная · GofroWiFi</title></svelte:head>
+<svelte:head><title>Главная · Gofro Router</title></svelte:head>
 
 <section
   class="mx-auto grid max-w-6xl min-w-0 gap-5 lg:gap-6"
@@ -51,7 +51,7 @@
         Обзор сети
       </h1>
       <p class="mt-3.5 max-w-2xl text-base leading-relaxed text-[#74747d]">
-        Маршрут, трафик и состояние GofroWiFi в одном месте.
+        Маршрут, трафик и состояние Gofro Router в одном месте.
       </p>
     </div>
     <span

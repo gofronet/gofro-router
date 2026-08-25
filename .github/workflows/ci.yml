@@ -40,10 +40,29 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun run build
+      - run: test "$(find ../assets -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)" = "$(printf 'app.css\napp.js\nindex.html')"
+      - run: test -z "$(git status --porcelain --untracked-files=all -- ../assets)"
 
   shell:
     name: Shell
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - run: bash -n deploy/pi/*.sh deploy/server/*.sh
+      - run: |
+          bash -n deploy/server/*.sh
+          sh -n deploy/openwrt/install.sh \
+            deploy/openwrt/root/etc/init.d/* \
+            deploy/openwrt/root/etc/hotplug.d/iface/* \
+            deploy/openwrt/root/usr/libexec/gofro/* \
+            deploy/openwrt/root/usr/sbin/* \
+            deploy/openwrt/tests/*.sh
+          shellcheck -s sh deploy/openwrt/install.sh \
+            deploy/openwrt/root/etc/init.d/* \
+            deploy/openwrt/root/etc/hotplug.d/iface/* \
+            deploy/openwrt/root/usr/libexec/gofro/* \
+            deploy/openwrt/root/usr/sbin/* \
+            deploy/openwrt/tests/*.sh
+          sh deploy/openwrt/tests/health.sh
+          sh deploy/openwrt/tests/mode.sh
+          sh deploy/openwrt/tests/transaction.sh
+          sh deploy/openwrt/tests/version.sh

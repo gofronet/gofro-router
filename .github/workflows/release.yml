@@ -13,8 +13,9 @@ concurrency:
 
 jobs:
   build:
-    name: Test and build ARM64
+    name: Build OpenWrt bundle
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -28,7 +29,7 @@ jobs:
           toolchain: '1.85'
           components: rustfmt, clippy
 
-      - name: Validate release commit and version
+      - name: Validate release
         run: |
           [[ $GITHUB_REF_NAME =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           git fetch origin main
@@ -37,52 +38,103 @@ jobs:
           cargo metadata --no-deps --format-version 1 |
             jq -e --arg version "$VERSION" 'all(.packages[]; .version == $version)'
 
-      - name: Test Rust and shell
+      - name: Test
         run: |
           cargo fmt --check
           cargo test --workspace --locked
           cargo clippy --workspace --all-targets --locked -- -D warnings
-          bash -n deploy/pi/*.sh deploy/server/*.sh
+          sh -n deploy/openwrt/install.sh \
+            deploy/openwrt/root/etc/init.d/* \
+            deploy/openwrt/root/etc/hotplug.d/iface/* \
+            deploy/openwrt/root/usr/libexec/gofro/* \
+            deploy/openwrt/root/usr/sbin/* \
+            deploy/openwrt/tests/*.sh
+          shellcheck -s sh deploy/openwrt/install.sh \
+            deploy/openwrt/root/etc/init.d/* \
+            deploy/openwrt/root/etc/hotplug.d/iface/* \
+            deploy/openwrt/root/usr/libexec/gofro/* \
+            deploy/openwrt/root/usr/sbin/* \
+            deploy/openwrt/tests/*.sh
+          sh deploy/openwrt/tests/mode.sh
+          sh deploy/openwrt/tests/health.sh
+          sh deploy/openwrt/tests/transaction.sh
+          sh deploy/openwrt/tests/version.sh
 
-      - name: Test and build web UI
+      - name: Build web UI
         working-directory: web
         run: |
           bun install --frozen-lockfile
           bun run check
           bun run build
 
-      - name: Build against Debian 12 ARM64 sysroot
+      - name: Download OpenWrt SDK
+        env:
+          SDK_FILE: openwrt-sdk-25.12.0-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+          SDK_SHA256: 7e45a85b4af8af53ff17ca610ad6a7df312568cb52b730f93a21a91899f33139
         run: |
-          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
-            -e CARGO_TARGET_DIR=/work/target/ci-arm64 \
-            rust@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4 \
-            sh -c 'rustup target add aarch64-unknown-linux-gnu && \
-              apt-get update && apt-get install -y gcc-aarch64-linux-gnu && \
-              CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
-              cargo build --locked --release --target aarch64-unknown-linux-gnu \
-                -p pi-agent -p wg-relay -p gofro-updater'
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd
+          curl --fail --location --retry 3 \
+            "https://downloads.openwrt.org/releases/25.12.0/targets/mediatek/filogic/$SDK_FILE" \
+            -o "$RUNNER_TEMP/$SDK_FILE"
+          printf '%s  %s\n' "$SDK_SHA256" "$RUNNER_TEMP/$SDK_FILE" | sha256sum -c -
+          tar --use-compress-program=unzstd -xf "$RUNNER_TEMP/$SDK_FILE" -C "$RUNNER_TEMP"
 
-      - name: Package update
+      - name: Cross-compile static binaries
+        run: |
+          rustup target add aarch64-unknown-linux-musl
+          TOOLCHAIN=$(printf '%s\n' "$RUNNER_TEMP"/openwrt-sdk-*/staging_dir/toolchain-aarch64_cortex-a53_gcc-*_musl)
+          CC=$TOOLCHAIN/bin/aarch64-openwrt-linux-musl-gcc
+          export CC_aarch64_unknown_linux_musl=$CC
+          export AR_aarch64_unknown_linux_musl=$TOOLCHAIN/bin/aarch64-openwrt-linux-musl-gcc-ar
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=$CC
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-cpu=cortex-a53 -C target-feature=+crt-static'
+          export CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target/openwrt
+          cargo build --locked --release --target aarch64-unknown-linux-musl \
+            -p gofro-agent -p gofro-relay
+          file target/openwrt/aarch64-unknown-linux-musl/release/gofro-agent | grep -q 'statically linked'
+          file target/openwrt/aarch64-unknown-linux-musl/release/gofro-relay | grep -q 'statically linked'
+
+      - name: Package bundle
+        env:
+          GEOSITE_VERSION: '20260824014107'
+          GEOSITE_SHA256: f6ed069213b5cb087ebb2d60d0b086b5eb0de42b4de0eba90cbacc4790d6a78e
+          GEOIP_VERSION: '202608050239'
+          GEOIP_SHA256: c67bd077eb102cec74fab759b73d17f99275f56af10a87c14d9fd983508f5ce1
         run: |
           set -euo pipefail
           VERSION=${GITHUB_REF_NAME#v}
-          TARGET=aarch64-unknown-linux-gnu
-          ARCHIVE=gofro-router-aarch64-unknown-linux-gnu.tar.gz
+          TARGET=aarch64-unknown-linux-musl
+          ARCHIVE=gofro-router-aarch64-openwrt-linux-musl.tar.gz
           DIST=$RUNNER_TEMP/dist
           BUNDLE=$RUNNER_TEMP/bundle
-          install -d "$DIST" "$BUNDLE"
-          install -m 755 "target/ci-arm64/$TARGET/release/pi-agent" "$BUNDLE/pi-agent"
-          install -m 755 "target/ci-arm64/$TARGET/release/wg-relay" "$BUNDLE/wg-relay"
-          install -m 755 "target/ci-arm64/$TARGET/release/gofro-updater" "$BUNDLE/gofro-updater"
-          install -m 755 deploy/pi/migrate.sh "$BUNDLE/migrate.sh"
+          mkdir -p "$DIST" "$BUNDLE"
+          cp -R deploy/openwrt/root deploy/openwrt/defaults "$BUNDLE/"
+          install -m 755 deploy/openwrt/install.sh "$BUNDLE/install.sh"
+          install -m 644 deploy/openwrt/update-public.pem "$BUNDLE/update-public.pem"
+          printf '%s\n' "$VERSION" > "$BUNDLE/VERSION"
+          install -D -m 755 "target/openwrt/$TARGET/release/gofro-agent" "$BUNDLE/root/usr/bin/gofro-agent"
+          install -D -m 755 "target/openwrt/$TARGET/release/gofro-relay" "$BUNDLE/root/usr/bin/gofro-relay"
+          install -D -m 644 GEODATA-LICENSES.md "$BUNDLE/root/usr/share/gofro/GEODATA-LICENSES.md"
+          curl --fail --location --retry 3 \
+            "https://github.com/v2fly/domain-list-community/releases/download/$GEOSITE_VERSION/dlc.dat" \
+            -o "$BUNDLE/root/usr/share/gofro/geosite.dat"
+          curl --fail --location --retry 3 \
+            "https://github.com/v2fly/geoip/releases/download/$GEOIP_VERSION/geoip.dat" \
+            -o "$BUNDLE/root/usr/share/gofro/geoip.dat"
+          printf '%s  %s\n' "$GEOSITE_SHA256" "$BUNDLE/root/usr/share/gofro/geosite.dat" |
+            sha256sum -c -
+          printf '%s  %s\n' "$GEOIP_SHA256" "$BUNDLE/root/usr/share/gofro/geoip.dat" |
+            sha256sum -c -
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$GITHUB_SHA")
           tar -C "$BUNDLE" --owner=0 --group=0 --numeric-owner \
             --mtime="@$SOURCE_DATE_EPOCH" -czf "$DIST/$ARCHIVE" \
-            pi-agent wg-relay gofro-updater migrate.sh
+            VERSION defaults install.sh root update-public.pem
           SHA=$(sha256sum "$DIST/$ARCHIVE" | cut -d ' ' -f1)
           jq -S -n --arg version "$VERSION" --arg archive "$ARCHIVE" --arg sha256 "$SHA" \
-            '{schema: 1, version: $version, target: "aarch64-unknown-linux-gnu", archive: $archive, sha256: $sha256}' \
+            '{schema: 1, version: $version, target: "aarch64-openwrt-linux-musl", archive: $archive, sha256: $sha256}' \
             > "$DIST/gofro-router-manifest.json"
+          install -m 755 deploy/openwrt/root/usr/sbin/gofro-update "$DIST/gofro-install"
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
@@ -107,29 +159,7 @@ jobs:
           name: signed-release-input
           path: ${{ runner.temp }}/dist
 
-      - name: Validate unsigned release input
-        run: |
-          set -euo pipefail
-          DIST=$RUNNER_TEMP/dist
-          VERSION=${GITHUB_REF_NAME#v}
-          ARCHIVE=$DIST/gofro-router-aarch64-unknown-linux-gnu.tar.gz
-          MANIFEST=$DIST/gofro-router-manifest.json
-          shopt -s nullglob dotglob
-          FILES=("$DIST"/*)
-          [[ ${#FILES[@]} == 2 && -f $ARCHIVE && -f $MANIFEST ]]
-          SHA=$(sha256sum "$ARCHIVE" | cut -d ' ' -f1)
-          jq -e --arg version "$VERSION" --arg sha256 "$SHA" '
-            type == "object" and
-            keys == ["archive", "schema", "sha256", "target", "version"] and
-            .schema == 1 and .version == $version and
-            .target == "aarch64-unknown-linux-gnu" and
-            .archive == "gofro-router-aarch64-unknown-linux-gnu.tar.gz" and
-            .sha256 == $sha256
-          ' "$MANIFEST"
-          mapfile -t MEMBERS < <(tar -tzf "$ARCHIVE")
-          [[ ${MEMBERS[*]} == "pi-agent wg-relay gofro-updater migrate.sh" ]]
-
-      - name: Sign and verify manifest
+      - name: Sign release
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
         run: |
@@ -143,9 +173,31 @@ jobs:
           openssl pkeyutl -sign -inkey "$KEY" -rawin \
             -in "$DIST/gofro-router-manifest.json" \
             -out "$DIST/gofro-router-manifest.json.sig"
-          openssl pkeyutl -verify -pubin -inkey deploy/pi/update-public.pem -rawin \
+          openssl pkeyutl -verify -pubin -inkey deploy/openwrt/update-public.pem -rawin \
             -in "$DIST/gofro-router-manifest.json" \
             -sigfile "$DIST/gofro-router-manifest.json.sig"
+
+      - name: Validate release assets
+        run: |
+          set -euo pipefail
+          DIST=$RUNNER_TEMP/dist
+          VERSION=${GITHUB_REF_NAME#v}
+          ARCHIVE=$DIST/gofro-router-aarch64-openwrt-linux-musl.tar.gz
+          MANIFEST=$DIST/gofro-router-manifest.json
+          SHA=$(sha256sum "$ARCHIVE" | cut -d ' ' -f1)
+          jq -e --arg version "$VERSION" --arg sha256 "$SHA" '
+            type == "object" and
+            keys == ["archive", "schema", "sha256", "target", "version"] and
+            .schema == 1 and .version == $version and
+            .target == "aarch64-openwrt-linux-musl" and
+            .archive == "gofro-router-aarch64-openwrt-linux-musl.tar.gz" and
+            .sha256 == $sha256
+          ' "$MANIFEST"
+          test -s "$DIST/gofro-install"
+          MEMBERS=$(tar -tzf "$ARCHIVE")
+          grep -qx VERSION <<< "$MEMBERS"
+          grep -qx install.sh <<< "$MEMBERS"
+          grep -qx root/usr/sbin/gofro-update <<< "$MEMBERS"
 
       - name: Publish immutable release
         env:
@@ -154,12 +206,13 @@ jobs:
           set -euo pipefail
           DIST=$RUNNER_TEMP/dist
           ASSETS=(
-            "$DIST/gofro-router-aarch64-unknown-linux-gnu.tar.gz"
+            "$DIST/gofro-router-aarch64-openwrt-linux-musl.tar.gz"
             "$DIST/gofro-router-manifest.json"
             "$DIST/gofro-router-manifest.json.sig"
+            "$DIST/gofro-install"
           )
           if STATE=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null); then
-            [[ $STATE == true ]] || { echo "published releases are immutable" >&2; exit 1; }
+            [[ $STATE == true ]] || { echo 'published release already exists' >&2; exit 1; }
             gh release upload "$GITHUB_REF_NAME" "${ASSETS[@]}" --clobber
           else
             gh release create "$GITHUB_REF_NAME" "${ASSETS[@]}" --verify-tag --draft \

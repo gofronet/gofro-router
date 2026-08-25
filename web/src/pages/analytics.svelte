@@ -43,7 +43,7 @@
   }
 </script>
 
-<svelte:head><title>Аналитика · GofroWiFi</title></svelte:head>
+<svelte:head><title>Аналитика · Gofro Router</title></svelte:head>
 
 <section class="grid min-w-0 gap-5 lg:gap-6" aria-labelledby="analytics-title">
   <header

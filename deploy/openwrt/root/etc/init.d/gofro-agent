@@ -1,0 +1,41 @@
+#!/bin/sh /etc/rc.common
+# shellcheck disable=SC2034,SC3043
+
+START=95
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	local listen interface lan_interface wifi_interface dns_upstream
+
+	config_load gofro
+	config_get listen main listen '10.203.1.1:8080'
+	config_get interface main interface 'gt0'
+	config_get lan_interface main lan_interface 'br-lan'
+	config_get wifi_interface main wifi_interface
+	config_get dns_upstream main dns_upstream '1.1.1.1:53'
+	[ -n "$wifi_interface" ] || wifi_interface="$(iw dev 2>/dev/null | awk '$1 == "Interface" { print $2; exit }')"
+	[ -n "$wifi_interface" ] || wifi_interface='phy0-ap0'
+
+	mkdir -p /tmp/gofro
+	procd_open_instance
+	procd_set_param command /usr/bin/gofro-agent
+	procd_append_param command --listen "$listen"
+	procd_append_param command --interface "$interface"
+	procd_append_param command --lan-interface "$lan_interface"
+	procd_append_param command --wifi-interface "$wifi_interface"
+	procd_append_param command --mode-command /usr/libexec/gofro/mode
+	procd_append_param command --geosite /usr/share/gofro/geosite.dat
+	procd_append_param command --geoip /usr/share/gofro/geoip.dat
+	procd_append_param command --dns-upstream "$dns_upstream"
+	procd_append_param command --routing-state /tmp/gofro/routing.sqlite
+	procd_set_param env RUST_LOG=gofro_agent=info
+	procd_set_param respawn
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger gofro network wireless
+}

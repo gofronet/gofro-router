@@ -1,0 +1,24 @@
+[package]
+name = "gofro-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+hickory-proto.workspace = true
+idna.workspace = true
+ipnet.workspace = true
+prost.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+socket2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wireguard-status.workspace = true

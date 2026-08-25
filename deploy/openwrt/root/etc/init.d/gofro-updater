@@ -1,0 +1,14 @@
+#!/bin/sh /etc/rc.common
+# shellcheck disable=SC2034
+
+START=96
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	procd_open_instance
+	procd_set_param command /bin/sh -c \
+		'while :; do sleep 300; /usr/sbin/gofro-update 2>&1 | logger -t gofro-update; sleep 21300; done'
+	procd_set_param respawn
+	procd_close_instance
+}
