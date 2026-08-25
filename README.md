@@ -45,8 +45,19 @@ Rust workspace разделён по runtime-ролям:
 - `wireguard-status` читает и разбирает `wg show ... dump`;
 - `gofro-relay` передаёт WireGuard-пакеты между роутером и VPS.
 
-Установка выполняется одной командой и описана в
-[deploy/openwrt/README.md](deploy/openwrt/README.md).
+## Установка
+
+На свежем поддерживаемом OpenWrt замените `RU` на двухбуквенный код своей
+страны и выполните одну команду:
+
+```sh
+tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && uclient-fetch -q -O "$tmp" https://github.com/gofronet/gofro-router/releases/latest/download/gofro-install && sh "$tmp" --install RU
+```
+
+Установщик скачает подписанный релиз, проверит его и настроит Gofro. После
+установки подключитесь к `GofroNET WiFi` и откройте
+[gofrowifi.net:8080](http://gofrowifi.net:8080). Подробности и настройка VPS
+описаны в [deploy/openwrt/README.md](deploy/openwrt/README.md).
 
 ## Схема сети
 
