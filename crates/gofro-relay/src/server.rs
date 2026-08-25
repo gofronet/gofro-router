@@ -4,7 +4,7 @@ use std::{
     net::{SocketAddr, UdpSocket},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -24,7 +24,7 @@ const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Session {
     socket: UdpSocket,
-    last_seen: Arc<AtomicU64>,
+    last_seen: Arc<AtomicU32>,
     worker_alive: Arc<AtomicBool>,
 }
 
@@ -95,7 +95,7 @@ impl Session {
         socket
             .set_read_timeout(Some(RECEIVE_TIMEOUT))
             .context("failed to configure relay session")?;
-        let last_seen = Arc::new(AtomicU64::new(unix_time()));
+        let last_seen = Arc::new(AtomicU32::new(unix_time()));
         let worker_alive = Arc::new(AtomicBool::new(true));
         let worker_socket = socket.try_clone()?;
         let worker_public = public.try_clone()?;
@@ -198,15 +198,17 @@ fn remove_idle(sessions: &mut HashMap<SocketAddr, Session>, idle: Duration) {
     });
 }
 
-fn is_idle(last_seen: u64, idle: Duration) -> bool {
-    unix_time().saturating_sub(last_seen) >= idle.as_secs()
+fn is_idle(last_seen: u32, idle: Duration) -> bool {
+    u64::from(unix_time().saturating_sub(last_seen)) >= idle.as_secs()
 }
 
-fn unix_time() -> u64 {
+fn unix_time() -> u32 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+        .try_into()
+        .unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]

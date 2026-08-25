@@ -1,7 +1,9 @@
 # Geodata licenses
 
-`geosite.dat` is an unmodified build from V2Fly domain-list-community,
-version `20260824014107`: https://github.com/v2fly/domain-list-community
+The TR3000 `geosite.dat` is an unmodified build from V2Fly
+domain-list-community, version `20260824014107`. The LT300 artifact is a
+filtered derivative containing only `category-ru`:
+https://github.com/v2fly/domain-list-community
 
 MIT License
 
@@ -25,8 +27,9 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-`geoip.dat` is an unmodified build from V2Fly geoip, version `202608050239`:
-https://github.com/v2fly/geoip
+The TR3000 `geoip.dat` is an unmodified build from V2Fly geoip, version
+`202608050239`. The LT300 artifact is a filtered derivative containing only
+`ru`: https://github.com/v2fly/geoip
 
 It is licensed under Creative Commons Attribution-ShareAlike 4.0 International:
 https://creativecommons.org/licenses/by-sa/4.0/

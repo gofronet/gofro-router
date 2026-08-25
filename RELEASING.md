@@ -1,7 +1,7 @@
 # Releases
 
-Stable tags cross-compile static AArch64 musl binaries with the pinned OpenWrt
-25.12 SDK toolchain and publish a signed installation bundle.
+Stable tags cross-compile static AArch64 and MIPS little-endian musl binaries
+with pinned OpenWrt 25.12 SDK toolchains and publish signed installation bundles.
 
 ## Create a release
 
@@ -10,8 +10,9 @@ Stable tags cross-compile static AArch64 musl binaries with the pinned OpenWrt
 3. Create and push the matching tag:
 
    ```sh
-   git tag v0.4.0
-   git push origin v0.4.0
+   VERSION=0.4.1
+   git tag "v$VERSION"
+   git push origin "v$VERSION"
    ```
 
 The workflow rejects a tag that differs from the Cargo workspace version. It
@@ -28,6 +29,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cd web && bun install --frozen-lockfile && bun run check && bun run build
 cd .. && sh deploy/openwrt/tests/mode.sh && sh deploy/openwrt/tests/transaction.sh
 sh deploy/openwrt/tests/version.sh
+python3 deploy/openwrt/tests/geodata_filter.py
 ```
 
 ## Upgrade a router

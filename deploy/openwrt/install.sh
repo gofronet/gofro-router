@@ -14,10 +14,19 @@ LOCK=/tmp/gofro-install.lock
 LOCKED=
 PENDING=/etc/gofro/update-previous
 ROLLBACK=
+PLATFORM=
 
 die() {
 	echo "error: $*" >&2
 	exit 1
+}
+
+platform_for() {
+	case "$1:$2" in
+		mediatek/filogic:cudy,tr3000-256mb-v1) echo aarch64-openwrt-linux-musl ;;
+		ramips/mt76x8:cudy,lt300-v3) echo mipsel-openwrt-linux-musl ;;
+		*) return 1 ;;
+	esac
 }
 
 # shellcheck disable=SC2317,SC2329
@@ -28,6 +37,7 @@ cleanup() {
 	if [ -n "$ROLLBACK" ] && switch_current "$ROLLBACK"; then
 		if restart_services && write_version "${ROLLBACK##*/}"; then
 			clear_pending
+			[ -z "${release:-}" ] || [ "$release" = "$ROLLBACK" ] || rm -rf "$release"
 		fi
 	fi
 	[ -z "$STAGING" ] || rm -rf "$STAGING"
@@ -162,15 +172,30 @@ healthy() {
 	return 1
 }
 
+enough_space() {
+	required="$(du -sk "$ROOTFS" | awk 'NR == 1 { print $1 }')"
+	available="$(df -Pk /overlay | awk 'END { print $4 }')"
+	case "$required:$available" in *[!0-9:]*) return 1 ;; esac
+	[ "$available" -ge "$((required + 512))" ]
+}
+
+prune_releases() {
+	[ -d "$RELEASES" ] || return 0
+	for old_release in "$RELEASES"/*; do
+		if [ "$old_release" = "$1" ] || { [ -n "$2" ] && [ "$old_release" = "$2" ]; }; then
+			continue
+		fi
+		rm -rf "$old_release"
+	done
+}
+
 [ "$(id -u)" = 0 ] || die 'run as root'
-[ "$(uname -m)" = aarch64 ] || die 'Gofro requires an AArch64 router'
 [ -r /etc/openwrt_release ] || die 'OpenWrt is required'
 # shellcheck disable=SC1091
 . /etc/openwrt_release
 case "${DISTRIB_RELEASE:-}" in 25.12.*) ;; *) die 'OpenWrt 25.12 is required' ;; esac
-[ "${DISTRIB_TARGET:-}" = mediatek/filogic ] || die 'the mediatek/filogic target is required'
 IFS= read -r board < /tmp/sysinfo/board_name || die 'router model is unavailable'
-[ "$board" = cudy,tr3000-256mb-v1 ] || die 'the Cudy TR3000 256MB v1 is required'
+PLATFORM="$(platform_for "${DISTRIB_TARGET:-}" "$board")" || die "unsupported router: $board"
 
 case "${1:-}" in
 	--update) mode=update ;;
@@ -180,6 +205,8 @@ esac
 
 IFS= read -r VERSION < "$BUNDLE/VERSION" || die 'bundle has no VERSION'
 valid_version "$VERSION" || die 'bundle version is invalid'
+IFS= read -r TARGET < "$BUNDLE/TARGET" || die 'bundle has no TARGET'
+[ "$TARGET" = "$PLATFORM" ] || die 'bundle target does not match this router'
 [ "$(binary_version "$ROOTFS/usr/bin/gofro-agent")" = "$VERSION" ] || die 'gofro-agent version mismatch'
 [ "$(binary_version "$ROOTFS/usr/bin/gofro-relay")" = "$VERSION" ] || die 'gofro-relay version mismatch'
 for path in \
@@ -208,6 +235,16 @@ elif [ -e "$CURRENT" ]; then
 	die 'current release is not a symlink'
 fi
 
+release=$RELEASES/$VERSION
+pending=
+if [ -s "$PENDING" ]; then
+	[ "$mode" = update ] || die 'a pending update must be recovered before installing'
+	IFS= read -r pending < "$PENDING" || die 'pending update is invalid'
+	valid_release "$pending" || die 'pending update is invalid'
+	[ "$previous" = "$release" ] || die 'a pending update must be recovered before installing another version'
+fi
+prune_releases "$previous" "$pending"
+
 if [ "$mode" = install ]; then
 	apk update
 	apk add ca-bundle dnsmasq firewall4 ip-full iw jsonfilter kmod-wireguard \
@@ -216,11 +253,11 @@ else
 	[ -n "$previous" ] || die 'Gofro is not installed'
 fi
 
-release=$RELEASES/$VERSION
+[ "$previous" = "$release" ] || enough_space || die 'not enough free overlay space for this release'
+
 if [ "$previous" = "$release" ]; then
-	if [ "$mode" = update ] && [ -s "$PENDING" ]; then
-		IFS= read -r ROLLBACK < "$PENDING" || die 'pending update is invalid'
-		valid_release "$ROLLBACK" || die 'pending update is invalid'
+	if [ "$mode" = update ] && [ -n "$pending" ]; then
+		ROLLBACK=$pending
 		if restart_services && healthy; then
 			write_version "$VERSION"
 			clear_pending
@@ -295,9 +332,7 @@ if restart_services && healthy; then
 	write_version "$VERSION"
 	clear_pending
 	ROLLBACK=
-	for old_release in "$RELEASES"/*; do
-		[ "$old_release" = "$release" ] || [ "$old_release" = "$previous" ] || rm -rf "$old_release"
-	done
+	prune_releases "$release" ''
 	echo "Gofro updated to $VERSION"
 	exit 0
 fi

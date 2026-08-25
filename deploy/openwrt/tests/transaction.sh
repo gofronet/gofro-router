@@ -68,3 +68,29 @@ switch_current "$RELEASES/0.4.0"
 	[ "$status" -ne 0 ]
 )
 [ -e "$STATE_DIR/update-previous" ]
+
+# Installation refuses to fill overlay without one release plus a small margin.
+sed -n '/^enough_space() {$/,/^}$/p' "$ROOT/deploy/openwrt/install.sh" > "$TMP/enough-space.sh"
+# shellcheck disable=SC1091
+. "$TMP/enough-space.sh"
+ROOTFS=$TMP/rootfs
+mkdir "$ROOTFS"
+du() { printf '100\t%s\n' "$ROOTFS"; }
+df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 1000 388 %s 39%% /overlay\n' "$TEST_AVAILABLE"; }
+TEST_AVAILABLE=612
+enough_space
+TEST_AVAILABLE=611
+enough_space && exit 1
+
+# Pruning preserves both sides of an interrupted transaction until recovery.
+sed -n '/^prune_releases() {$/,/^}$/p' "$ROOT/deploy/openwrt/install.sh" > "$TMP/prune-releases.sh"
+# shellcheck disable=SC1091
+. "$TMP/prune-releases.sh"
+mkdir "$RELEASES/0.5.0"
+prune_releases "$RELEASES/0.4.0" "$RELEASES/0.3.0"
+[ -d "$RELEASES/0.3.0" ]
+[ -d "$RELEASES/0.4.0" ]
+[ ! -e "$RELEASES/0.5.0" ]
+prune_releases "$RELEASES/0.4.0" ''
+[ ! -e "$RELEASES/0.3.0" ]
+[ -d "$RELEASES/0.4.0" ]
