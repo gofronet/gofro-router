@@ -10,7 +10,7 @@ with pinned OpenWrt 25.12 SDK toolchains and publish signed installation bundles
 3. Create and push the matching tag:
 
    ```sh
-   VERSION=0.4.1
+   VERSION=0.4.2
    git tag "v$VERSION"
    git push origin "v$VERSION"
    ```

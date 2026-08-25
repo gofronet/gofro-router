@@ -245,7 +245,7 @@
         >
       </div>
     {:else}
-      <div class="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      <div class="grid min-w-0 items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {#each status.devices as device (device.mac)}
           {@const open = expanded === device.mac}
           {@const quality = signalQuality(device.signal_dbm)}

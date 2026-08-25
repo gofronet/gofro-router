@@ -36,10 +36,10 @@
 </svelte:head>
 
 <div
-  class="min-h-dvh bg-[#f5f5f5] font-sans text-[#09090b] lg:grid lg:grid-cols-[250px_minmax(0,1fr)]"
+  class="min-h-dvh bg-[#f5f5f5] font-sans text-[#09090b] lg:pl-[250px]"
 >
   <aside
-    class="sticky top-0 hidden h-dvh flex-col border-r border-[#dedee1] bg-white/80 px-5 py-8 backdrop-blur-xl lg:flex"
+    class="fixed inset-y-0 left-0 hidden w-[250px] flex-col overflow-y-auto border-r border-[#dedee1] bg-white/80 px-5 py-8 backdrop-blur-xl lg:flex"
     aria-label="Основная навигация"
   >
     <a
