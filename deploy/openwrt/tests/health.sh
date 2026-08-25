@@ -51,7 +51,11 @@ status_file=$STATUS_FILE
 install_status_healthy 0.4.0
 
 TEST_DATAPLANE=false
-install_status_healthy 0.4.0 && exit 1
+set +e
+install_status_healthy 0.4.0
+status=$?
+set -e
+[ "$status" -ne 0 ]
 TEST_DATAPLANE=true
 
 TEST_VPN=true
@@ -60,8 +64,16 @@ TEST_HANDSHAKE_AGE=30
 status_healthy
 
 TEST_HANDSHAKE_AGE=181
-status_healthy && exit 1
+set +e
+status_healthy
+status=$?
+set -e
+[ "$status" -ne 0 ]
 
 TEST_HANDSHAKE_AGE=30
 TEST_TUNNEL=false
-status_healthy && exit 1
+set +e
+status_healthy
+status=$?
+set -e
+[ "$status" -ne 0 ]
