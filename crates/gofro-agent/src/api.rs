@@ -258,10 +258,10 @@ fn queue_update() -> Result<()> {
     }
 
     fs::create_dir_all("/tmp/gofro").context("failed to create update state directory")?;
-    if let Err(error) = fs::remove_file(UPDATE_RESULT) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            return Err(error).context("failed to clear previous update result");
-        }
+    if let Err(error) = fs::remove_file(UPDATE_RESULT)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error).context("failed to clear previous update result");
     }
     fs::write(UPDATE_TRIGGER, []).context("failed to queue update")?;
 
