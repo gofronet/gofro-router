@@ -19,7 +19,7 @@ use crate::{
         RoutingStatus, RoutingTestInput, RoutingTestResult, ServerKeyInput, ServerProfile,
         ServerUpdate, UpdateInput, UpdateResult, UpdateStatus,
     },
-    network::service_active,
+    network::{access_points, service_active},
     wifi,
 };
 
@@ -218,6 +218,8 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
         None
     };
     let readings = wifi::devices(&state.wifi_interface);
+    let networks = access_points()?;
+    let ap_ssid = networks[0].ssid.clone();
     let (stats, history, devices) = state
         .stats
         .lock()
@@ -233,7 +235,8 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
         active_server_key: config.active_server_key,
         servers: config.servers,
         ap: ApStatus {
-            ssid: config.ap_ssid,
+            ssid: ap_ssid,
+            networks,
             address: AP_ADDRESS,
             domain: AP_DOMAIN,
         },

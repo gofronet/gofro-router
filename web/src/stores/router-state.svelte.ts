@@ -9,6 +9,7 @@ import type {
   RoutingTest,
   ServerInput,
   Status,
+  WifiBand,
 } from "../domain/models";
 
 export class RouterState {
@@ -139,9 +140,13 @@ export class RouterState {
       serverService.remove(publicKey),
     );
 
-  saveAp = async (ssid: string, password: string): Promise<boolean> => {
-    const saved = await this.mutate("ap", () =>
-      wifiService.save({ ssid, password }),
+  saveAp = async (
+    band: WifiBand | undefined,
+    ssid: string,
+    password: string,
+  ): Promise<boolean> => {
+    const saved = await this.mutate(`ap:${band ?? "all"}`, () =>
+      wifiService.save({ band, ssid, password }),
     );
     if (saved) this.reconnectSsid = ssid;
     return saved;

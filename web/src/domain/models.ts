@@ -9,5 +9,6 @@ export type {
   Server,
   ServerInput,
   Status,
+  WifiBand,
   WifiInput,
 } from "../api/schemas";

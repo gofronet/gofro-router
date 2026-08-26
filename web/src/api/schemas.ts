@@ -6,6 +6,8 @@ export const serverSchema = z.object({
   public_key: z.string(),
 });
 
+export const wifiBandSchema = z.enum(["2g", "5g"]);
+
 export const historyPointSchema = z.object({
   timestamp: z.number(),
   rx_bps: z.number(),
@@ -61,6 +63,21 @@ export const routingTestSchema = z.object({
   matched_rule: z.string().nullable(),
 });
 
+const apStatusSchema = z.object({
+  ssid: z.string().optional(),
+  networks: z.array(z.object({
+    band: wifiBandSchema,
+    ssid: z.string(),
+  })).optional(),
+  address: z.string(),
+  domain: z.string(),
+}).refine((ap) => ap.networks !== undefined || ap.ssid !== undefined)
+  .transform((ap) => ({
+    networks: ap.networks ?? [{ band: undefined, ssid: ap.ssid! }],
+    address: ap.address,
+    domain: ap.domain,
+  }));
+
 export const statusSchema = z.object({
   version: z.string(),
   update: z.object({
@@ -72,11 +89,7 @@ export const statusSchema = z.object({
   interface: z.string(),
   active_server_key: z.string().nullable(),
   servers: z.array(serverSchema),
-  ap: z.object({
-    ssid: z.string(),
-    address: z.string(),
-    domain: z.string(),
-  }),
+  ap: apStatusSchema,
   peer: z.object({
     public_key: z.string(),
     endpoint: z.string().nullable(),
@@ -110,6 +123,7 @@ export const statusSchema = z.object({
 
 export const serverInputSchema = serverSchema;
 export const wifiInputSchema = z.object({
+  band: wifiBandSchema.optional(),
   ssid: z.string(),
   password: z.string(),
 });
@@ -120,6 +134,7 @@ export type Device = z.infer<typeof deviceSchema>;
 export type Status = z.infer<typeof statusSchema>;
 export type ServerInput = z.infer<typeof serverInputSchema>;
 export type WifiInput = z.infer<typeof wifiInputSchema>;
+export type WifiBand = z.infer<typeof wifiBandSchema>;
 export type RouteTarget = z.infer<typeof routeTargetSchema>;
 export type DomainRule = z.infer<typeof domainRuleSchema>;
 export type IpRule = z.infer<typeof ipRuleSchema>;

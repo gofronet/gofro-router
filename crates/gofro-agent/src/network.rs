@@ -2,7 +2,11 @@ use std::{fs, process::Command};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::{AppState, config::validate_server, model::ServerProfile};
+use crate::{
+    AppState,
+    config::validate_server,
+    model::{ApNetwork, ServerProfile, WifiBand},
+};
 
 const RELAY_ENDPOINT_PATH: &str = "/etc/gofro/relay-endpoint";
 const RELAY_SERVICE: &str = "gofro-relay";
@@ -142,12 +146,63 @@ pub(crate) fn apply_mode(state: &AppState, mode: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn update_ap(ssid: &str, password: Option<&str>) -> Result<()> {
+pub(crate) fn access_points() -> Result<Vec<ApNetwork>> {
+    parse_access_points(&run(Command::new(WIFI_COMMAND).arg("list"))?)
+}
+
+fn parse_access_points(output: &str) -> Result<Vec<ApNetwork>> {
+    let mut networks = Vec::new();
+    for line in output.lines() {
+        let (band, ssid) = line
+            .split_once('\t')
+            .context("invalid Wi-Fi helper output")?;
+        let band = match band {
+            "2g" => WifiBand::TwoGhz,
+            "5g" => WifiBand::FiveGhz,
+            _ => bail!("unsupported Wi-Fi band: {band}"),
+        };
+        if ssid.is_empty() {
+            bail!("Wi-Fi helper returned an empty SSID");
+        }
+        if networks
+            .iter()
+            .any(|network: &ApNetwork| network.band == band)
+        {
+            continue;
+        }
+        networks.push(ApNetwork {
+            band,
+            ssid: ssid.to_owned(),
+        });
+    }
+    if networks.is_empty() {
+        bail!("Wi-Fi helper returned no access points");
+    }
+    Ok(networks)
+}
+
+pub(crate) fn update_ap(band: Option<WifiBand>, ssid: &str, password: Option<&str>) -> Result<()> {
     let mut command = Command::new(WIFI_COMMAND);
-    command.arg(ssid);
+    command.args(["set", band.map_or("all", WifiBand::as_str), ssid]);
     if let Some(password) = password {
         command.arg(password);
     }
     run(&mut command)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_access_point_bands() {
+        let networks =
+            parse_access_points("2g\tGofroWIFI 2\n2g\tGuest Wi-Fi\n5g\tGofroWIFI 5\n").unwrap();
+        assert_eq!(networks.len(), 2);
+        assert_eq!(networks[0].band, WifiBand::TwoGhz);
+        assert_eq!(networks[0].ssid, "GofroWIFI 2");
+        assert_eq!(networks[1].ssid, "GofroWIFI 5");
+        assert!(parse_access_points("6g\tUnsupported\n").is_err());
+    }
 }

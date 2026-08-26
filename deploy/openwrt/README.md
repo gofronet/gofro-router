@@ -15,8 +15,8 @@ tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && uclient-fetch -q -O "$tmp" https:
 
 The bootstrap downloads the signed release manifest, verifies the archive, adds
 the required OpenWrt packages, changes the LAN address to `10.203.1.1`, and
-prints the generated Wi-Fi password. Reconnect to `GofroNET WiFi` and open
-`http://gofrowifi.net:8080`.
+prints the generated Wi-Fi password. Reconnect to `GofroWIFI 2` or, on the
+dual-band TR3000, `GofroWIFI 5`, then open `http://gofrowifi.net:8080`.
 
 The LT300 bundle contains only the default `category-ru` GeoSite and `ru` GeoIP
 entries because the device has 16 MB flash and 64 MB RAM. The TR3000 bundle

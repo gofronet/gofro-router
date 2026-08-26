@@ -70,16 +70,25 @@ uci set dhcp.@dnsmasq[0].noresolv='1'
 uci -q del_list dhcp.@dnsmasq[0].address='/gofrowifi.net/10.203.1.1' || true
 uci add_list dhcp.@dnsmasq[0].address='/gofrowifi.net/10.203.1.1'
 
+configured_wifi=0
 for section in $wifi_sections; do
 	[ "$(uci -q get "wireless.$section.mode")" = ap ] || continue
+	device="$(uci -q get "wireless.$section.device" || true)"
+	band="$(uci -q get "wireless.$device.band" || true)"
+	case "$band" in
+		2g) ssid='GofroWIFI 2' ;;
+		5g) ssid='GofroWIFI 5' ;;
+		*) continue ;;
+	esac
 	uci set "wireless.$section.network=lan"
-	uci set "wireless.$section.ssid=GofroNET WiFi"
+	uci set "wireless.$section.ssid=$ssid"
 	uci set "wireless.$section.encryption=sae-mixed"
 	uci set "wireless.$section.key=$password"
 	uci set "wireless.$section.disabled=0"
-	device="$(uci -q get "wireless.$section.device" || true)"
 	[ -z "$device" ] || uci set "wireless.$device.country=$country"
+	configured_wifi=1
 done
+[ "$configured_wifi" = 1 ] || die 'OpenWrt has no supported Wi-Fi access point'
 
 uci commit network
 uci commit firewall
