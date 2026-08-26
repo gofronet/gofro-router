@@ -280,11 +280,11 @@ fn queue_update() -> Result<()> {
     }
     fs::write(UPDATE_TRIGGER, []).context("failed to queue update")?;
 
-    let restarted = Command::new("/etc/init.d/gofro-updater")
-        .arg("restart")
+    let started = Command::new("/etc/init.d/gofro-updater")
+        .arg("start")
         .status()
         .context("failed to start updater service")?;
-    if !restarted.success() {
+    if !started.success() {
         let _ = fs::remove_file(UPDATE_TRIGGER);
         return Err(anyhow!("updater service failed to start"));
     }
