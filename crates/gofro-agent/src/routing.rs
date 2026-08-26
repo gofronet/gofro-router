@@ -19,12 +19,11 @@ pub(crate) struct RoutingPolicy {
 impl RoutingPolicy {
     pub(crate) fn compile(config: RoutingConfig, geodata: Arc<GeoData>) -> Result<Self> {
         for rule in &config.domain_rules {
-            if rule.enabled {
-                if let DomainMatch::GeoSite { value } = &rule.matcher {
-                    if !geodata.has_site(value) {
-                        anyhow::bail!("GeoSite-тег {value} отсутствует в geosite.dat");
-                    }
-                }
+            if rule.enabled
+                && let DomainMatch::GeoSite { value } = &rule.matcher
+                && !geodata.has_site(value)
+            {
+                anyhow::bail!("GeoSite-тег {value} отсутствует в geosite.dat");
             }
         }
         let ip_rules = config
