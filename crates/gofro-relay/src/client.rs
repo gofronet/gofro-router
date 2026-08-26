@@ -31,7 +31,7 @@ pub(crate) fn run(listen: SocketAddr, server_file: PathBuf) -> Result<()> {
         .context("failed to connect local WireGuard socket")?;
 
     send_encoded(&remote, &plain[..size])?;
-    eprintln!("relay client: {wireguard} -> {}", endpoint.trim());
+    println!("relay client: {wireguard} -> {}", endpoint.trim());
 
     let send_local = local.try_clone()?;
     let send_remote = remote.try_clone()?;

@@ -14,16 +14,45 @@ pub(crate) struct DeviceReading {
     pub(crate) inactive_ms: u64,
 }
 
-pub(crate) fn devices(interface: &str) -> Vec<DeviceReading> {
-    let Some(output) = Command::new("iw")
-        .args(["dev", interface, "station", "dump"])
+pub(crate) fn devices(fallback_interface: &str) -> Vec<DeviceReading> {
+    let interfaces = Command::new("iw")
+        .arg("dev")
         .output()
         .ok()
         .filter(|output| output.status.success())
-    else {
-        return Vec::new();
-    };
-    parse_devices(&String::from_utf8_lossy(&output.stdout), &dhcp_leases())
+        .map(|output| parse_ap_interfaces(&String::from_utf8_lossy(&output.stdout)))
+        .filter(|interfaces| !interfaces.is_empty())
+        .unwrap_or_else(|| vec![fallback_interface.to_owned()]);
+    let leases = dhcp_leases();
+
+    interfaces
+        .into_iter()
+        .flat_map(|interface| {
+            Command::new("iw")
+                .args(["dev", &interface, "station", "dump"])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map_or_else(Vec::new, |output| {
+                    parse_devices(&String::from_utf8_lossy(&output.stdout), &leases)
+                })
+        })
+        .collect()
+}
+
+fn parse_ap_interfaces(output: &str) -> Vec<String> {
+    let mut current = None;
+    let mut interfaces = Vec::new();
+    for line in output.lines().map(str::trim) {
+        if let Some(interface) = line.strip_prefix("Interface ") {
+            current = interface.split_whitespace().next().map(str::to_owned);
+        } else if line == "type AP"
+            && let Some(interface) = current.take()
+        {
+            interfaces.push(interface);
+        }
+    }
+    interfaces
 }
 
 fn parse_devices(
@@ -135,5 +164,21 @@ mod tests {
         assert_eq!(device.signal_dbm, Some(-47));
         assert_eq!(device.tx_bytes, 4096);
         assert_eq!(device.connected_seconds, 90);
+    }
+
+    #[test]
+    fn finds_all_access_point_interfaces() {
+        let output = concat!(
+            "phy#1\n",
+            "\tInterface phy1-ap0\n",
+            "\t\ttype AP\n",
+            "phy#0\n",
+            "\tInterface phy0-sta0\n",
+            "\t\ttype managed\n",
+            "\tInterface phy0-ap0\n",
+            "\t\ttype AP\n",
+        );
+
+        assert_eq!(parse_ap_interfaces(output), ["phy1-ap0", "phy0-ap0"]);
     }
 }
