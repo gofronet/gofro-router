@@ -20,6 +20,7 @@
   let name = $state("");
   let endpoint = $state("");
   let publicKey = $state("");
+  let profile = $state("");
   let validationError = $state("");
   let nameInput = $state<HTMLInputElement>();
 
@@ -34,17 +35,34 @@
     name = server?.name || "";
     endpoint = server?.endpoint || "";
     publicKey = server?.public_key || "";
+    profile = "";
     validationError = "";
     await tick();
     nameInput?.focus();
   }
 
   function closeForm() {
-    if (!busy) editing = undefined;
+    if (!busy) {
+      profile = "";
+      editing = undefined;
+    }
   }
 
   async function save(event: SubmitEvent) {
     event.preventDefault();
+    if (!editing) {
+      const values = { name: name.trim(), profile: profile.trim() };
+      if (!values.name || !values.profile) {
+        validationError = "Заполните название и вставьте WireGuard-профиль.";
+        return;
+      }
+      validationError = "";
+      if (await app.importServer(values)) {
+        profile = "";
+        editing = undefined;
+      }
+      return;
+    }
     const values = {
       name: name.trim(),
       endpoint: endpoint.trim(),
@@ -55,9 +73,7 @@
       return;
     }
     validationError = "";
-    const updated = editing
-      ? await app.updateServer(editing.public_key, values)
-      : await app.createServer(values);
+    const updated = await app.updateServer(editing.public_key, values);
     if (updated) editing = undefined;
   }
 
@@ -264,7 +280,7 @@
             class="mt-1.5 text-2xl font-bold tracking-[-0.04em]"
             id="profile-form-title"
           >
-            {editing ? "Изменить профиль" : "Новый сервер"}
+            {editing ? "Изменить профиль" : "Импорт профиля"}
           </h2>
         </div>
         <button
@@ -290,34 +306,57 @@
             placeholder="Frankfurt"
           />
         </label>
-        <label>
-          <span class="mb-2 block text-xs font-semibold text-[#74747d]"
-            >Endpoint</span
-          >
-          <input
-            class="h-14 w-full rounded-2xl border border-[#dedee1] bg-white px-4 text-base"
-            bind:value={endpoint}
-            required
-            maxlength="255"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="203.0.113.10:8443"
-          />
-        </label>
-        <label>
-          <span class="mb-2 block text-xs font-semibold text-[#74747d]"
-            >Публичный ключ WireGuard</span
-          >
-          <input
-            class="h-14 w-full rounded-2xl border border-[#dedee1] bg-white px-4 text-base"
-            bind:value={publicKey}
-            required
-            maxlength="128"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="Base64 public key"
-          />
-        </label>
+        {#if editing}
+          <label>
+            <span class="mb-2 block text-xs font-semibold text-[#74747d]"
+              >Endpoint</span
+            >
+            <input
+              class="h-14 w-full rounded-2xl border border-[#dedee1] bg-white px-4 text-base"
+              bind:value={endpoint}
+              required
+              maxlength="255"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="203.0.113.10:8443"
+            />
+          </label>
+          <label>
+            <span class="mb-2 block text-xs font-semibold text-[#74747d]"
+              >Публичный ключ WireGuard</span
+            >
+            <input
+              class="h-14 w-full rounded-2xl border border-[#dedee1] bg-white px-4 text-base"
+              bind:value={publicKey}
+              required
+              maxlength="128"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="Base64 public key"
+            />
+          </label>
+        {:else}
+          <p class="m-0 text-xs leading-relaxed text-[#74747d]">
+            На VPS выполните <code
+              >sudo gofro-server create-profile --endpoint &lt;VPS-IP&gt;:8443</code
+            > и вставьте весь полученный профиль. Повторный импорт обновит ключ
+            подключения к этому серверу.
+          </p>
+          <label>
+            <span class="mb-2 block text-xs font-semibold text-[#74747d]"
+              >WireGuard-профиль</span
+            >
+            <textarea
+              class="min-h-64 w-full resize-y rounded-2xl border border-[#dedee1] bg-white p-4 font-mono text-xs leading-relaxed"
+              bind:value={profile}
+              required
+              maxlength="4096"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder={'[Interface]\nPrivateKey = …\nAddress = 10.202.0.2/32\n\n[Peer]\nPublicKey = …\nEndpoint = 203.0.113.10:8443'}
+            ></textarea>
+          </label>
+        {/if}
         {#if validationError}<p
             class="m-0 rounded-2xl border border-red-200 bg-red-50 p-3 text-xs leading-relaxed text-red-700"
             role="alert"
@@ -335,9 +374,11 @@
             class="min-h-13 rounded-2xl border border-[#09090b] bg-[#09090b] px-4 text-sm font-bold text-white"
             type="submit"
             disabled={busy}
-            >{mutation?.startsWith("edit:") || mutation === "add-server"
+            >{mutation?.startsWith("edit:") || mutation === "import-server"
               ? "Сохраняем…"
-              : "Сохранить"}</button
+              : editing
+                ? "Сохранить"
+                : "Импортировать"}</button
           >
         </div>
       </form>

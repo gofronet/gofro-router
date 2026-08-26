@@ -3,6 +3,7 @@ export type {
   DomainRule,
   HistoryPoint,
   IpRule,
+  ProfileInput,
   RouteTarget,
   RoutingConfig,
   RoutingTest,

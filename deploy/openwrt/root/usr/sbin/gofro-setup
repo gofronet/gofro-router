@@ -35,7 +35,6 @@ if [ ! -s /etc/gofro/ap-password ]; then
 	wg genkey | cut -c1-16 > /etc/gofro/ap-password
 fi
 password="$(cat /etc/gofro/ap-password)"
-client_public_key="$(cat /etc/wireguard/client.pub)"
 
 uci set network.lan.ipaddr='10.203.1.1'
 uci set network.lan.netmask='255.255.255.0'
@@ -99,8 +98,7 @@ uci commit wireless
 
 echo "Gofro Wi-Fi password: $password"
 echo 'After reconnecting, open http://gofrowifi.net:8080'
-echo "Client public key: $client_public_key"
-echo "VPS peer command: sudo gofro-server add-peer --public-key '$client_public_key' --tunnel-ip 10.202.0.2/32 --subnet 10.203.1.0/24"
+echo 'On the VPS, replace the example IP and run: sudo gofro-server create-profile --endpoint 203.0.113.10:8443'
 
 if [ -n "$install_version" ]; then
 	printf '%s\n' "$install_version" > /etc/gofro/install-pending.new

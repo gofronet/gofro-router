@@ -3,10 +3,55 @@ use anyhow::{Context, Result, anyhow, bail};
 use super::mode::switch_mode;
 use crate::{
     AppState,
-    config::{save, validate_server},
-    model::{ServerProfile, ServerUpdate},
+    config::{parse_server_profile, save, validate_server},
+    model::{ControllerConfig, ServerProfile, ServerUpdate},
     network::select_server_peer,
 };
+
+pub(crate) fn import_server(state: &AppState, name: String, profile: String) -> Result<()> {
+    let server = parse_server_profile(name, &profile)?;
+    let mut config = state
+        .config
+        .lock()
+        .map_err(|_| anyhow!("configuration lock poisoned"))?;
+    let Some((next, previous, reconnect, index)) = replace_imported_server(&config, &server) else {
+        drop(config);
+        return add_server(state, server);
+    };
+    if reconnect {
+        select_server_peer(state, &next.servers[index])?;
+    }
+
+    if let Err(error) = save(&state.config_path, &next) {
+        if reconnect {
+            return match select_server_peer(state, &previous) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(anyhow!(
+                    "configuration save failed: {error:#}; server rollback failed: {rollback:#}"
+                )),
+            };
+        }
+        return Err(error);
+    }
+    *config = next;
+    Ok(())
+}
+
+fn replace_imported_server(
+    config: &ControllerConfig,
+    server: &ServerProfile,
+) -> Option<(ControllerConfig, ServerProfile, bool, usize)> {
+    let index = config
+        .servers
+        .iter()
+        .position(|item| item.public_key == server.public_key)?;
+    let previous = config.servers[index].clone();
+    let reconnect =
+        config.vpn_enabled && config.active_server_key.as_deref() == Some(&server.public_key);
+    let mut next = config.clone();
+    next.servers[index] = server.clone();
+    Some((next, previous, reconnect, index))
+}
 
 pub(crate) fn add_server(state: &AppState, server: ServerProfile) -> Result<()> {
     validate_server(&server)?;
@@ -22,21 +67,17 @@ pub(crate) fn add_server(state: &AppState, server: ServerProfile) -> Result<()> 
         bail!("сервер с таким public key уже существует");
     }
 
-    if config.active_server_key.is_none() {
-        config.active_server_key = Some(server.public_key.clone());
+    let mut next = config.clone();
+    if next.active_server_key.is_none() {
+        next.active_server_key = Some(server.public_key.clone());
     }
-    config.servers.push(server);
-    save(&state.config_path, &config)
+    next.servers.push(server);
+    save(&state.config_path, &next)?;
+    *config = next;
+    Ok(())
 }
 
 pub(crate) fn update_server(state: &AppState, update: ServerUpdate) -> Result<()> {
-    let server = ServerProfile {
-        name: update.name,
-        endpoint: update.endpoint,
-        public_key: update.public_key,
-    };
-    validate_server(&server)?;
-
     let mut config = state
         .config
         .lock()
@@ -46,6 +87,11 @@ pub(crate) fn update_server(state: &AppState, update: ServerUpdate) -> Result<()
         .iter()
         .position(|server| server.public_key == update.previous_public_key)
         .context("сервер не найден")?;
+    let mut server = config.servers[index].clone();
+    server.name = update.name;
+    server.endpoint = update.endpoint;
+    server.public_key = update.public_key;
+    validate_server(&server)?;
     if config
         .servers
         .iter()
@@ -176,4 +222,42 @@ pub(crate) fn delete_server(state: &AppState, public_key: &str) -> Result<()> {
     }
     *config = next;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::RoutingConfig;
+
+    #[test]
+    fn reimport_replaces_credentials_for_active_server() {
+        let old = ServerProfile {
+            name: "Old".into(),
+            endpoint: "old.example:8443".into(),
+            public_key: "server-key".into(),
+            client_private_key: Some("old-private".into()),
+        };
+        let config = ControllerConfig {
+            vpn_enabled: true,
+            active_server_key: Some(old.public_key.clone()),
+            servers: vec![old],
+            routing: RoutingConfig::default(),
+        };
+        let new = ServerProfile {
+            name: "New".into(),
+            endpoint: "new.example:8443".into(),
+            public_key: "server-key".into(),
+            client_private_key: Some("new-private".into()),
+        };
+
+        let (next, previous, reconnect, _) = replace_imported_server(&config, &new).unwrap();
+        assert!(reconnect);
+        assert_eq!(next.servers.len(), 1);
+        assert_eq!(next.servers[0].name, "New");
+        assert_eq!(
+            next.servers[0].client_private_key.as_deref(),
+            Some("new-private")
+        );
+        assert_eq!(previous.client_private_key.as_deref(), Some("old-private"));
+    }
 }

@@ -1,7 +1,7 @@
-import { api, type ServerInput } from "../../api";
+import { api, type ProfileInput, type ServerInput } from "../../api";
 
 export const serverService = {
-  create: (input: ServerInput) => api.servers.create(input),
+  import: (input: ProfileInput) => api.servers.import(input),
   update: (previousPublicKey: string, input: ServerInput) =>
     api.servers.update(previousPublicKey, input),
   select: (publicKey: string) => api.servers.select(publicKey),

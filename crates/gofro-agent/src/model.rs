@@ -6,7 +6,7 @@ use crate::stats::{DeviceStatus, HistoryPoint, LiveStats};
 pub(crate) const AP_ADDRESS: &str = "10.203.1.1";
 pub(crate) const AP_DOMAIN: &str = "gofrowifi.net:8080";
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct ControllerConfig {
     pub(crate) vpn_enabled: bool,
     pub(crate) active_server_key: Option<String>,
@@ -15,11 +15,30 @@ pub(crate) struct ControllerConfig {
     pub(crate) routing: RoutingConfig,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct ServerProfile {
     pub(crate) name: String,
     pub(crate) endpoint: String,
     pub(crate) public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) client_private_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ServerStatus {
+    pub(crate) name: String,
+    pub(crate) endpoint: String,
+    pub(crate) public_key: String,
+}
+
+impl From<&ServerProfile> for ServerStatus {
+    fn from(server: &ServerProfile) -> Self {
+        Self {
+            name: server.name.clone(),
+            endpoint: server.endpoint.clone(),
+            public_key: server.public_key.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +60,12 @@ pub(crate) struct ServerUpdate {
     pub(crate) name: String,
     pub(crate) endpoint: String,
     pub(crate) public_key: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ProfileInput {
+    pub(crate) name: String,
+    pub(crate) profile: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -167,7 +192,7 @@ pub(crate) struct AgentStatus {
     pub(crate) tunnel_active: bool,
     pub(crate) interface: String,
     pub(crate) active_server_key: Option<String>,
-    pub(crate) servers: Vec<ServerProfile>,
+    pub(crate) servers: Vec<ServerStatus>,
     pub(crate) ap: ApStatus,
     pub(crate) peer: Option<PeerStatus>,
     pub(crate) stats: LiveStats,

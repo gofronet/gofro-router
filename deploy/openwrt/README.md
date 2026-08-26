@@ -38,9 +38,17 @@ When upgrading a customized v0.3 VPS, pass the same `WG_INTERFACE`, `WG_PORT`,
 and `RELAY_PORT` values to `sudo -E deploy/server/install.sh`. The defaults are
 `gt0`, `51820`, and `8443`.
 
-Run the `VPS peer command` printed by the router installer. Add the VPS to the
-Gofro web panel using `<VPS-IP>:8443` and the server public key printed by the
-VPS installer.
+Generate a one-time router profile on the VPS:
+
+```sh
+sudo gofro-server create-profile --endpoint 203.0.113.10:8443
+```
+
+Copy the complete output, open **Servers → Add** in the Gofro web panel, name
+the server, and paste the profile. The VPS does not retain the generated client
+private key. Store the output securely if you need to restore it after a router
+reset. If the VPS peer is lost, run the command again and import the new profile;
+the router replaces the previous credentials for that server.
 
 ## Update
 

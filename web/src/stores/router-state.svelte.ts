@@ -5,6 +5,7 @@ import { serverService } from "../features/servers/service";
 import { statusService } from "../features/status/service";
 import { wifiService } from "../features/wifi/service";
 import type {
+  ProfileInput,
   RoutingConfig,
   RoutingTest,
   ServerInput,
@@ -115,8 +116,8 @@ export class RouterState {
     await this.mutate("update", api.update.start);
   };
 
-  createServer = (input: ServerInput): Promise<boolean> =>
-    this.mutate("add-server", () => serverService.create(input));
+  importServer = (input: ProfileInput): Promise<boolean> =>
+    this.mutate("import-server", () => serverService.import(input));
 
   updateServer = (
     previousPublicKey: string,

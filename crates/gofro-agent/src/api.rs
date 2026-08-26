@@ -15,9 +15,9 @@ use wireguard_status::wireguard_peers;
 use crate::{
     AppState, controller, dataplane,
     model::{
-        AP_ADDRESS, AP_DOMAIN, AgentStatus, ApInput, ApStatus, ModeInput, RoutingConfig,
-        RoutingStatus, RoutingTestInput, RoutingTestResult, ServerKeyInput, ServerProfile,
-        ServerUpdate, UpdateInput, UpdateResult, UpdateStatus,
+        AP_ADDRESS, AP_DOMAIN, AgentStatus, ApInput, ApStatus, ModeInput, ProfileInput,
+        RoutingConfig, RoutingStatus, RoutingTestInput, RoutingTestResult, ServerKeyInput,
+        ServerProfile, ServerStatus, ServerUpdate, UpdateInput, UpdateResult, UpdateStatus,
     },
     network::{access_points, service_active},
     wifi,
@@ -62,6 +62,7 @@ pub(crate) fn router(state: AppState) -> Router {
             "/api/servers",
             post(add_server).put(update_server).delete(delete_server),
         )
+        .route("/api/servers/import", post(import_server))
         .route("/api/servers/select", post(select_server))
         .route("/api/ap", post(update_ap))
         .route("/api/routing", post(update_routing))
@@ -133,6 +134,17 @@ async fn update_server(
     update.endpoint = update.endpoint.trim().to_owned();
     update.public_key = update.public_key.trim().to_owned();
     run_blocking(state, move |state| controller::update_server(state, update)).await
+}
+
+async fn import_server(
+    State(state): State<AppState>,
+    Json(mut input): Json<ProfileInput>,
+) -> Result<Json<AgentStatus>, ApiError> {
+    input.name = input.name.trim().to_owned();
+    run_blocking(state, move |state| {
+        controller::import_server(state, input.name, input.profile)
+    })
+    .await
 }
 
 async fn update_ap(
@@ -233,7 +245,7 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
         tunnel_active,
         interface: state.interface.clone(),
         active_server_key: config.active_server_key,
-        servers: config.servers,
+        servers: config.servers.iter().map(ServerStatus::from).collect(),
         ap: ApStatus {
             ssid: ap_ssid,
             networks,
