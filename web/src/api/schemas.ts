@@ -63,6 +63,10 @@ export const routingTestSchema = z.object({
 
 export const statusSchema = z.object({
   version: z.string(),
+  update: z.object({
+    running: z.boolean(),
+    result: z.enum(["current", "updated", "failed"]).nullable(),
+  }),
   vpn_enabled: z.boolean(),
   tunnel_active: z.boolean(),
   interface: z.string(),

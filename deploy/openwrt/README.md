@@ -44,12 +44,8 @@ VPS installer.
 
 ## Update
 
-```sh
-ssh root@10.203.1.1 gofro-update
-```
-
-Gofro checks GitHub automatically every six hours. The command above runs the
-same check immediately. The updater verifies the signed manifest and checksum,
-then switches to the new version. A failed health check restores the previous
-release; an interrupted update is rolled back on boot. Files in
-`/etc/config/gofro` and `/etc/gofro` are preserved.
+Open **Settings → System** in the Gofro web panel and select **Check for
+updates**. Gofro also checks GitHub automatically every six hours. The updater
+verifies the signed manifest and checksum, then switches to the new version. A
+failed health check restores the previous release; an interrupted update is
+rolled back on boot. Files in `/etc/config/gofro` and `/etc/gofro` are preserved.

@@ -21,7 +21,7 @@
     },
     { path: "/servers" as const, label: "Серверы", icon: ServerCog },
     { path: "/routing" as const, label: "Маршруты", icon: Route },
-    { path: "/wifi" as const, label: "Wi-Fi", icon: WifiCog },
+    { path: "/wifi" as const, label: "Настройки", icon: WifiCog },
   ];
 
   const app = getAppContext();

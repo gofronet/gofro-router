@@ -1,0 +1,47 @@
+#!/bin/sh
+set -u
+
+STATE_DIR=${GOFRO_UPDATE_STATE_DIR:-/tmp/gofro}
+TRIGGER=$STATE_DIR/update-request
+RESULT=$STATE_DIR/update-result
+LOG=$STATE_DIR/update.log
+VERSION_FILE=${GOFRO_VERSION_FILE:-/etc/gofro/version}
+UPDATE=${GOFRO_UPDATE_COMMAND:-/usr/sbin/gofro-update}
+LOGGER=${GOFRO_LOGGER_COMMAND:-logger}
+CHECK_INTERVAL=${GOFRO_UPDATE_CHECK_INTERVAL:-21600}
+START_DELAY=${GOFRO_UPDATE_START_DELAY:-300}
+POLL_INTERVAL=${GOFRO_UPDATE_POLL_INTERVAL:-5}
+
+write_result() {
+	printf '%s\n' "$1" > "$RESULT.new" && mv -f "$RESULT.new" "$RESULT"
+}
+
+run_update() {
+	before=
+	[ ! -r "$VERSION_FILE" ] || IFS= read -r before < "$VERSION_FILE"
+	rm -f "$RESULT" "$RESULT.new"
+	outcome=failed
+	if "$UPDATE" > "$LOG" 2>&1; then
+		after=
+		[ ! -r "$VERSION_FILE" ] || IFS= read -r after < "$VERSION_FILE"
+		if [ "$before" = "$after" ]; then
+			outcome=current
+		else
+			outcome=updated
+		fi
+	fi
+	"$LOGGER" -t gofro-update < "$LOG"
+	rm -f "$TRIGGER"
+	write_result "$outcome"
+}
+
+mkdir -p "$STATE_DIR"
+delay=$START_DELAY
+while :; do
+	if [ -e "$TRIGGER" ] || [ "$delay" -le 0 ]; then
+		run_update
+		delay=$CHECK_INTERVAL
+	fi
+	sleep "$POLL_INTERVAL"
+	delay=$((delay - POLL_INTERVAL))
+done
