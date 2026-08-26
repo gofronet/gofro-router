@@ -126,10 +126,10 @@ jobs:
           export CC_mipsel_unknown_linux_musl=$MIPSEL_CC
           export AR_mipsel_unknown_linux_musl=$MIPSEL_TOOLCHAIN/bin/mipsel-openwrt-linux-musl-gcc-ar
           export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER=$MIPSEL_LINKER
-          export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-cpu=mips32r2 -C target-feature=+crt-static'
+          export CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-cpu=mips32r2 -C target-feature=+crt-static -Zunstable-options -Cpanic=immediate-abort'
           export CARGO_PROFILE_RELEASE_OPT_LEVEL=z
           cargo +nightly-2026-08-20 build -Z build-std=std,panic_abort \
-            -Z build-std-features=panic_immediate_abort --locked --release \
+            --locked --release \
             --target mipsel-unknown-linux-musl -p gofro-agent -p gofro-relay
           file target/openwrt/aarch64-unknown-linux-musl/release/gofro-agent | grep -q 'statically linked'
           file target/openwrt/aarch64-unknown-linux-musl/release/gofro-relay | grep -q 'statically linked'
