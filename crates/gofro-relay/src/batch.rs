@@ -119,4 +119,23 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
     }
+
+    #[test]
+    fn reports_datagram_source() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender
+            .send_to(b"packet", receiver.local_addr().unwrap())
+            .unwrap();
+
+        let mut buffers = [[0; BUFFER_SIZE]; BATCH_SIZE];
+        let mut lengths = [0; BATCH_SIZE];
+        let mut sources = [None; BATCH_SIZE];
+        assert_eq!(
+            recv_from_many(&receiver, &mut buffers, &mut lengths, &mut sources).unwrap(),
+            1
+        );
+        assert_eq!(&buffers[0][..lengths[0]], b"packet");
+        assert_eq!(sources[0], Some(sender.local_addr().unwrap()));
+    }
 }
