@@ -11,8 +11,6 @@ pub(crate) struct ControllerConfig {
     pub(crate) vpn_enabled: bool,
     pub(crate) active_server_key: Option<String>,
     pub(crate) servers: Vec<ServerProfile>,
-    #[serde(default = "default_ap_ssid")]
-    pub(crate) ap_ssid: String,
     #[serde(default)]
     pub(crate) routing: RoutingConfig,
 }
@@ -45,8 +43,26 @@ pub(crate) struct ServerUpdate {
     pub(crate) public_key: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) enum WifiBand {
+    #[serde(rename = "2g")]
+    TwoGhz,
+    #[serde(rename = "5g")]
+    FiveGhz,
+}
+
+impl WifiBand {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::TwoGhz => "2g",
+            Self::FiveGhz => "5g",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ApInput {
+    pub(crate) band: Option<WifiBand>,
     pub(crate) ssid: String,
     pub(crate) password: Option<String>,
 }
@@ -176,11 +192,27 @@ pub(crate) enum UpdateResult {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ApStatus {
+    // Browsers loaded before an in-place update still expect this field.
     pub(crate) ssid: String,
+    pub(crate) networks: Vec<ApNetwork>,
     pub(crate) address: &'static str,
     pub(crate) domain: &'static str,
 }
 
-fn default_ap_ssid() -> String {
-    "GofroNET WiFi".to_owned()
+#[derive(Debug, Serialize)]
+pub(crate) struct ApNetwork {
+    pub(crate) band: WifiBand,
+    pub(crate) ssid: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_legacy_ap_input_without_band() {
+        let input: ApInput =
+            serde_json::from_str(r#"{"ssid":"Legacy","password":"secret123"}"#).unwrap();
+        assert_eq!(input.band, None);
+    }
 }

@@ -9,6 +9,7 @@ import {
   type RoutingConfig,
   type RoutingTest,
   type Status,
+  type WifiBand,
   type WifiInput,
 } from "./schemas";
 
@@ -85,5 +86,6 @@ export type {
   Server,
   ServerInput,
   Status,
+  WifiBand,
   WifiInput,
 } from "./schemas";

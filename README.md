@@ -17,7 +17,8 @@
 ## Отдельный Wi-Fi с VPN
 
 **Gofro Router** работает на отдельном OpenWrt-роутере. Он получает интернет от
-основного домашнего роутера по Ethernet и создаёт сеть `GofroNET WiFi`. Для
+основного домашнего роутера по Ethernet и создаёт сети `GofroWIFI 2` и
+`GofroWIFI 5` на двухдиапазонном TR3000 или только `GofroWIFI 2` на LT300. Для
 консоли, телевизора или телефона это обычный Wi-Fi; маршрутизация через VPS
 выполняется на роутере.
 
@@ -55,7 +56,7 @@ tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && uclient-fetch -q -O "$tmp" https:
 ```
 
 Установщик скачает подписанный релиз, проверит его и настроит Gofro. После
-установки подключитесь к `GofroNET WiFi` и откройте
+установки подключитесь к `GofroWIFI 2` или `GofroWIFI 5` и откройте
 [gofrowifi.net:8080](http://gofrowifi.net:8080). Подробности и настройка VPS
 описаны в [deploy/openwrt/README.md](deploy/openwrt/README.md).
 
@@ -65,7 +66,7 @@ tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && uclient-fetch -q -O "$tmp" https:
 flowchart LR
     INTERNET[Интернет] --> HOME[Домашний роутер]
     HOME -->|Ethernet| GOFRO[Cudy TR3000<br>OpenWrt + Gofro]
-    GOFRO -->|GofroNET WiFi| DEVICES[Консоль · ТВ<br>Телефон · Ноутбук]
+    GOFRO -->|GofroWIFI 2 / 5| DEVICES[Консоль · ТВ<br>Телефон · Ноутбук]
     GOFRO -->|WireGuard| VPS[Ваш VPS]
     VPS --> INTERNET
 ```
@@ -87,7 +88,7 @@ flowchart LR
 - добавлять и выбирать VPN-серверы;
 - задавать правила GeoSite, GeoIP, доменов и подсетей;
 - видеть состояние туннеля и подключённые Wi-Fi-устройства;
-- менять имя и пароль Wi-Fi-сети.
+- раздельно менять имя и пароль сетей 2,4 и 5 ГГц.
 
 Если VPN пропадает, таблица маршрутизации остаётся fail-closed и не отправляет
 помеченный VPN-трафик через обычный WAN.

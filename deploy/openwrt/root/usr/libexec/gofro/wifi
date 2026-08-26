@@ -1,19 +1,50 @@
 #!/bin/sh
 set -eu
 
-[ "$#" = 1 ] || [ "$#" = 2 ] || { echo "Usage: $0 SSID [PASSWORD]" >&2; exit 2; }
+usage() {
+	echo "Usage: $0 list | set BAND SSID [PASSWORD]" >&2
+	exit 2
+}
+
+case "${1:-}" in
+	list)
+		[ "$#" = 1 ] || usage
+		found=0
+		for section in $(uci show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+			[ "$(uci -q get "wireless.$section.mode" || true)" = ap ] || continue
+			device="$(uci -q get "wireless.$section.device" || true)"
+			band="$(uci -q get "wireless.$device.band" || true)"
+			case "$band" in 2g|5g) ;; *) continue ;; esac
+			ssid="$(uci -q get "wireless.$section.ssid" || true)"
+			[ -n "$ssid" ] || continue
+			printf '%s\t%s\n' "$band" "$ssid"
+			found=1
+		done
+		[ "$found" = 1 ] || { echo 'No supported OpenWrt access point found' >&2; exit 1; }
+		exit 0
+		;;
+	set)
+		{ [ "$#" = 3 ] || [ "$#" = 4 ]; } || usage
+		case "$2" in 2g|5g|all) ;; *) usage ;; esac
+		;;
+	*) usage ;;
+esac
 
 found=0
 for section in $(uci show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
-	[ "$(uci -q get "wireless.$section.mode")" = ap ] || continue
-	uci set "wireless.$section.ssid=$1"
-	if [ "$#" = 2 ]; then
+	[ "$(uci -q get "wireless.$section.mode" || true)" = ap ] || continue
+	device="$(uci -q get "wireless.$section.device" || true)"
+	band="$(uci -q get "wireless.$device.band" || true)"
+	case "$band" in 2g|5g) ;; *) continue ;; esac
+	[ "$2" = all ] || [ "$band" = "$2" ] || continue
+	uci set "wireless.$section.ssid=$3"
+	if [ "$#" = 4 ]; then
 		uci set "wireless.$section.encryption=sae-mixed"
-		uci set "wireless.$section.key=$2"
+		uci set "wireless.$section.key=$4"
 	fi
 	found=1
 done
-[ "$found" = 1 ] || { echo 'No OpenWrt access point found' >&2; exit 1; }
+[ "$found" = 1 ] || { echo "No OpenWrt $2 access point found" >&2; exit 1; }
 
 uci commit wireless
 (sleep 2; wifi reload) >/dev/null 2>&1 &

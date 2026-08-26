@@ -60,6 +60,7 @@ jobs:
           sh deploy/openwrt/tests/transaction.sh
           sh deploy/openwrt/tests/update.sh
           sh deploy/openwrt/tests/version.sh
+          sh deploy/openwrt/tests/wifi.sh
           python3 deploy/openwrt/tests/geodata_filter.py
 
       - name: Build web UI

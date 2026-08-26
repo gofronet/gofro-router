@@ -132,7 +132,6 @@ pub(crate) fn load(path: &Path) -> Result<ControllerConfig> {
     for server in &config.servers {
         validate_server(server)?;
     }
-    validate_ssid(&config.ap_ssid)?;
     normalize_routing(&mut config.routing)?;
     Ok(config)
 }
@@ -157,6 +156,20 @@ mod tests {
         };
         assert!(validate_server(&server).is_ok());
         assert!(validate_endpoint("missing-port").is_err());
+    }
+
+    #[test]
+    fn ignores_legacy_ap_ssid() {
+        let config: ControllerConfig = serde_json::from_str(
+            r#"{"vpn_enabled":false,"active_server_key":null,"servers":[],"ap_ssid":"Old Wi-Fi"}"#,
+        )
+        .unwrap();
+        assert!(
+            serde_json::to_value(config)
+                .unwrap()
+                .get("ap_ssid")
+                .is_none()
+        );
     }
 
     #[test]
