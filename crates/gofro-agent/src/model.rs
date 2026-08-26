@@ -30,6 +30,9 @@ pub(crate) struct ModeInput {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct UpdateInput {}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct ServerKeyInput {
     pub(crate) public_key: String,
 }
@@ -143,6 +146,7 @@ pub(crate) struct RoutingStatus {
 #[derive(Debug, Serialize)]
 pub(crate) struct AgentStatus {
     pub(crate) version: &'static str,
+    pub(crate) update: UpdateStatus,
     pub(crate) vpn_enabled: bool,
     pub(crate) tunnel_active: bool,
     pub(crate) interface: String,
@@ -154,6 +158,20 @@ pub(crate) struct AgentStatus {
     pub(crate) history: Vec<HistoryPoint>,
     pub(crate) devices: Vec<DeviceStatus>,
     pub(crate) routing: RoutingStatus,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct UpdateStatus {
+    pub(crate) running: bool,
+    pub(crate) result: Option<UpdateResult>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UpdateResult {
+    Current,
+    Updated,
+    Failed,
 }
 
 #[derive(Debug, Serialize)]

@@ -1,3 +1,4 @@
+import { api } from "../api";
 import { modeService } from "../features/mode/service";
 import { routingService } from "../features/routing/service";
 import { serverService } from "../features/servers/service";
@@ -107,6 +108,10 @@ export class RouterState {
       return;
     }
     await this.mutate("mode", () => modeService.set(vpnEnabled));
+  };
+
+  startUpdate = async (): Promise<void> => {
+    await this.mutate("update", api.update.start);
   };
 
   createServer = (input: ServerInput): Promise<boolean> =>

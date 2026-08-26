@@ -10,7 +10,7 @@ with pinned OpenWrt 25.12 SDK toolchains and publish signed installation bundles
 3. Create and push the matching tag:
 
    ```sh
-   VERSION=0.4.2
+   VERSION=0.4.3
    git tag "v$VERSION"
    git push origin "v$VERSION"
    ```
@@ -28,6 +28,7 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cd web && bun install --frozen-lockfile && bun run check && bun run build
 cd .. && sh deploy/openwrt/tests/mode.sh && sh deploy/openwrt/tests/transaction.sh
+sh deploy/openwrt/tests/update.sh
 sh deploy/openwrt/tests/version.sh
 python3 deploy/openwrt/tests/geodata_filter.py
 ```

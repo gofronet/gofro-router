@@ -20,6 +20,10 @@ export const api = {
   status: {
     get: (): Promise<Status> => statusRequest(() => http.get("/status")),
   },
+  update: {
+    start: (): Promise<Status> =>
+      statusRequest(() => http.post("/update", {}, mutation)),
+  },
   mode: {
     set: (vpnEnabled: boolean): Promise<Status> =>
       statusRequest(() =>

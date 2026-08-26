@@ -88,6 +88,7 @@ link_runtime() {
 		usr/libexec/gofro/mode \
 		usr/libexec/gofro/service \
 		usr/libexec/gofro/tunnel \
+		usr/libexec/gofro/update \
 		usr/libexec/gofro/wifi \
 		usr/sbin/gofro-setup \
 		usr/sbin/gofro-update \
@@ -211,6 +212,7 @@ IFS= read -r TARGET < "$BUNDLE/TARGET" || die 'bundle has no TARGET'
 [ "$(binary_version "$ROOTFS/usr/bin/gofro-relay")" = "$VERSION" ] || die 'gofro-relay version mismatch'
 for path in \
 	usr/sbin/gofro-update \
+	usr/libexec/gofro/update \
 	usr/share/gofro/geosite.dat \
 	usr/share/gofro/geoip.dat \
 	etc/init.d/gofro-recover \

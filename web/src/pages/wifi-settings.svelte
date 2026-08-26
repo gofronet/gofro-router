@@ -3,6 +3,7 @@
     import ExternalLink from "lucide-svelte/icons/external-link";
     import Globe2 from "lucide-svelte/icons/globe-2";
     import KeyRound from "lucide-svelte/icons/key-round";
+    import RefreshCw from "lucide-svelte/icons/refresh-cw";
     import Route from "lucide-svelte/icons/route";
     import Router from "lucide-svelte/icons/router";
     import Wifi from "lucide-svelte/icons/wifi";
@@ -46,25 +47,25 @@
 
 </script>
 
-<svelte:head><title>Wi-Fi · Gofro Router</title></svelte:head>
+<svelte:head><title>Настройки · Gofro Router</title></svelte:head>
 
 <section class="grid min-w-0 gap-5 lg:gap-6" aria-labelledby="wifi-title">
     <header class="min-w-0 px-0.5 py-2">
         <div class="min-w-0">
             <span
                 class="text-xs font-bold tracking-[0.18em] text-[#74747d] uppercase"
-                >Точка доступа</span
+                >Управление роутером</span
             >
             <h1
                 class="mt-2 text-[clamp(2.25rem,11vw,3.25rem)] leading-[0.98] font-extrabold tracking-[-0.06em] lg:text-[clamp(3rem,5vw,4.2rem)]"
                 id="wifi-title"
             >
-                Настройки Wi-Fi
+                Настройки
             </h1>
             <p
                 class="mt-3.5 max-w-2xl text-base leading-relaxed text-[#74747d]"
             >
-                Измените имя беспроводной сети или задайте новый пароль.
+                Wi-Fi, режим подключения и обновления в одном месте.
             </p>
         </div>
     </header>
@@ -294,11 +295,40 @@
                         >
                     </p>
                     <p
-                        class="mb-0 mt-3 text-xs leading-relaxed text-[#74747d]"
+                        class={`mb-0 mt-3 text-xs leading-relaxed ${status.update.result === "failed" ? "text-red-700" : "text-[#74747d]"}`}
+                        role="status"
+                        aria-live="polite"
                     >
-                        Для установки подписанного обновления выполните
-                        <code>gofro-update</code> по SSH.
+                        {status.update.running
+                            ? "Скачиваем и устанавливаем обновление. Панель может ненадолго отключиться, ничего нажимать не нужно."
+                            : status.update.result === "updated"
+                              ? `Gofro обновлён до версии ${status.version}.`
+                              : status.update.result === "current"
+                                ? "Установлена последняя версия."
+                                : status.update.result === "failed"
+                                  ? "Не удалось обновить. Проверьте интернет и попробуйте ещё раз."
+                                  : "Роутер сам проверит, скачает и безопасно установит новую версию."}
                     </p>
+                    <button
+                        class="mt-4 flex min-h-13 w-full items-center justify-center gap-2.5 rounded-2xl border border-[#09090b] bg-[#09090b] px-4 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60"
+                        type="button"
+                        disabled={busy || status.update.running}
+                        onclick={app.startUpdate}
+                    >
+                        <RefreshCw
+                            class={status.update.running ? "animate-spin" : ""}
+                            size={18}
+                        />{status.update.running || mutation === "update"
+                            ? "Обновляем…"
+                            : status.update.result === "failed"
+                              ? "Попробовать ещё раз"
+                              : "Проверить обновления"}
+                    </button>
+                    <small
+                        class="mt-3 block text-[0.68rem] leading-relaxed text-[#74747d]"
+                        >Обновления проверяются по цифровой подписи. При
+                        ошибке роутер сохранит рабочую версию.</small
+                    >
                 </article>
                 <article
                     class="flex min-w-0 gap-3 rounded-[20px] border border-[#dedee1] bg-white p-4"

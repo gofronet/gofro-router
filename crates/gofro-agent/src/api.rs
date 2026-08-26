@@ -1,3 +1,5 @@
+use std::{fs, path::Path, process::Command};
+
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
@@ -15,7 +17,7 @@ use crate::{
     model::{
         AP_ADDRESS, AP_DOMAIN, AgentStatus, ApInput, ApStatus, ModeInput, RoutingConfig,
         RoutingStatus, RoutingTestInput, RoutingTestResult, ServerKeyInput, ServerProfile,
-        ServerUpdate,
+        ServerUpdate, UpdateInput, UpdateResult, UpdateStatus,
     },
     network::service_active,
     wifi,
@@ -24,6 +26,9 @@ use crate::{
 const UI: &str = include_str!("../../../assets/index.html");
 const UI_JS: &str = include_str!("../../../assets/app.js");
 const UI_CSS: &str = include_str!("../../../assets/app.css");
+const UPDATE_LOCK: &str = "/tmp/gofro-update.lock";
+const UPDATE_RESULT: &str = "/tmp/gofro/update-result";
+const UPDATE_TRIGGER: &str = "/tmp/gofro/update-request";
 
 #[derive(Debug, Serialize)]
 struct ErrorBody {
@@ -51,6 +56,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/app.js", get(javascript))
         .route("/app.css", get(stylesheet))
         .route("/api/status", get(status))
+        .route("/api/update", post(start_update))
         .route("/api/mode", post(set_mode))
         .route(
             "/api/servers",
@@ -89,6 +95,13 @@ async fn stylesheet() -> impl IntoResponse {
 
 async fn status(State(state): State<AppState>) -> Result<Json<AgentStatus>, ApiError> {
     run_blocking(state, |_| Ok(())).await
+}
+
+async fn start_update(
+    State(state): State<AppState>,
+    Json(_): Json<UpdateInput>,
+) -> Result<Json<AgentStatus>, ApiError> {
+    run_blocking(state, |_| queue_update()).await
 }
 
 async fn set_mode(
@@ -213,6 +226,7 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
 
     Ok(AgentStatus {
         version: env!("CARGO_PKG_VERSION"),
+        update: update_status(),
         vpn_enabled: config.vpn_enabled,
         tunnel_active,
         interface: state.interface.clone(),
@@ -236,4 +250,43 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
             dataplane_active: dataplane::is_installed(),
         },
     })
+}
+
+fn queue_update() -> Result<()> {
+    if Path::new(UPDATE_LOCK).exists() || Path::new(UPDATE_TRIGGER).exists() {
+        return Ok(());
+    }
+
+    fs::create_dir_all("/tmp/gofro").context("failed to create update state directory")?;
+    if let Err(error) = fs::remove_file(UPDATE_RESULT)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error).context("failed to clear previous update result");
+    }
+    fs::write(UPDATE_TRIGGER, []).context("failed to queue update")?;
+
+    let restarted = Command::new("/etc/init.d/gofro-updater")
+        .arg("restart")
+        .status()
+        .context("failed to start updater service")?;
+    if !restarted.success() {
+        let _ = fs::remove_file(UPDATE_TRIGGER);
+        return Err(anyhow!("updater service failed to start"));
+    }
+    Ok(())
+}
+
+fn update_status() -> UpdateStatus {
+    let result = fs::read_to_string(UPDATE_RESULT)
+        .ok()
+        .and_then(|value| match value.trim() {
+            "current" => Some(UpdateResult::Current),
+            "updated" => Some(UpdateResult::Updated),
+            "failed" => Some(UpdateResult::Failed),
+            _ => None,
+        });
+    UpdateStatus {
+        running: Path::new(UPDATE_LOCK).exists() || Path::new(UPDATE_TRIGGER).exists(),
+        result,
+    }
 }
