@@ -384,7 +384,6 @@ version = "0.4.5"
 dependencies = [
  "anyhow",
  "clap",
- "libc",
  "socket2",
 ]
 

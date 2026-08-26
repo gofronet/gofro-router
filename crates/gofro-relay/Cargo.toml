@@ -9,6 +9,3 @@ publish.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 socket2.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-libc.workspace = true
