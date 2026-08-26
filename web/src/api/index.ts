@@ -1,10 +1,12 @@
 import { http, request } from "./client";
 import {
+  profileInputSchema,
   serverInputSchema,
   routingConfigSchema,
   routingTestSchema,
   statusSchema,
   wifiInputSchema,
+  type ProfileInput,
   type ServerInput,
   type RoutingConfig,
   type RoutingTest,
@@ -32,9 +34,9 @@ export const api = {
       ),
   },
   servers: {
-    create: (input: ServerInput): Promise<Status> => {
-      const body = serverInputSchema.parse(input);
-      return statusRequest(() => http.post("/servers", body, mutation));
+    import: (input: ProfileInput): Promise<Status> => {
+      const body = profileInputSchema.parse(input);
+      return statusRequest(() => http.post("/servers/import", body, mutation));
     },
     update: (previousPublicKey: string, input: ServerInput): Promise<Status> => {
       const body = serverInputSchema.parse(input);
@@ -83,6 +85,7 @@ export type {
   RouteTarget,
   RoutingConfig,
   RoutingTest,
+  ProfileInput,
   Server,
   ServerInput,
   Status,

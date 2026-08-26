@@ -1,4 +1,8 @@
-use std::{fs, process::Command};
+use std::{
+    fs,
+    io::Write,
+    process::{Command, Stdio},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -14,6 +18,7 @@ const RELAY_LOCAL_ENDPOINT: &str = "127.0.0.1:51822";
 const SERVICE_COMMAND: &str = "/usr/libexec/gofro/service";
 const TUNNEL_COMMAND: &str = "/usr/libexec/gofro/tunnel";
 const WIFI_COMMAND: &str = "/usr/libexec/gofro/wifi";
+const DEVICE_PRIVATE_KEY: &str = "/etc/wireguard/client.key";
 
 fn run(command: &mut Command) -> Result<String> {
     let description = format!("{command:?}");
@@ -27,6 +32,43 @@ fn run(command: &mut Command) -> Result<String> {
         );
     }
     String::from_utf8(output.stdout).context("command returned non-UTF-8 output")
+}
+
+fn set_private_key(interface: &str, private_key: Option<&str>) -> Result<()> {
+    if let Some(private_key) = private_key {
+        let mut command = Command::new("wg");
+        command.args(["set", interface, "private-key", "/dev/stdin"]);
+        let description = format!("{command:?}");
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to run {description}"))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("failed to open WireGuard stdin")?;
+        stdin
+            .write_all(private_key.as_bytes())
+            .context("failed to pass private key to WireGuard")?;
+        stdin
+            .write_all(b"\n")
+            .context("failed to finish WireGuard private key")?;
+        drop(stdin);
+        let output = child
+            .wait_with_output()
+            .context("failed to wait for WireGuard")?;
+        if !output.status.success() {
+            bail!(
+                "{description} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+    } else {
+        run(Command::new("wg").args(["set", interface, "private-key", DEVICE_PRIVATE_KEY]))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn start_and_select(state: &AppState, server: &ServerProfile) -> Result<()> {
@@ -109,6 +151,7 @@ fn set_peer(interface: &str, server: &ServerProfile) -> Result<()> {
     let config = format!("/etc/wireguard/{interface}.conf");
     let peers = run(Command::new("wg").args(["show", interface, "peers"]))?;
     let result = (|| {
+        set_private_key(interface, server.client_private_key.as_deref())?;
         run(Command::new("wg").args([
             "set",
             interface,

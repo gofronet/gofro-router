@@ -8,7 +8,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 rust-version = "1.98"
 publish = false
@@ -20,7 +20,6 @@ clap = { version = "4", features = ["derive"] }
 hickory-proto = "0.25"
 idna = "1"
 ipnet = "2"
-libc = "0.2"
 prost = "0.14"
 regex = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }

@@ -122,6 +122,10 @@ export const statusSchema = z.object({
 });
 
 export const serverInputSchema = serverSchema;
+export const profileInputSchema = z.object({
+  name: z.string(),
+  profile: z.string(),
+});
 export const wifiInputSchema = z.object({
   band: wifiBandSchema.optional(),
   ssid: z.string(),
@@ -133,6 +137,7 @@ export type HistoryPoint = z.infer<typeof historyPointSchema>;
 export type Device = z.infer<typeof deviceSchema>;
 export type Status = z.infer<typeof statusSchema>;
 export type ServerInput = z.infer<typeof serverInputSchema>;
+export type ProfileInput = z.infer<typeof profileInputSchema>;
 export type WifiInput = z.infer<typeof wifiInputSchema>;
 export type WifiBand = z.infer<typeof wifiBandSchema>;
 export type RouteTarget = z.infer<typeof routeTargetSchema>;
