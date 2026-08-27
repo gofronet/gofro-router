@@ -151,6 +151,15 @@ clear_pending() {
 	sync
 }
 
+configure_panel_domain() {
+	cat > /etc/dnsmasq.d/gofro-domain.conf.new <<'EOF'
+address=/wifi.gofro.net/10.203.1.1
+local=/wifi.gofro.net/
+EOF
+	mv -f /etc/dnsmasq.d/gofro-domain.conf.new /etc/dnsmasq.d/gofro-domain.conf || return 1
+	systemctl restart dnsmasq.service
+}
+
 restart_services() {
 	systemctl restart gofro-network.service || return 1
 	systemctl restart dnsmasq.service || return 1
@@ -177,7 +186,7 @@ healthy() {
 		if systemctl is-active --quiet dnsmasq.service && \
 			nmcli --terse --fields NAME connection show --active | grep -Fxq gofro-ap && \
 			[ "$(dig +short +time=1 +tries=1 @127.0.0.1 gofrowifi.net A)" = 10.203.1.1 ] && \
-			curl --fail --silent --show-error --max-time 2 -o "$STATUS_FILE" http://10.203.1.1:8080/api/status 2>/dev/null && status_healthy && \
+			curl --fail --silent --show-error --max-time 2 -o "$STATUS_FILE" http://10.203.1.1/api/status 2>/dev/null && status_healthy && \
 			{ [ ! -s /etc/gofro/relay-endpoint ] || systemctl is-active --quiet gofro-relay.service; }; then
 			return 0
 		fi
@@ -285,7 +294,7 @@ prune_releases "$previous" "$pending"
 if [ "$previous" = "$release" ]; then
 	if [ "$mode" = update ] && [ -n "$pending" ]; then
 		ROLLBACK=$pending
-		if restart_services && healthy; then
+		if restart_services && healthy && configure_panel_domain; then
 			write_version "$VERSION"
 			clear_pending
 			ROLLBACK=
@@ -344,7 +353,7 @@ write_pending "$previous"
 systemctl stop gofro-agent.service || true
 systemctl stop gofro-relay.service || true
 switch_current "$release"
-if restart_services && healthy; then
+if restart_services && healthy && configure_panel_domain; then
 	write_version "$VERSION"
 	clear_pending
 	ROLLBACK=

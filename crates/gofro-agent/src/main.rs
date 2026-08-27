@@ -34,6 +34,9 @@ struct Args {
     #[arg(long, default_value = "10.203.1.1:8080")]
     listen: SocketAddr,
 
+    #[arg(long, default_value = "10.203.1.1:80")]
+    panel_listen: SocketAddr,
+
     #[arg(long, default_value = "gt0")]
     interface: String,
 
@@ -117,12 +120,17 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("failed to bind {}", args.listen))?;
+    let panel_listener = tokio::net::TcpListener::bind(args.panel_listen)
+        .await
+        .with_context(|| format!("failed to bind {}", args.panel_listen))?;
     info!(listen = %args.listen, "Gofro agent started");
 
     let http = async {
-        axum::serve(listener, api::router(state))
-            .with_graceful_shutdown(shutdown_signal())
-            .await
+        let router = api::router(state);
+        tokio::select! {
+            result = axum::serve(listener, router.clone()).with_graceful_shutdown(shutdown_signal()) => result,
+            result = axum::serve(panel_listener, router).with_graceful_shutdown(shutdown_signal()) => result,
+        }
     };
     tokio::pin!(http);
     tokio::select! {

@@ -20,7 +20,7 @@ use crate::{
         ServerProfile, ServerStatus, ServerUpdate, UpdateInput, UpdateResult, UpdateStatus,
     },
     network::{access_points, service_active},
-    wifi,
+    stats, wifi,
 };
 
 const UI: &str = include_str!("../../../assets/index.html");
@@ -237,7 +237,7 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
         .stats
         .lock()
         .map_err(|_| anyhow!("statistics lock poisoned"))?
-        .sample(peer.as_ref(), readings);
+        .sample(stats::interface_traffic(&state.lan_interface), readings);
 
     Ok(AgentStatus {
         version: env!("CARGO_PKG_VERSION"),

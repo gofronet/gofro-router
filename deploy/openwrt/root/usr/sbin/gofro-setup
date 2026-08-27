@@ -68,6 +68,10 @@ uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5353'
 uci set dhcp.@dnsmasq[0].noresolv='1'
 uci -q del_list dhcp.@dnsmasq[0].address='/gofrowifi.net/10.203.1.1' || true
 uci add_list dhcp.@dnsmasq[0].address='/gofrowifi.net/10.203.1.1'
+uci -q del_list dhcp.@dnsmasq[0].address='/wifi.gofro.net/10.203.1.1' || true
+uci add_list dhcp.@dnsmasq[0].address='/wifi.gofro.net/10.203.1.1'
+uci -q delete uhttpd.main.listen_http || true
+uci add_list uhttpd.main.listen_http='10.203.1.1:81'
 
 configured_wifi=0
 for section in $wifi_sections; do
@@ -93,11 +97,12 @@ uci commit network
 uci commit firewall
 uci commit dhcp
 uci commit wireless
+uci commit uhttpd
 /etc/init.d/gofro-relay enable
 /etc/init.d/gofro-agent enable
 
 echo "Gofro Wi-Fi password: $password"
-echo 'After reconnecting, open http://gofrowifi.net:8080'
+echo 'After reconnecting, open http://wifi.gofro.net'
 echo 'On the VPS, replace the example IP and run: sudo gofro-server create-profile --endpoint 203.0.113.10:8443'
 
 if [ -n "$install_version" ]; then
@@ -113,6 +118,7 @@ fi
 	sleep 5
 	/etc/init.d/firewall restart
 	/etc/init.d/dnsmasq restart
+	/etc/init.d/uhttpd restart
 	/etc/init.d/gofro-agent restart
 	[ -z "$install_version" ] || /etc/init.d/gofro-finalize boot
 ) >/dev/null 2>&1 &

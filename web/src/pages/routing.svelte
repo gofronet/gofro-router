@@ -108,6 +108,10 @@
     <article class="rounded-[28px] border border-[#dedee1] bg-white p-6 shadow-sm">
       <div class="flex items-center gap-3"><div class="grid size-11 place-items-center rounded-2xl bg-[#eef4ec] text-[#365a31]"><ShieldCheck size={21} /></div><div><span class="text-xs text-[#74747d]">Состояние</span><strong class="block text-sm">{status.routing.dns_active ? "FakeDNS активен" : "FakeDNS недоступен"}</strong></div></div>
       <dl class="mt-5 grid grid-cols-2 gap-3 text-xs"><div class="rounded-2xl bg-[#f5f5f5] p-3"><dt class="text-[#74747d]">FakeIP</dt><dd class="mt-1 text-lg font-bold">{status.routing.fake_ips}</dd></div><div class="rounded-2xl bg-[#f5f5f5] p-3"><dt class="text-[#74747d]">Dataplane</dt><dd class="mt-1 text-lg font-bold">{status.routing.dataplane_active && status.routing.geosite_loaded && status.routing.geoip_loaded ? "OK" : "Ошибка"}</dd></div></dl>
+      <div class="mt-4 flex items-center justify-between gap-3 border-t border-[#ececef] pt-4">
+        <div><span class="text-xs text-[#74747d]">VPN-туннель</span><strong class="block text-sm">{status.vpn_enabled ? "Включён" : "Выключен"}</strong></div>
+        <button class="min-h-10 rounded-xl border border-[#dedee1] bg-white px-4 text-xs font-bold" type="button" disabled={busy} aria-pressed={status.vpn_enabled} onclick={() => app.setMode(!status.vpn_enabled)}>{app.mutation === "mode" ? "Переключаем…" : status.vpn_enabled ? "Отключить" : "Включить"}</button>
+      </div>
     </article>
   </div>
 

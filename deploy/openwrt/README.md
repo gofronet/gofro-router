@@ -15,7 +15,7 @@ tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && uclient-fetch -q -O "$tmp" https:
 The bootstrap downloads the signed release manifest, verifies the archive, adds
 the required OpenWrt packages, changes the LAN address to `10.203.1.1`, and
 prints the generated Wi-Fi password. Reconnect to `GofroWIFI 2` or, on the
-dual-band TR3000, `GofroWIFI 5`, then open `http://gofrowifi.net:8080`.
+dual-band TR3000, `GofroWIFI 5`, then open `http://wifi.gofro.net`.
 
 The bundle contains the complete GeoSite and GeoIP databases.
 

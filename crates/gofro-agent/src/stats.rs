@@ -1,11 +1,11 @@
 use std::{
     collections::{HashMap, VecDeque},
     fs,
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
-use wireguard_status::PeerStatus;
 
 use crate::wifi::DeviceReading;
 
@@ -59,12 +59,11 @@ pub(crate) struct StatsTracker {
 impl StatsTracker {
     pub(crate) fn sample(
         &mut self,
-        peer: Option<&PeerStatus>,
+        traffic: Option<(u64, u64)>,
         readings: Vec<DeviceReading>,
     ) -> (LiveStats, Vec<HistoryPoint>, Vec<DeviceStatus>) {
         let timestamp = unix_time();
-        let rx = peer.map_or(0, |peer| peer.rx_bytes);
-        let tx = peer.map_or(0, |peer| peer.tx_bytes);
+        let (rx, tx) = traffic.unwrap_or_default();
         let (rx_bps, tx_bps) = self.previous.map_or((0, 0), |(at, old_rx, old_tx)| {
             let elapsed = timestamp.saturating_sub(at);
             if elapsed == 0 {
@@ -172,6 +171,25 @@ impl StatsTracker {
     }
 }
 
+pub(crate) fn interface_traffic(interface: &str) -> Option<(u64, u64)> {
+    interface_traffic_at(Path::new("/sys/class/net"), interface)
+}
+
+fn interface_traffic_at(root: &Path, interface: &str) -> Option<(u64, u64)> {
+    let stats = root.join(interface).join("statistics");
+    let download = fs::read_to_string(stats.join("tx_bytes"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let upload = fs::read_to_string(stats.join("rx_bytes"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some((download, upload))
+}
+
 fn unix_time() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -227,5 +245,22 @@ fn memory_percent() -> f64 {
         0.0
     } else {
         ((total - available) * 100.0 / total).clamp(0.0, 100.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_client_download_and_upload_from_lan_interface() {
+        let root = std::env::temp_dir().join(format!("gofro-stats-{}", std::process::id()));
+        let stats = root.join("br-lan/statistics");
+        fs::create_dir_all(&stats).unwrap();
+        fs::write(stats.join("tx_bytes"), "200\n").unwrap();
+        fs::write(stats.join("rx_bytes"), "100\n").unwrap();
+
+        assert_eq!(interface_traffic_at(&root, "br-lan"), Some((200, 100)));
+        fs::remove_dir_all(root).unwrap();
     }
 }
