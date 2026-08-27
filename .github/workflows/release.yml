@@ -1,14 +1,21 @@
 name: Release
 
 on:
-  push:
-    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version without the v prefix
+        required: true
+        type: string
 
 permissions:
   contents: read
 
+env:
+  VERSION: ${{ inputs.version }}
+
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-v${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
@@ -30,12 +37,25 @@ jobs:
           components: rustfmt, clippy
 
       - name: Validate release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          [[ $GITHUB_REF_NAME =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          git fetch origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-          VERSION=${GITHUB_REF_NAME#v}
-          cargo metadata --no-deps --format-version 1 |
+          set -euo pipefail
+          [[ $GITHUB_REF == refs/heads/main ]] || { echo 'release must run from main' >&2; exit 1; }
+          [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'version must be X.Y.Z' >&2; exit 1; }
+          git fetch origin main --tags
+          [[ $(git rev-parse origin/main) == "$GITHUB_SHA" ]] || { echo 'release must run from the latest main commit' >&2; exit 1; }
+          TAG=v$VERSION
+          TAG_EXISTS=false
+          if TAG_SHA=$(git rev-parse --verify --quiet "$TAG^{commit}"); then
+            [[ $TAG_SHA == "$GITHUB_SHA" ]] || { echo "$TAG points to another commit" >&2; exit 1; }
+            TAG_EXISTS=true
+          fi
+          if STATE=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            [[ $STATE == true ]] || { echo "$TAG is already published" >&2; exit 1; }
+            [[ $TAG_EXISTS == true ]] || { echo "$TAG draft has no matching tag" >&2; exit 1; }
+          fi
+          cargo metadata --locked --no-deps --format-version 1 |
             jq -e --arg version "$VERSION" 'all(.packages[]; .version == $version)'
 
       - name: Test
@@ -145,7 +165,6 @@ jobs:
           GEOIP_SHA256: c67bd077eb102cec74fab759b73d17f99275f56af10a87c14d9fd983508f5ce1
         run: |
           set -euo pipefail
-          VERSION=${GITHUB_REF_NAME#v}
           DIST=$RUNNER_TEMP/dist
           GEODATA=$RUNNER_TEMP/geodata
           mkdir -p "$DIST" "$GEODATA"
@@ -214,12 +233,14 @@ jobs:
     name: Sign and publish
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     environment: release
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -248,7 +269,6 @@ jobs:
         run: |
           set -euo pipefail
           DIST=$RUNNER_TEMP/dist
-          VERSION=${GITHUB_REF_NAME#v}
           validate() {
             local target=$1 manifest=$2
             local archive="gofro-router-$target.tar.gz"
@@ -274,12 +294,29 @@ jobs:
             gofro-router-manifest-mipsel-openwrt-linux-musl.json
           test -s "$DIST/gofro-install"
 
+      - name: Create release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=v$VERSION
+          git fetch origin main --tags
+          [[ $(git rev-parse origin/main) == "$GITHUB_SHA" ]] || { echo 'main advanced during the build; rerun the release' >&2; exit 1; }
+          if TAG_SHA=$(git rev-parse --verify --quiet "$TAG^{commit}"); then
+            [[ $TAG_SHA == "$GITHUB_SHA" ]] || { echo "$TAG points to another commit" >&2; exit 1; }
+          else
+            # ponytail: GitHub has no atomic compare-and-tag API; create immediately after the main check.
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA"
+          fi
+
       - name: Publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           DIST=$RUNNER_TEMP/dist
+          TAG=v$VERSION
           ASSETS=(
             "$DIST/gofro-router-aarch64-openwrt-linux-musl.tar.gz"
             "$DIST/gofro-router-mipsel-openwrt-linux-musl.tar.gz"
@@ -289,11 +326,10 @@ jobs:
             "$DIST/gofro-router-manifest-mipsel-openwrt-linux-musl.json.sig"
             "$DIST/gofro-install"
           )
-          if STATE=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null); then
+          if STATE=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             [[ $STATE == true ]] || { echo 'published release already exists' >&2; exit 1; }
-            gh release upload "$GITHUB_REF_NAME" "${ASSETS[@]}" --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" "${ASSETS[@]}" --verify-tag --draft \
-              --generate-notes --title "Gofro Router $GITHUB_REF_NAME"
+            gh release delete "$TAG" --yes
           fi
-          gh release edit "$GITHUB_REF_NAME" --draft=false
+          gh release create "$TAG" "${ASSETS[@]}" --verify-tag --draft \
+            --generate-notes --title "Gofro Router $TAG"
+          gh release edit "$TAG" --draft=false
