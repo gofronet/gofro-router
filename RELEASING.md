@@ -5,19 +5,17 @@ with pinned OpenWrt 25.12 SDK toolchains and publish signed installation bundles
 
 ## Create a release
 
-1. Update `[workspace.package].version` in `Cargo.toml`.
-2. Run the checks below and merge the change into `main`.
-3. Create and push the matching tag:
+1. In a dedicated pull request, update `[workspace.package].version` in
+   `Cargo.toml` and the workspace package versions in `Cargo.lock`.
+2. Run the checks below and squash-merge the pull request into `main`.
+3. Open **Actions -> Release -> Run workflow**, select `main`, and enter the
+   version without the `v` prefix.
 
-   ```sh
-   VERSION=0.4.6
-   git tag "v$VERSION"
-   git push origin "v$VERSION"
-   ```
-
-The workflow rejects a tag that differs from the Cargo workspace version. It
-publishes the signed OpenWrt bundle, manifest, signature, and `gofro-install`
-bootstrap. Published releases are immutable.
+The workflow requires the latest `main` commit and a matching Cargo workspace
+version. It tests, builds, and signs the bundles before creating the protected
+tag and publishing the release. A failed run can be retried when its existing
+tag points to the same commit and its release remains a draft. Published
+releases are immutable.
 
 ## Checks
 
