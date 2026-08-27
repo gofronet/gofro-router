@@ -65,7 +65,7 @@
     </div>
     <span
       class="mt-3 block shrink-0 text-xs font-semibold text-[#74747d] sm:mb-1.5 sm:mt-0"
-      >Интерфейс {status.interface || "не определён"}</span
+      >Все Wi-Fi сети</span
     >
   </header>
 
@@ -206,7 +206,7 @@
         class="grid min-h-32 min-w-0 grid-cols-[1.375rem_minmax(0,1fr)] gap-2 rounded-[28px] border border-[#dedee1] bg-white p-4 shadow-sm lg:min-h-36"
       >
         <HardDriveDownload size={20} /><span class="text-xs text-[#74747d]"
-          >Интерфейс</span
+          >VPN-интерфейс</span
         ><strong
           class="col-span-2 overflow-hidden text-ellipsis whitespace-nowrap text-base font-bold"
           >{status.interface || "Нет данных"}</strong

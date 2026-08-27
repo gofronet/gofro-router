@@ -17,7 +17,7 @@ The installer validates the board and OS, downloads the signed Raspberry Pi
 bundle, installs NetworkManager, dnsmasq, nftables and WireGuard, then creates
 `GofroWIFI 5`. It prints the generated password when installation succeeds.
 
-Open `http://gofrowifi.net:8080` after connecting to the new network.
+Open `http://wifi.gofro.net` after connecting to the new network.
 
 ## Update
 

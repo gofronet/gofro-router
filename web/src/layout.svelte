@@ -82,8 +82,8 @@
             ? "Режим DIRECT"
             : "VPN недоступен"}</span
       >
-      <a class="text-xs text-[#74747d] no-underline" href="http://gofrowifi.net:8080"
-        >gofrowifi.net</a
+      <a class="text-xs text-[#74747d] no-underline" href="http://wifi.gofro.net"
+        >wifi.gofro.net</a
       >
     </div>
   </aside>

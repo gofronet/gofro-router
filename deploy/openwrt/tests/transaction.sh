@@ -5,6 +5,10 @@ set -eu
 [ "$(uname -s)" != Darwin ] || exit 0
 
 ROOT="$(CDPATH='' cd "$(dirname "$0")/../../.." && pwd)"
+
+grep -Fq "address='/wifi.gofro.net/10.203.1.1'" "$ROOT/deploy/openwrt/install.sh"
+grep -Fq "listen_http='10.203.1.1:81'" "$ROOT/deploy/openwrt/install.sh"
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

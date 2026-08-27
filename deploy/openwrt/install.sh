@@ -139,6 +139,17 @@ clear_pending() {
 	sync
 }
 
+configure_panel() {
+	uci -q del_list dhcp.@dnsmasq[0].address='/wifi.gofro.net/10.203.1.1' || true
+	uci add_list dhcp.@dnsmasq[0].address='/wifi.gofro.net/10.203.1.1' || return 1
+	uci -q delete uhttpd.main.listen_http || true
+	uci add_list uhttpd.main.listen_http='10.203.1.1:81' || return 1
+	uci commit uhttpd || return 1
+	/etc/init.d/uhttpd restart || return 1
+	uci commit dhcp || return 1
+	/etc/init.d/dnsmasq restart
+}
+
 restart_services() {
 	/etc/init.d/gofro-relay restart || return 1
 	/etc/init.d/gofro-agent restart
@@ -259,7 +270,7 @@ fi
 if [ "$previous" = "$release" ]; then
 	if [ "$mode" = update ] && [ -n "$pending" ]; then
 		ROLLBACK=$pending
-		if restart_services && healthy; then
+		if configure_panel && restart_services && healthy; then
 			write_version "$VERSION"
 			clear_pending
 			ROLLBACK=
@@ -322,6 +333,7 @@ fi
 
 ROLLBACK=$previous
 write_pending "$previous"
+configure_panel || die 'failed to configure panel address'
 link_runtime
 /etc/init.d/gofro-agent stop || true
 /etc/init.d/gofro-relay stop || true

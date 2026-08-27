@@ -4,7 +4,7 @@ use wireguard_status::PeerStatus;
 use crate::stats::{DeviceStatus, HistoryPoint, LiveStats};
 
 pub(crate) const AP_ADDRESS: &str = "10.203.1.1";
-pub(crate) const AP_DOMAIN: &str = "gofrowifi.net:8080";
+pub(crate) const AP_DOMAIN: &str = "wifi.gofro.net";
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct ControllerConfig {

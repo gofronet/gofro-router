@@ -4,7 +4,6 @@
     import Globe2 from "lucide-svelte/icons/globe-2";
     import KeyRound from "lucide-svelte/icons/key-round";
     import RefreshCw from "lucide-svelte/icons/refresh-cw";
-    import Route from "lucide-svelte/icons/route";
     import Router from "lucide-svelte/icons/router";
     import Wifi from "lucide-svelte/icons/wifi";
 
@@ -23,7 +22,7 @@
     const busy = $derived(app.busy);
     const mutation = $derived(app.mutation);
     const reconnectSsid = $derived(app.reconnectSsid);
-    const { setMode, saveAp, resumePolling } = app;
+    const { saveAp, resumePolling } = app;
 
     let networks = $state<WifiForm[]>([]);
     let initialized = $state(false);
@@ -85,7 +84,7 @@
             <p
                 class="mt-3.5 max-w-2xl text-base leading-relaxed text-[#74747d]"
             >
-                Wi-Fi, режим подключения и обновления в одном месте.
+                Wi-Fi и обновления в одном месте.
             </p>
         </div>
     </header>
@@ -120,8 +119,8 @@
             </p>
             <a
                 class="mb-5 flex min-h-14 w-full max-w-md items-center justify-center gap-2.5 rounded-2xl border border-[#3b3b40] bg-[#202024] px-4 font-mono text-xs text-white no-underline"
-                href="http://gofrowifi.net:8080"
-                ><Globe2 size={19} />http://gofrowifi.net:8080<ExternalLink
+                href="http://wifi.gofro.net"
+                ><Globe2 size={19} />http://wifi.gofro.net<ExternalLink
                     size={16}
                 /></a
             >
@@ -137,47 +136,6 @@
             >
         </article>
     {:else}
-        <article
-            class="grid min-w-0 gap-6 overflow-hidden rounded-[28px] bg-[linear-gradient(145deg,#202024,#09090b_72%)] p-6 text-white shadow-xl shadow-black/10 lg:grid-cols-[minmax(0,1fr)_250px] lg:items-center lg:p-7"
-        >
-            <div class="flex min-w-0 items-start gap-3.5">
-                <Route class="shrink-0" size={21} />
-                <div class="min-w-0">
-                    <span class="text-xs text-[#aaaab1]">Маршрутизация</span>
-                    <h2 class="mt-1 text-xl font-bold tracking-[-0.035em]">
-                        {status.vpn_enabled ? "Через VPN" : "Напрямую"}
-                    </h2>
-                    <p class="mt-2 text-xs leading-relaxed text-[#aaaab1]">
-                        {status.vpn_enabled
-                            ? "Игровой трафик идёт через выбранный сервер."
-                            : "VPN обойдён, трафик выходит через домашний роутер."}
-                    </p>
-                </div>
-            </div>
-            <div
-                class="grid grid-cols-2 gap-2.5"
-                aria-label="Режим маршрутизации"
-            >
-                <button
-                    class={`min-h-13 rounded-2xl border text-xs font-bold ${status.vpn_enabled ? "border-white bg-white text-[#09090b]" : "border-[#3c3c41] bg-[#202024] text-[#aaaab1]"}`}
-                    type="button"
-                    disabled={busy}
-                    aria-pressed={status.vpn_enabled}
-                    onclick={() => setMode(true)}
-                    >{mutation === "mode" && status.vpn_enabled
-                        ? "Подключение…"
-                        : "VPN"}</button
-                >
-                <button
-                    class={`min-h-13 rounded-2xl border text-xs font-bold ${!status.vpn_enabled ? "border-white bg-white text-[#09090b]" : "border-[#3c3c41] bg-[#202024] text-[#aaaab1]"}`}
-                    type="button"
-                    disabled={busy}
-                    aria-pressed={!status.vpn_enabled}
-                    onclick={() => setMode(false)}>DIRECT</button
-                >
-            </div>
-        </article>
-
         <div
             class="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(300px,0.8fr)] lg:items-start"
         >
@@ -315,7 +273,7 @@
                             <dd
                                 class="m-0 wrap-break-word text-right font-mono text-xs"
                             >
-                                {status.ap.domain || "gofrowifi.net"}
+                                {status.ap.domain || "wifi.gofro.net"}
                             </dd>
                         </div>
                     </dl>

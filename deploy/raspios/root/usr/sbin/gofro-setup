@@ -65,6 +65,8 @@ no-resolv
 server=127.0.0.1#5353
 address=/gofrowifi.net/10.203.1.1
 local=/gofrowifi.net/
+address=/wifi.gofro.net/10.203.1.1
+local=/wifi.gofro.net/
 dhcp-range=10.203.1.2,10.203.1.250,255.255.255.0,12h
 dhcp-option=3,10.203.1.1
 dhcp-option=6,10.203.1.1
@@ -98,5 +100,5 @@ systemctl restart gofro-agent.service
 systemctl restart gofro-updater.service
 
 echo "Gofro Wi-Fi password: $password"
-echo 'Connect to GofroWIFI 5 and open http://gofrowifi.net:8080'
+echo 'Connect to GofroWIFI 5 and open http://wifi.gofro.net'
 echo 'On the VPS, replace the example IP and run: sudo gofro-server create-profile --endpoint 203.0.113.10:8443'
