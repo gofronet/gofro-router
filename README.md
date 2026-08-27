@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="./docs/readme-hero.svg" width="100%" alt="Gofro Router - отдельная домашняя Wi-Fi-сеть с VPN на OpenWrt">
+  <img src="./docs/readme-hero.svg" width="100%" alt="Gofro Router - отдельная домашняя Wi-Fi-сеть с VPN">
 </p>
 
 <p align="center">
-  <strong>Превратите OpenWrt-роутер в отдельную Wi-Fi-сеть с VPN.</strong><br>
+  <strong>Превратите отдельный роутер или Raspberry Pi 5 в Wi-Fi-сеть с VPN.</strong><br>
   Подключайте телевизор, консоль, телефон или ноутбук без VPN-приложений на каждом устройстве.
 </p>
 
@@ -16,62 +16,65 @@
 
 ## Отдельный Wi-Fi с VPN
 
-**Gofro Router** работает на отдельном OpenWrt-роутере. Он получает интернет от
-основного домашнего роутера по Ethernet и создаёт сети `GofroWIFI 2` и
-`GofroWIFI 5` на двухдиапазонном TR3000 или только `GofroWIFI 2` на LT300. Для
-консоли, телевизора или телефона это обычный Wi-Fi; маршрутизация через VPS
-выполняется на роутере.
+**Gofro Router** работает на отдельном Cudy TR3000 или Raspberry Pi 5. Он
+получает интернет от основного домашнего роутера по Ethernet и создаёт обычную
+Wi-Fi-сеть для консоли, телевизора или телефона. Маршрутизация через VPS
+выполняется на устройстве Gofro.
 
 Основная домашняя сеть не меняется. Если Gofro выключен, остальные домашние
 устройства продолжают работать через основной роутер.
 
 ## Платформа
 
-Поддерживаются Cudy TR3000-256MB V1.0 и Cudy LT300 V3 с официальным OpenWrt
-25.12. Ядро, драйверы, Wi-Fi, NAND, firewall и обновление системы предоставляет OpenWrt.
-Репозиторий собирает только статические бинарники и установочный архив Gofro;
-собственной ОС и образов прошивки здесь больше нет.
+Поддерживаются Cudy TR3000-256MB V1.0 с официальным OpenWrt 25.12 и Raspberry
+Pi 5 с 64-битной Raspberry Pi OS Lite Trixie. Репозиторий собирает общие
+статические бинарники и отдельные платформенные архивы; собственной ОС и образов
+прошивки здесь нет.
 
 Установщик добавляет:
 
 - `gofro-agent` - локальный контроллер и web-панель;
 - `gofro-relay` - обфусцированный UDP-транспорт для WireGuard;
-- `procd`-сервисы и UCI-конфигурацию;
+- сервисы `procd`/systemd и сетевую конфигурацию платформы;
 - GeoSite/GeoIP данные для раздельной маршрутизации.
 
 Rust workspace разделён по runtime-ролям:
 
-- `gofro-agent` управляет OpenWrt, API, FakeDNS и маршрутизацией;
+- `gofro-agent` управляет API, FakeDNS и маршрутизацией;
 - `gofro-server` добавляет и удаляет WireGuard peers на VPS;
 - `wireguard-status` читает и разбирает `wg show ... dump`;
 - `gofro-relay` передаёт WireGuard-пакеты между роутером и VPS.
 
 ## Установка
 
-На свежем поддерживаемом OpenWrt замените `RU` на двухбуквенный код своей
-страны и выполните одну команду. Установщик сам определит модель и архитектуру:
+На свежем TR3000 с OpenWrt замените `RU` на двухбуквенный код страны:
 
 ```sh
 tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && uclient-fetch -q -O "$tmp" https://github.com/gofronet/gofro-router/releases/latest/download/gofro-install && sh "$tmp" --install RU
 ```
 
-Установщик скачает подписанный релиз, проверит его и настроит Gofro. После
-установки подключитесь к `GofroWIFI 2` или `GofroWIFI 5` и откройте
-[gofrowifi.net:8080](http://gofrowifi.net:8080). Подробности и настройка VPS
-описаны в [deploy/openwrt/README.md](deploy/openwrt/README.md).
+На Raspberry Pi 5 с Raspberry Pi OS Lite Trixie и Ethernet uplink:
+
+```sh
+tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL -o "$tmp" https://github.com/gofronet/gofro-router/releases/latest/download/gofro-install-raspios && sudo sh "$tmp" --install RU
+```
+
+После установки подключитесь к GofroWIFI и откройте
+[gofrowifi.net:8080](http://gofrowifi.net:8080). Подробности:
+[OpenWrt](deploy/openwrt/README.md), [Raspberry Pi OS](deploy/raspios/README.md).
 
 ## Схема сети
 
 ```mermaid
 flowchart LR
     INTERNET[Интернет] --> HOME[Домашний роутер]
-    HOME -->|Ethernet| GOFRO[Cudy TR3000<br>OpenWrt + Gofro]
-    GOFRO -->|GofroWIFI 2 / 5| DEVICES[Консоль · ТВ<br>Телефон · Ноутбук]
+    HOME -->|Ethernet| GOFRO[TR3000 или Pi 5<br>Gofro]
+    GOFRO -->|GofroWIFI| DEVICES[Консоль · ТВ<br>Телефон · Ноутбук]
     GOFRO -->|WireGuard| VPS[Ваш VPS]
     VPS --> INTERNET
 ```
 
-1. OpenWrt получает uplink по WAN.
+1. OpenWrt или Raspberry Pi OS получает uplink по Ethernet.
 2. Gofro настраивает LAN `10.203.1.1/24` и отдельный Wi-Fi.
 3. FakeDNS и nftables выбирают прямой маршрут, VPN или блокировку.
 4. WireGuard передаёт VPN-трафик через ваш VPS.
@@ -80,7 +83,7 @@ flowchart LR
 
 Панель Gofro доступна по адресу
 [gofrowifi.net:8080](http://gofrowifi.net:8080). LuCI остаётся на стандартном
-порту 80 по адресу [10.203.1.1](http://10.203.1.1).
+порту 80 по адресу [10.203.1.1](http://10.203.1.1) только на OpenWrt.
 
 В панели можно:
 
@@ -88,7 +91,7 @@ flowchart LR
 - добавлять и выбирать VPN-серверы;
 - задавать правила GeoSite, GeoIP, доменов и подсетей;
 - видеть состояние туннеля и подключённые Wi-Fi-устройства;
-- раздельно менять имя и пароль сетей 2,4 и 5 ГГц.
+- менять имя и пароль доступных Wi-Fi сетей.
 
 Если VPN пропадает, таблица маршрутизации остаётся fail-closed и не отправляет
 помеченный VPN-трафик через обычный WAN.
@@ -99,7 +102,7 @@ WireGuard шифрует трафик, но его UDP-пакеты имеют �
 `gofro-relay` меняет внешнюю форму уже зашифрованных пакетов:
 
 ```text
-WireGuard на OpenWrt
+WireGuard на Gofro Router
     -> локальный gofro-relay
     -> UDP-порт 8443 на VPS
     -> серверный gofro-relay
@@ -112,12 +115,10 @@ WireGuard. Это транспортная обфускация против б�
 
 ## Что понадобится
 
-- Cudy TR3000-256MB V1.0 или Cudy LT300 V3 с совместимым OpenWrt 25.12;
+- Cudy TR3000-256MB V1.0 с OpenWrt 25.12 или Raspberry Pi 5 с 64-битной
+  Raspberry Pi OS Lite Trixie;
 - Ethernet-подключение к основному роутеру;
 - VPS с публичным IPv4;
-
-Из-за 16 MB flash LT300 использует компактную базу только с GeoSite
-`category-ru` и GeoIP `ru`. TR3000 получает полную GeoSite/GeoIP базу.
 
 Для устройств с серийным кодом `2544` и новее нельзя использовать старый Cudy
 intermediate image: их NAND требует поддержки `F50L1G41LC`.
@@ -128,8 +129,8 @@ Gofro автоматически проверяет GitHub каждые шест
 проверки откройте в панели **Настройки → Система** и нажмите **Проверить
 обновления**. Updater проверяет подписанный release-архив, атомарно переключает
 версию и возвращает предыдущую при неудачном health check или прерванном
-обновлении. Конфигурация в `/etc/config/gofro` и `/etc/gofro` не перезаписывается.
+обновлении. Конфигурация в `/etc/gofro` и OpenWrt UCI не перезаписывается.
 
 Процедура выпуска описана в [RELEASING.md](RELEASING.md).
 
-Версия 0.4 требует новой установки на поддерживаемый OpenWrt-роутер.
+Старые Raspberry Pi установки требуют новой установки.

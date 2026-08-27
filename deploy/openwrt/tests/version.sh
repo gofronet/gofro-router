@@ -23,8 +23,7 @@ version_newer 0.4.0 0.4.0 && exit 1
 version_newer 0.3.9 0.4.0 && exit 1
 
 [ "$(platform_for mediatek/filogic cudy,tr3000-256mb-v1)" = aarch64-openwrt-linux-musl ]
-[ "$(platform_for ramips/mt76x8 cudy,lt300-v3)" = mipsel-openwrt-linux-musl ]
-platform_for ramips/mt76x8 cudy,unknown && exit 1
+platform_for mediatek/filogic cudy,unknown && exit 1
 
 write_public_key "$TMP/update-public.pem"
 cmp "$TMP/update-public.pem" "$ROOT/deploy/openwrt/update-public.pem"

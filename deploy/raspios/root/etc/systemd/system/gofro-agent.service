@@ -1,0 +1,14 @@
+[Unit]
+Description=Gofro controller
+Requires=gofro-network.service
+After=gofro-network.service dnsmasq.service
+
+[Service]
+ExecStart=/usr/bin/gofro-agent --listen 10.203.1.1:8080 --interface gt0 --lan-interface wlan0 --wifi-interface wlan0 --config /etc/gofro/controller.json --mode-command /usr/libexec/gofro/mode --geosite /usr/share/gofro/geosite.dat --geoip /usr/share/gofro/geoip.dat --dns-listen 127.0.0.1:5353 --dns-upstream 1.1.1.1:53 --routing-state /var/lib/gofro/routing.sqlite
+Environment=RUST_LOG=gofro_agent=info
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,102 @@
+#!/bin/sh
+set -eu
+
+die() {
+	echo "error: $*" >&2
+	exit 1
+}
+
+[ "$(id -u)" = 0 ] || die 'run as root'
+[ "$#" = 1 ] || die 'usage: gofro-setup COUNTRY (for example: DE)'
+case "$1" in [A-Z][A-Z]) country=$1 ;; *) die 'country must be a two-letter uppercase code' ;; esac
+
+uplink="$(ip -4 route get 1.1.1.1 | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)"
+[ "$uplink" = eth0 ] || die 'Ethernet eth0 must be the active uplink'
+ip link show wlan0 >/dev/null 2>&1 || die 'wlan0 is unavailable'
+
+mkdir -p /etc/gofro /etc/wireguard /var/lib/gofro
+chmod 700 /etc/gofro /etc/wireguard
+if [ ! -s /etc/wireguard/client.key ]; then
+	umask 077
+	wg genkey > /etc/wireguard/client.key
+fi
+wg pubkey < /etc/wireguard/client.key > /etc/wireguard/client.pub
+if [ ! -s /etc/gofro/ap-password ]; then
+	umask 077
+	wg genkey | cut -c1-16 > /etc/gofro/ap-password
+fi
+password="$(cat /etc/gofro/ap-password)"
+printf '%s\n' "$country" > /etc/gofro/wifi-country
+chmod 600 /etc/gofro/wifi-country
+
+if command -v raspi-config >/dev/null 2>&1; then
+	raspi-config nonint do_wifi_country "$country"
+else
+	iw reg set "$country"
+fi
+rfkill unblock wifi
+
+nmcli connection delete gofro-ap >/dev/null 2>&1 || true
+nmcli connection add type wifi ifname wlan0 con-name gofro-ap ssid 'GofroWIFI 5'
+nmcli connection modify gofro-ap \
+	802-11-wireless.mode ap \
+	802-11-wireless.band a \
+	802-11-wireless.channel 36 \
+	802-11-wireless.powersave 2 \
+	wifi-sec.key-mgmt wpa-psk \
+	wifi-sec.psk "$password" \
+	ipv4.method manual \
+	ipv4.addresses 10.203.1.1/24 \
+	ipv4.never-default yes \
+	ipv6.method disabled \
+	connection.autoconnect no
+
+mkdir -p /etc/NetworkManager/conf.d
+cat > /etc/NetworkManager/conf.d/90-gofro-unmanaged.conf <<'EOF'
+[keyfile]
+unmanaged-devices=interface-name:gt0
+EOF
+nmcli general reload
+
+cat > /etc/dnsmasq.d/gofro.conf <<'EOF'
+interface=wlan0
+bind-dynamic
+no-resolv
+server=127.0.0.1#5353
+address=/gofrowifi.net/10.203.1.1
+local=/gofrowifi.net/
+dhcp-range=10.203.1.2,10.203.1.250,255.255.255.0,12h
+dhcp-option=3,10.203.1.1
+dhcp-option=6,10.203.1.1
+dhcp-leasefile=/tmp/dhcp.leases
+EOF
+
+cat > /etc/wireguard/gt0.conf <<EOF
+[Interface]
+PrivateKey = $(cat /etc/wireguard/client.key)
+ListenPort = 51821
+EOF
+chmod 600 /etc/wireguard/gt0.conf
+
+cat > /etc/sysctl.d/99-gofro.conf <<'EOF'
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+net.core.rmem_max = 4194304
+net.core.wmem_max = 4194304
+EOF
+sysctl --system >/dev/null
+
+systemctl daemon-reload
+systemctl disable --now nftables.service >/dev/null 2>&1 || true
+systemctl enable gofro-recover.service gofro-network.service gofro-relay.service \
+	gofro-agent.service gofro-updater.service dnsmasq.service >/dev/null
+systemctl restart gofro-network.service
+systemctl restart dnsmasq.service
+systemctl restart gofro-relay.service
+systemctl restart gofro-agent.service
+systemctl restart gofro-updater.service
+
+echo "Gofro Wi-Fi password: $password"
+echo 'Connect to GofroWIFI 5 and open http://gofrowifi.net:8080'
+echo 'On the VPS, replace the example IP and run: sudo gofro-server create-profile --endpoint 203.0.113.10:8443'

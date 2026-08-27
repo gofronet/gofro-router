@@ -56,16 +56,33 @@ jobs:
             deploy/openwrt/root/usr/libexec/gofro/* \
             deploy/openwrt/root/usr/sbin/* \
             deploy/openwrt/tests/*.sh
+          sh -n deploy/raspios/install.sh \
+            deploy/raspios/root/usr/libexec/gofro/* \
+            deploy/raspios/root/usr/sbin/* \
+            deploy/raspios/tests/*.sh
           shellcheck -s sh deploy/openwrt/install.sh \
             deploy/openwrt/root/etc/init.d/* \
             deploy/openwrt/root/etc/hotplug.d/iface/* \
             deploy/openwrt/root/usr/libexec/gofro/* \
             deploy/openwrt/root/usr/sbin/* \
             deploy/openwrt/tests/*.sh
+          shellcheck -s sh deploy/raspios/install.sh \
+            deploy/raspios/root/usr/libexec/gofro/* \
+            deploy/raspios/root/usr/sbin/* \
+            deploy/raspios/tests/*.sh
+          cmp deploy/openwrt/update-public.pem deploy/raspios/update-public.pem
           sh deploy/openwrt/tests/health.sh
+          sh deploy/openwrt/tests/hotplug.sh
           sh deploy/openwrt/tests/mode.sh
           sh deploy/openwrt/tests/transaction.sh
           sh deploy/openwrt/tests/update.sh
           sh deploy/openwrt/tests/version.sh
           sh deploy/openwrt/tests/wifi.sh
-          python3 deploy/openwrt/tests/geodata_filter.py
+          sh deploy/raspios/tests/mode.sh
+          sh deploy/raspios/tests/network.sh
+          sh deploy/raspios/tests/recover.sh
+          sh deploy/raspios/tests/transaction.sh
+          sh deploy/raspios/tests/tunnel.sh
+          sh deploy/raspios/tests/update.sh
+          sh deploy/raspios/tests/version.sh
+          sh deploy/raspios/tests/wifi.sh

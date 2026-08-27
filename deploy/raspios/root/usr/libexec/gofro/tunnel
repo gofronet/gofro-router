@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+[ "$#" = 2 ] || { echo "Usage: $0 ACTION INTERFACE" >&2; exit 2; }
+[ "$2" = gt0 ] || { echo "Unknown WireGuard interface: $2" >&2; exit 2; }
+
+CONFIG_DIR=${GOFRO_WIREGUARD_DIR:-/etc/wireguard}
+CONFIG=$CONFIG_DIR/$2.conf
+
+case "$1" in
+	start)
+		ip link show "$2" >/dev/null 2>&1 || ip link add dev "$2" type wireguard
+		sysctl -w "net.ipv4.conf.$2.rp_filter=2" >/dev/null
+		wg setconf "$2" "$CONFIG"
+		ip address replace 10.202.0.2/32 dev "$2"
+		ip link set mtu 1360 up dev "$2"
+		ip route replace default dev "$2" table 100 metric 10
+		;;
+	stop)
+		ip route del default dev "$2" table 100 metric 10 2>/dev/null || true
+		ip link del dev "$2" 2>/dev/null || true
+		;;
+	status) ip link show "$2" >/dev/null 2>&1 ;;
+	save)
+		umask 077
+		wg showconf "$2" > "$CONFIG.tmp"
+		mv "$CONFIG.tmp" "$CONFIG"
+		;;
+	*) echo "Unknown action: $1" >&2; exit 2 ;;
+esac

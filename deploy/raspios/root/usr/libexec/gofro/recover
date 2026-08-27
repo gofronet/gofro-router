@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+APP_ROOT=${GOFRO_APP_ROOT:-/usr/lib/gofro}
+RELEASES=$APP_ROOT/releases
+CURRENT=$APP_ROOT/current
+PENDING=${GOFRO_UPDATE_PREVIOUS:-/etc/gofro/update-previous}
+VERSION_FILE=${GOFRO_VERSION_FILE:-/etc/gofro/version}
+
+[ -s "$PENDING" ] || exit 0
+IFS= read -r previous < "$PENDING"
+case "$previous" in "$RELEASES/"*) ;; *) exit 1 ;; esac
+[ -d "$previous" ] || exit 1
+version=${previous#"$RELEASES/"}
+case "$version" in ''|*[!0-9.]*) exit 1 ;; esac
+[ "$previous" = "$RELEASES/$version" ] || exit 1
+
+temporary=$APP_ROOT/current.recover.$$
+trap 'rm -f "$temporary"' EXIT
+ln -s "$previous" "$temporary"
+mv -Tf "$temporary" "$CURRENT"
+printf '%s\n' "$version" > "$VERSION_FILE.new"
+mv -f "$VERSION_FILE.new" "$VERSION_FILE"
+rm -f "$PENDING"
+sync

@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+CONNECTION=gofro-ap
+
+usage() {
+	echo "Usage: $0 list | set BAND SSID [PASSWORD]" >&2
+	exit 2
+}
+
+case "${1:-}" in
+	list)
+		[ "$#" = 1 ] || usage
+		ssid="$(nmcli --terse --escape no --get-values 802-11-wireless.ssid connection show "$CONNECTION")"
+		[ -n "$ssid" ] || { echo 'Gofro access point has no SSID' >&2; exit 1; }
+		printf '5g\t%s\n' "$ssid"
+		;;
+	set)
+		{ [ "$#" = 3 ] || [ "$#" = 4 ]; } || usage
+		case "$2" in 5g|all) ;; *) usage ;; esac
+		nmcli connection modify "$CONNECTION" 802-11-wireless.ssid "$3"
+		[ "$#" = 3 ] || nmcli connection modify "$CONNECTION" wifi-sec.psk "$4"
+		(sleep 2; nmcli connection down "$CONNECTION"; nmcli connection up "$CONNECTION") >/dev/null 2>&1 &
+		;;
+	*) usage ;;
+esac

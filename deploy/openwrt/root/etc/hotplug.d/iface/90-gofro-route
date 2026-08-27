@@ -1,6 +1,17 @@
 #!/bin/sh
 
 expected="$(uci -q get gofro.main.interface || echo gt0)"
+lan_device="$(uci -q get gofro.main.lan_interface || echo br-lan)"
+mode_command=${GOFRO_MODE_COMMAND:-/usr/libexec/gofro/mode}
+
+if [ "$ACTION" = ifup ] && [ "${DEVICE:-}" = "$lan_device" ] && [ -x "$mode_command" ]; then
+	vpn_enabled="$(jsonfilter -i /etc/gofro/controller.json -e '@.vpn_enabled' 2>/dev/null || true)"
+	case "$vpn_enabled" in
+		false) "$mode_command" bypass ;;
+		*) "$mode_command" vpn ;;
+	esac
+fi
+
 [ "$INTERFACE" = "$expected" ] || exit 0
 
 case "$ACTION" in

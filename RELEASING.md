@@ -1,7 +1,7 @@
 # Releases
 
-Stable tags cross-compile static AArch64 and MIPS little-endian musl binaries
-with pinned OpenWrt 25.12 SDK toolchains and publish signed installation bundles.
+Stable tags cross-compile static AArch64 musl binaries with a pinned OpenWrt
+25.12 SDK and publish signed TR3000 and Raspberry Pi 5 installation bundles.
 
 ## Create a release
 
@@ -28,18 +28,29 @@ cd web && bun install --frozen-lockfile && bun run check && bun run build
 cd .. && sh deploy/openwrt/tests/mode.sh && sh deploy/openwrt/tests/transaction.sh
 sh deploy/openwrt/tests/update.sh
 sh deploy/openwrt/tests/version.sh
-python3 deploy/openwrt/tests/geodata_filter.py
+sh deploy/raspios/tests/mode.sh
+sh deploy/raspios/tests/network.sh
+sh deploy/raspios/tests/recover.sh
+sh deploy/raspios/tests/transaction.sh
+sh deploy/raspios/tests/tunnel.sh
+sh deploy/raspios/tests/update.sh
+sh deploy/raspios/tests/version.sh
+sh deploy/raspios/tests/wifi.sh
 ```
 
 ## Upgrade a router
 
-Run the signed updater already installed on the router:
+Run the signed updater already installed on the target platform:
 
 ```sh
+# OpenWrt
 ssh root@10.203.1.1 gofro-update
+
+# Raspberry Pi OS, locally or over its Ethernet address
+sudo gofro-update
 ```
 
 The updater also checks GitHub every six hours. It verifies the Ed25519-signed
 manifest and archive checksum, switches the version atomically, and rolls back
 when the new agent fails its health check. Firmware and kernel upgrades remain
-separate OpenWrt `sysupgrade` operations.
+separate OpenWrt `sysupgrade` or Raspberry Pi OS `apt` operations.

@@ -29,6 +29,7 @@ const UI_CSS: &str = include_str!("../../../assets/app.css");
 const UPDATE_LOCK: &str = "/tmp/gofro-update.lock";
 const UPDATE_RESULT: &str = "/tmp/gofro/update-result";
 const UPDATE_TRIGGER: &str = "/tmp/gofro/update-request";
+const UPDATE_COMMAND: &str = "/usr/libexec/gofro/update";
 
 #[derive(Debug, Serialize)]
 struct ErrorBody {
@@ -272,21 +273,12 @@ fn queue_update() -> Result<()> {
         return Ok(());
     }
 
-    fs::create_dir_all("/tmp/gofro").context("failed to create update state directory")?;
-    if let Err(error) = fs::remove_file(UPDATE_RESULT)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(error).context("failed to clear previous update result");
-    }
-    fs::write(UPDATE_TRIGGER, []).context("failed to queue update")?;
-
-    let started = Command::new("/etc/init.d/gofro-updater")
-        .arg("start")
+    let started = Command::new(UPDATE_COMMAND)
+        .arg("request")
         .status()
-        .context("failed to start updater service")?;
+        .context("failed to request update")?;
     if !started.success() {
-        let _ = fs::remove_file(UPDATE_TRIGGER);
-        return Err(anyhow!("updater service failed to start"));
+        return Err(anyhow!("updater rejected update request"));
     }
     Ok(())
 }

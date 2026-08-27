@@ -1,0 +1,11 @@
+[Unit]
+Description=Recover an interrupted Gofro update
+Before=gofro-network.service gofro-relay.service gofro-agent.service gofro-updater.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/gofro/recover
+
+[Install]
+WantedBy=multi-user.target
