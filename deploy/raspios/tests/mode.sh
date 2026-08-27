@@ -22,6 +22,7 @@ PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/mode" vpn
 grep -q 'ip rule add pref 80 fwmark 0x10000/0x30000 lookup main' "$TMP/log"
 grep -q 'ip rule add pref 81 fwmark 0x20000/0x30000 lookup 100' "$TMP/log"
 grep -q 'ip rule add pref 90 from 10.203.1.0/24 lookup 100' "$TMP/log"
+grep -q 'oifname "gt0" ip saddr 10.203.1.0/24 masquerade' "$TMP/log"
 grep -q 'oifname "eth0" ip saddr 10.203.1.0/24 masquerade' "$TMP/log"
 grep -q 'tcp dport { 53, 80, 8080 } accept' "$TMP/log"
 
@@ -29,3 +30,6 @@ grep -q 'tcp dport { 53, 80, 8080 } accept' "$TMP/log"
 PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/mode" bypass
 grep -q 'ip rule add' "$TMP/log" && exit 1
 grep -q 'iifname "wlan0" oifname "eth0" accept' "$TMP/log"
+if grep -q 'oifname "gt0".*masquerade' "$TMP/log"; then
+	exit 1
+fi

@@ -176,6 +176,7 @@ status_healthy() {
 	[ "$vpn_enabled" = false ] && return 0
 	[ "$vpn_enabled" = true ] || return 1
 	[ "$(jq -r '.tunnel_active' "$STATUS_FILE" 2>/dev/null)" = true ] || return 1
+	ip link show gt0 | grep -q ' mtu 1280 ' || return 1
 	handshake_age="$(jq -r '.peer.handshake_age_seconds' "$STATUS_FILE" 2>/dev/null)"
 	case "$handshake_age" in ''|*[!0-9]*) return 1 ;; esac
 	[ "$handshake_age" -le 180 ]

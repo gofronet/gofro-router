@@ -338,9 +338,11 @@
         {:else}
           <p class="m-0 text-xs leading-relaxed text-[#74747d]">
             На VPS выполните <code
-              >sudo gofro-router-server create-profile --endpoint &lt;VPS-IP&gt;:8443</code
-            > и вставьте весь полученный профиль. Повторный импорт обновит ключ
-            подключения к этому серверу.
+              >sudo gofro-router-server create-profile --endpoint &lt;VPS-IP&gt;:8443
+              --tunnel-ip &lt;FREE-TUNNEL-IP&gt;/32</code
+            > и вставьте весь полученный профиль. Для OpenWrt добавьте <code
+              >--subnet 10.203.1.0/24</code
+            >. Повторный импорт обновит ключ подключения к этому серверу.
           </p>
           <label>
             <span class="mb-2 block text-xs font-semibold text-[#74747d]"
@@ -353,7 +355,7 @@
               maxlength="4096"
               spellcheck="false"
               autocomplete="off"
-              placeholder={'[Interface]\nPrivateKey = …\nAddress = 10.202.0.2/32\n\n[Peer]\nPublicKey = …\nEndpoint = 203.0.113.10:8443'}
+              placeholder={'[Interface]\nPrivateKey = …\nAddress = 10.202.0.3/32\n\n[Peer]\nPublicKey = …\nEndpoint = 203.0.113.10:8443'}
             ></textarea>
           </label>
         {/if}

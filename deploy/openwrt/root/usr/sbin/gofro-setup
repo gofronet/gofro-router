@@ -44,7 +44,7 @@ uci set "network.$interface.proto=wireguard"
 uci set "network.$interface.private_key=$(cat /etc/wireguard/client.key)"
 uci add_list "network.$interface.addresses=10.202.0.2/32"
 uci set "network.$interface.listen_port=51821"
-uci set "network.$interface.mtu=1360"
+uci set "network.$interface.mtu=1280"
 uci set "network.$interface.auto=0"
 
 uci -q del_list "firewall.$wan_zone.network=$interface" || true
@@ -103,7 +103,7 @@ uci commit uhttpd
 
 echo "Gofro Wi-Fi password: $password"
 echo 'After reconnecting, open http://wifi.gofro.net'
-echo 'On the VPS, replace the example IP and run: sudo gofro-router-server create-profile --endpoint 203.0.113.10:8443'
+echo 'On the VPS, replace the example IP and run: sudo gofro-router-server create-profile --endpoint 203.0.113.10:8443 --tunnel-ip 10.202.0.2/32 --subnet 10.203.1.0/24'
 
 if [ -n "$install_version" ]; then
 	printf '%s\n' "$install_version" > /etc/gofro/install-pending.new
