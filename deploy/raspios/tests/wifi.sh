@@ -22,4 +22,6 @@ output="$(PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/wifi
 PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/wifi" set 5g Gaming password123
 grep -q 'connection modify gofro-ap 802-11-wireless.ssid Gaming' "$TMP/log"
 grep -q 'connection modify gofro-ap wifi-sec.psk password123' "$TMP/log"
-PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/wifi" set 2g Unsupported 2>/dev/null && exit 1
+if PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/wifi" set 2g Unsupported 2>/dev/null; then
+	exit 1
+fi
