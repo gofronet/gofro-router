@@ -9,6 +9,7 @@ sed -n \
 	-e '/^valid_version() {$/,/^}$/p' \
 	-e '/^version_newer() {$/,/^}$/p' \
 	-e '/^write_public_key() {$/,/^}$/p' \
+	-e '/^route_release_assets() {$/,/^}$/p' \
 	-e '/^platform_for() {$/,/^}$/p' \
 	"$ROOT/deploy/openwrt/root/usr/sbin/gofro-update" > "$TMP/version.sh"
 # shellcheck disable=SC1091
@@ -27,3 +28,15 @@ platform_for mediatek/filogic cudy,unknown && exit 1
 
 write_public_key "$TMP/update-public.pem"
 cmp "$TMP/update-public.pem" "$ROOT/deploy/openwrt/update-public.pem"
+
+ip() { printf '%s\n' "$*" >> "$TMP/ip.log"; }
+uci() { printf '%s\n' gt0; }
+export mode=update
+export DEFAULT_BASE_URL=https://github.com/gofronet/gofro-router/releases/latest/download
+export BASE_URL=$DEFAULT_BASE_URL
+export GITHUB_ASSETS_CIDR=185.199.108.0/22
+ASSET_ROUTE=
+route_release_assets
+[ "$ASSET_ROUTE" = gt0 ]
+grep -Fxq 'link show gt0' "$TMP/ip.log"
+grep -Fxq 'route add 185.199.108.0/22 dev gt0' "$TMP/ip.log"
