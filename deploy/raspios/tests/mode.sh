@@ -30,4 +30,6 @@ grep -q 'tcp dport { 53, 80, 8080 } accept' "$TMP/log"
 PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/mode" bypass
 grep -q 'ip rule add' "$TMP/log" && exit 1
 grep -q 'iifname "wlan0" oifname "eth0" accept' "$TMP/log"
-grep -q 'oifname "gt0".*masquerade' "$TMP/log" && exit 1
+if grep -q 'oifname "gt0".*masquerade' "$TMP/log"; then
+	exit 1
+fi
