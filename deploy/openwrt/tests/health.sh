@@ -28,6 +28,16 @@ jsonfilter() {
 	esac
 }
 
+uci() {
+	[ "$*" = '-q get gofro.main.interface' ]
+	printf '%s\n' gt0
+}
+
+ip() {
+	[ "$*" = 'link show gt0' ]
+	printf '7: gt0: <POINTOPOINT,UP> mtu %s state UNKNOWN\n' "$TEST_MTU"
+}
+
 # Referenced by the sourced function; ShellCheck cannot follow the generated file.
 # shellcheck disable=SC2034
 STATUS_FILE=$TMP/status
@@ -39,6 +49,7 @@ TEST_DATAPLANE=true
 TEST_VPN=false
 TEST_TUNNEL=false
 TEST_HANDSHAKE_AGE=
+TEST_MTU=1280
 status_healthy
 
 sed -n '/^install_status_healthy() {$/,/^}$/p' \
@@ -72,6 +83,14 @@ set -e
 
 TEST_HANDSHAKE_AGE=30
 TEST_TUNNEL=false
+set +e
+status_healthy
+status=$?
+set -e
+[ "$status" -ne 0 ]
+
+TEST_TUNNEL=true
+TEST_MTU=1360
 set +e
 status_healthy
 status=$?

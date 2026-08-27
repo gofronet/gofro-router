@@ -4,7 +4,7 @@ set -euo pipefail
 WG_INTERFACE="${WG_INTERFACE:-gt0}"
 WG_ADDRESS="${WG_ADDRESS:-10.202.0.1/24}"
 WG_PORT="${WG_PORT:-51820}"
-WG_MTU="${WG_MTU:-1360}"
+WG_MTU="${WG_MTU:-1280}"
 RELAY_PORT="${RELAY_PORT:-8443}"
 SERVER_BINARY="${SERVER_BINARY:-target/release/gofro-server}"
 RELAY_BINARY="${RELAY_BINARY:-target/release/gofro-relay}"

@@ -163,6 +163,8 @@ status_healthy() {
 	[ "$vpn_enabled" = false ] && return 0
 	[ "$vpn_enabled" = true ] || return 1
 	[ "$(jsonfilter -i "$STATUS_FILE" -e '@.tunnel_active' 2>/dev/null)" = true ] || return 1
+	interface="$(uci -q get gofro.main.interface || echo gt0)"
+	ip link show "$interface" | grep -q ' mtu 1280 ' || return 1
 	handshake_age="$(jsonfilter -i "$STATUS_FILE" -e '@.peer.handshake_age_seconds' 2>/dev/null)"
 	case "$handshake_age" in ''|*[!0-9]*) return 1 ;; esac
 	[ "$handshake_age" -le 180 ]
@@ -339,7 +341,7 @@ link_runtime
 /etc/init.d/gofro-relay stop || true
 switch_current "$release"
 interface="$(uci -q get gofro.main.interface || echo gt0)"
-uci set "network.$interface.mtu=1360"
+uci set "network.$interface.mtu=1280"
 uci commit network
 if restart_services && healthy; then
 	write_version "$VERSION"

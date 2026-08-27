@@ -102,4 +102,4 @@ systemctl restart gofro-updater.service
 
 echo "Gofro Wi-Fi password: $password"
 echo 'Connect to GofroWIFI 5 and open http://wifi.gofro.net'
-echo 'On the VPS, replace the example IP and run: sudo gofro-router-server create-profile --endpoint 203.0.113.10:8443'
+echo 'On the VPS, replace the example IP and choose an unused tunnel IP: sudo gofro-router-server create-profile --endpoint 203.0.113.10:8443 --tunnel-ip 10.202.0.3/32'

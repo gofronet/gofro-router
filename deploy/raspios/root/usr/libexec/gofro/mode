@@ -39,6 +39,7 @@ table inet gofro_platform {
   }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
+    oifname "$TUNNEL_INTERFACE" ip saddr $LAN_SUBNET masquerade
     oifname "$UPLINK_INTERFACE" ip saddr $LAN_SUBNET masquerade
   }
 }

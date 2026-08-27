@@ -13,10 +13,9 @@ use crate::model::{ControllerConfig, DomainMatch, IpMatch, RoutingConfig, Server
 
 const MAX_RULES: usize = 128;
 const MAX_PROFILE_SIZE: usize = 4096;
-const CLIENT_TUNNEL_ADDRESS: &str = "10.202.0.2/32";
 const ALLOWED_IPS: &str = "0.0.0.0/0";
 const KEEPALIVE: u16 = 10;
-const MTU: u16 = 1360;
+const MTU: u16 = 1280;
 
 pub(crate) fn validate_server(server: &ServerProfile) -> Result<()> {
     if server.name.is_empty() || server.name.len() > 40 || server.name.chars().any(char::is_control)
@@ -25,10 +24,27 @@ pub(crate) fn validate_server(server: &ServerProfile) -> Result<()> {
     }
     validate_endpoint(&server.endpoint)?;
     validate_wireguard_key(&server.public_key, "public")?;
+    normalize_tunnel_address(&server.client_tunnel_address)?;
     if let Some(private_key) = &server.client_private_key {
         validate_wireguard_key(private_key, "private")?;
     }
     Ok(())
+}
+
+fn normalize_tunnel_address(address: &str) -> Result<String> {
+    let network = address
+        .parse::<Ipv4Net>()
+        .context("некорректный Address в WireGuard-профиле")?;
+    let octets = network.addr().octets();
+    if network.prefix_len() != 32
+        || octets[0] != 10
+        || octets[1] != 202
+        || octets[2] != 0
+        || !(2..=254).contains(&octets[3])
+    {
+        bail!("Gofro поддерживает Address из диапазона 10.202.0.2-10.202.0.254/32");
+    }
+    Ok(network.to_string())
 }
 
 fn validate_wireguard_key(key: &str, kind: &str) -> Result<()> {
@@ -115,10 +131,8 @@ pub(crate) fn parse_server_profile(name: String, profile: &str) -> Result<Server
         }
     }
 
-    let address = required_profile_value(address, "Address")?;
-    if address != CLIENT_TUNNEL_ADDRESS {
-        bail!("Gofro поддерживает Address = {CLIENT_TUNNEL_ADDRESS}");
-    }
+    let client_tunnel_address =
+        normalize_tunnel_address(&required_profile_value(address, "Address")?)?;
     let allowed_ips = required_profile_value(allowed_ips, "AllowedIPs")?
         .split(',')
         .map(str::trim)
@@ -136,14 +150,15 @@ pub(crate) fn parse_server_profile(name: String, profile: &str) -> Result<Server
     let mtu: u16 = required_profile_value(mtu, "MTU")?
         .parse()
         .context("MTU должен быть целым числом")?;
-    if mtu != MTU {
-        bail!("Gofro поддерживает MTU = {MTU}");
+    if !matches!(mtu, MTU | 1360) {
+        bail!("Gofro поддерживает MTU = {MTU} или 1360");
     }
 
     let mut server = ServerProfile {
         name,
         endpoint: required_profile_value(endpoint, "Endpoint")?,
         public_key: required_profile_value(public_key, "PublicKey")?,
+        client_tunnel_address,
         client_private_key: Some(required_profile_value(private_key, "PrivateKey")?),
     };
     server.name = server.name.trim().to_owned();
@@ -268,6 +283,7 @@ pub(crate) fn save(path: &Path, config: &ControllerConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::DEFAULT_CLIENT_TUNNEL_ADDRESS;
 
     #[test]
     fn validates_server_profile() {
@@ -275,6 +291,7 @@ mod tests {
             name: "Primary".into(),
             endpoint: "vpn.example.com:8443".into(),
             public_key: "aq2K6tZ6JqYCpNPLseGJPHceMMxxEdkx5AeRm6cEfSE=".into(),
+            client_tunnel_address: DEFAULT_CLIENT_TUNNEL_ADDRESS.into(),
             client_private_key: None,
         };
         assert!(validate_server(&server).is_ok());
@@ -286,8 +303,8 @@ mod tests {
         let profile = r#"
             [Interface]
             PrivateKey = 4E64fyqMJsXY6YaAp8M3qM7r6Xj6YjAfuPeWbdMvIHE=
-            Address = 10.202.0.2/32
-            MTU = 1360
+            Address = 10.202.0.5/32
+            MTU = 1280
 
             [Peer]
             PublicKey = aq2K6tZ6JqYCpNPLseGJPHceMMxxEdkx5AeRm6cEfSE=
@@ -296,6 +313,7 @@ mod tests {
             PersistentKeepalive = 10
         "#;
         let server = parse_server_profile("Primary".into(), profile).unwrap();
+        assert_eq!(server.client_tunnel_address, "10.202.0.5/32");
         assert!(server.client_private_key.is_some());
         let status = crate::model::ServerStatus::from(&server);
         let json = serde_json::to_string(&status).unwrap();
@@ -307,7 +325,14 @@ mod tests {
         assert!(
             parse_server_profile(
                 "Primary".into(),
-                &profile.replace("MTU = 1360", "MTU = 1280")
+                &profile.replace("MTU = 1280", "MTU = 1360")
+            )
+            .is_ok()
+        );
+        assert!(
+            parse_server_profile(
+                "Primary".into(),
+                &profile.replace("10.202.0.5/32", "10.202.0.1/32")
             )
             .is_err()
         );
@@ -323,6 +348,7 @@ mod tests {
                 name: "Private".into(),
                 endpoint: "vpn.example.com:8443".into(),
                 public_key: "aq2K6tZ6JqYCpNPLseGJPHceMMxxEdkx5AeRm6cEfSE=".into(),
+                client_tunnel_address: DEFAULT_CLIENT_TUNNEL_ADDRESS.into(),
                 client_private_key: Some("4E64fyqMJsXY6YaAp8M3qM7r6Xj6YjAfuPeWbdMvIHE=".into()),
             }],
             routing: RoutingConfig::default(),
@@ -347,6 +373,10 @@ mod tests {
             r#"{"vpn_enabled":false,"active_server_key":null,"servers":[{"name":"Old","endpoint":"vpn.example.com:8443","public_key":"aq2K6tZ6JqYCpNPLseGJPHceMMxxEdkx5AeRm6cEfSE="}],"ap_ssid":"Old Wi-Fi"}"#,
         )
         .unwrap();
+        assert_eq!(
+            config.servers[0].client_tunnel_address,
+            DEFAULT_CLIENT_TUNNEL_ADDRESS
+        );
         assert!(config.servers[0].client_private_key.is_none());
         assert!(
             serde_json::to_value(&config)

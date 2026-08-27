@@ -38,7 +38,7 @@ and `RELAY_PORT` values to `sudo -E deploy/server/install.sh`. The defaults are
 Generate a one-time router profile on the VPS:
 
 ```sh
-sudo gofro-router-server create-profile --endpoint 203.0.113.10:8443
+sudo gofro-router-server create-profile --endpoint 203.0.113.10:8443 --tunnel-ip 10.202.0.2/32 --subnet 10.203.1.0/24
 ```
 
 Copy the complete output, open **Servers → Add** in the Gofro web panel, name

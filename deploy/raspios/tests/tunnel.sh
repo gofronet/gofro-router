@@ -28,6 +28,7 @@ GOFRO_WIREGUARD_DIR=$TMP PATH="$TMP:$PATH" \
 grep -q 'ip link add dev gt0 type wireguard' "$TMP/log"
 grep -q 'sysctl -w net.ipv4.conf.gt0.rp_filter=2' "$TMP/log"
 grep -q "wg setconf gt0 $TMP/gt0.conf" "$TMP/log"
+grep -q 'ip link set mtu 1280 up dev gt0' "$TMP/log"
 grep -q 'ip route replace default dev gt0 table 100 metric 10' "$TMP/log"
 
 GOFRO_WIREGUARD_DIR=$TMP PATH="$TMP:$PATH" \

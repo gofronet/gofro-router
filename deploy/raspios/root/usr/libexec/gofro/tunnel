@@ -12,8 +12,7 @@ case "$1" in
 		ip link show "$2" >/dev/null 2>&1 || ip link add dev "$2" type wireguard
 		sysctl -w "net.ipv4.conf.$2.rp_filter=2" >/dev/null
 		wg setconf "$2" "$CONFIG"
-		ip address replace 10.202.0.2/32 dev "$2"
-		ip link set mtu 1360 up dev "$2"
+		ip link set mtu 1280 up dev "$2"
 		ip route replace default dev "$2" table 100 metric 10
 		;;
 	stop)

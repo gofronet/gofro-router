@@ -17,6 +17,7 @@ const RELAY_SERVICE: &str = "gofro-relay";
 const RELAY_LOCAL_ENDPOINT: &str = "127.0.0.1:51822";
 const SERVICE_COMMAND: &str = "/usr/libexec/gofro/service";
 const TUNNEL_COMMAND: &str = "/usr/libexec/gofro/tunnel";
+const TUNNEL_MTU: &str = "1280";
 const WIFI_COMMAND: &str = "/usr/libexec/gofro/wifi";
 const DEVICE_PRIVATE_KEY: &str = "/etc/wireguard/client.key";
 
@@ -71,6 +72,33 @@ fn set_private_key(interface: &str, private_key: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn tunnel_addresses(interface: &str) -> Result<Vec<String>> {
+    let output = run(Command::new("ip").args([
+        "-o", "-4", "address", "show", "dev", interface, "scope", "global",
+    ]))?;
+    output
+        .lines()
+        .map(|line| {
+            let mut fields = line.split_whitespace();
+            fields
+                .find(|field| *field == "inet")
+                .and_then(|_| fields.next())
+                .map(str::to_owned)
+                .context("invalid ip address output")
+        })
+        .collect()
+}
+
+fn replace_tunnel_addresses(interface: &str, addresses: &[String]) -> Result<()> {
+    run(Command::new("ip").args([
+        "-4", "address", "flush", "dev", interface, "scope", "global",
+    ]))?;
+    for address in addresses {
+        run(Command::new("ip").args(["-4", "address", "add", address, "dev", interface]))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn start_and_select(state: &AppState, server: &ServerProfile) -> Result<()> {
     configure_server(state, server, true)
 }
@@ -100,9 +128,19 @@ fn configure_server(state: &AppState, server: &ServerProfile, start_tunnel: bool
     let previous_endpoint = fs::read(RELAY_ENDPOINT_PATH).ok();
     let tunnel_was_active = service_active(&state.interface)?;
     let result = (|| {
-        prepare_relay(server)?;
-        if start_tunnel && !tunnel_was_active {
-            set_tunnel(&state.interface, "start")?;
+        prepare_relay(server, start_tunnel && !tunnel_was_active)?;
+        if start_tunnel {
+            if !tunnel_was_active {
+                set_tunnel(&state.interface, "start")?;
+            }
+            run(Command::new("ip").args([
+                "link",
+                "set",
+                "mtu",
+                TUNNEL_MTU,
+                "dev",
+                &state.interface,
+            ]))?;
         }
         set_peer(&state.interface, server)
     })();
@@ -120,13 +158,24 @@ fn configure_server(state: &AppState, server: &ServerProfile, start_tunnel: bool
     Ok(())
 }
 
-fn prepare_relay(server: &ServerProfile) -> Result<()> {
+fn prepare_relay(server: &ServerProfile, force_restart: bool) -> Result<()> {
     validate_server(server)?;
     let endpoint = format!("{}\n", server.endpoint);
-    if fs::read(RELAY_ENDPOINT_PATH).is_ok_and(|current| current == endpoint.as_bytes()) {
+    let endpoint_changed =
+        !fs::read(RELAY_ENDPOINT_PATH).is_ok_and(|current| current == endpoint.as_bytes());
+    let relay_active = Command::new(SERVICE_COMMAND)
+        .args(["status", RELAY_SERVICE])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("failed to query relay service")?
+        .success();
+    if !endpoint_changed && !force_restart && relay_active {
         return Ok(());
     }
-    fs::write(RELAY_ENDPOINT_PATH, endpoint).context("failed to update relay endpoint")?;
+    if endpoint_changed {
+        fs::write(RELAY_ENDPOINT_PATH, endpoint).context("failed to update relay endpoint")?;
+    }
     run(Command::new(SERVICE_COMMAND).args(["restart", RELAY_SERVICE]))?;
     Ok(())
 }
@@ -150,6 +199,9 @@ fn set_peer(interface: &str, server: &ServerProfile) -> Result<()> {
     validate_server(server)?;
     let config = format!("/etc/wireguard/{interface}.conf");
     let peers = run(Command::new("wg").args(["show", interface, "peers"]))?;
+    let previous_addresses = tunnel_addresses(interface)?;
+    let next_addresses = vec![server.client_tunnel_address.clone()];
+    let address_changed = previous_addresses != next_addresses;
     let result = (|| {
         set_private_key(interface, server.client_private_key.as_deref())?;
         run(Command::new("wg").args([
@@ -170,16 +222,29 @@ fn set_peer(interface: &str, server: &ServerProfile) -> Result<()> {
         {
             run(Command::new("wg").args(["set", interface, "peer", peer, "remove"]))?;
         }
+        if address_changed {
+            replace_tunnel_addresses(interface, &next_addresses)?;
+        }
         run(Command::new(TUNNEL_COMMAND).args(["save", interface]))?;
         Ok(())
     })();
     if let Err(error) = result {
-        return match run(Command::new("wg").args(["setconf", interface, &config])) {
-            Ok(_) => Err(error),
-            Err(rollback) => Err(anyhow!(
-                "WireGuard peer update failed: {error:#}; rollback failed: {rollback:#}"
-            )),
-        };
+        let mut rollback_errors = Vec::new();
+        if let Err(rollback) = run(Command::new("wg").args(["setconf", interface, &config])) {
+            rollback_errors.push(format!("WireGuard config: {rollback:#}"));
+        }
+        if address_changed
+            && let Err(rollback) = replace_tunnel_addresses(interface, &previous_addresses)
+        {
+            rollback_errors.push(format!("tunnel address: {rollback:#}"));
+        }
+        if rollback_errors.is_empty() {
+            return Err(error);
+        }
+        return Err(anyhow!(
+            "WireGuard peer update failed: {error:#}; rollback failed: {}",
+            rollback_errors.join("; ")
+        ));
     }
     Ok(())
 }

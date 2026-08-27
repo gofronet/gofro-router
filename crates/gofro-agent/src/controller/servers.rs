@@ -235,6 +235,7 @@ mod tests {
             name: "Old".into(),
             endpoint: "old.example:8443".into(),
             public_key: "server-key".into(),
+            client_tunnel_address: "10.202.0.2/32".into(),
             client_private_key: Some("old-private".into()),
         };
         let config = ControllerConfig {
@@ -247,6 +248,7 @@ mod tests {
             name: "New".into(),
             endpoint: "new.example:8443".into(),
             public_key: "server-key".into(),
+            client_tunnel_address: "10.202.0.5/32".into(),
             client_private_key: Some("new-private".into()),
         };
 
@@ -254,6 +256,7 @@ mod tests {
         assert!(reconnect);
         assert_eq!(next.servers.len(), 1);
         assert_eq!(next.servers[0].name, "New");
+        assert_eq!(next.servers[0].client_tunnel_address, "10.202.0.5/32");
         assert_eq!(
             next.servers[0].client_private_key.as_deref(),
             Some("new-private")

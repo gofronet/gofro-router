@@ -5,6 +5,11 @@ use crate::stats::{DeviceStatus, HistoryPoint, LiveStats};
 
 pub(crate) const AP_ADDRESS: &str = "10.203.1.1";
 pub(crate) const AP_DOMAIN: &str = "wifi.gofro.net";
+pub(crate) const DEFAULT_CLIENT_TUNNEL_ADDRESS: &str = "10.202.0.2/32";
+
+fn default_client_tunnel_address() -> String {
+    DEFAULT_CLIENT_TUNNEL_ADDRESS.to_owned()
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct ControllerConfig {
@@ -20,6 +25,8 @@ pub(crate) struct ServerProfile {
     pub(crate) name: String,
     pub(crate) endpoint: String,
     pub(crate) public_key: String,
+    #[serde(default = "default_client_tunnel_address")]
+    pub(crate) client_tunnel_address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) client_private_key: Option<String>,
 }
