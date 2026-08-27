@@ -65,7 +65,6 @@
             network.password = "";
         }
     }
-
 </script>
 
 <svelte:head><title>Настройки · Gofro Router</title></svelte:head>
@@ -133,8 +132,8 @@
             >
             <small
                 class="mt-3.5 max-w-md text-[0.68rem] leading-relaxed text-[#aaaab1]"
-                >Автоопрос приостановлен, поэтому это сообщение останется
-                на экране.</small
+                >Автоопрос приостановлен, поэтому это сообщение останется на
+                экране.</small
             >
         </article>
     {:else}
@@ -200,7 +199,8 @@
                             class="grid gap-4.5 rounded-2xl border border-[#dedee1] p-4 sm:p-5"
                             onsubmit={(event) => submit(event, network)}
                         >
-                            <strong class="text-sm">{network.band
+                            <strong class="text-sm"
+                                >{network.band
                                     ? `Сеть ${bandLabel(network.band)}`
                                     : "Общая сеть"}</strong
                             >
@@ -262,8 +262,7 @@
                                 class="mt-1 min-h-13 w-full rounded-2xl border border-[#09090b] bg-[#09090b] px-5 text-sm font-bold text-white"
                                 type="submit"
                                 disabled={busy}
-                                >{mutation ===
-                                `ap:${network.band ?? "all"}`
+                                >{mutation === `ap:${network.band ?? "all"}`
                                     ? "Применяем…"
                                     : network.band
                                       ? `Сохранить ${bandLabel(network.band)}`
@@ -374,22 +373,9 @@
                     </button>
                     <small
                         class="mt-3 block text-[0.68rem] leading-relaxed text-[#74747d]"
-                        >Обновления проверяются по цифровой подписи. При
-                        ошибке роутер сохранит рабочую версию.</small
+                        >Обновления проверяются по цифровой подписи. При ошибке
+                        роутер сохранит рабочую версию.</small
                     >
-                </article>
-                <article
-                    class="flex min-w-0 gap-3 rounded-[20px] border border-[#dedee1] bg-white p-4"
-                >
-                    <KeyRound class="shrink-0" size={19} />
-                    <div class="min-w-0">
-                        <strong class="text-sm">Пароль защищен</strong>
-                        <p
-                            class="mt-1.5 text-xs leading-relaxed text-[#74747d]"
-                        >
-                            И нечего его знать)
-                        </p>
-                    </div>
                 </article>
             </aside>
         </div>
