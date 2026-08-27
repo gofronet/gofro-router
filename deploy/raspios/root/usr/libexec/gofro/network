@@ -1,7 +1,10 @@
 #!/bin/sh
 set -eu
 
-[ "${1:-}" = start ] && [ "$#" = 1 ] || { echo "Usage: $0 start" >&2; exit 2; }
+if [ "${1:-}" != start ] || [ "$#" != 1 ]; then
+	echo "Usage: $0 start" >&2
+	exit 2
+fi
 
 MODE=${GOFRO_MODE_COMMAND:-/usr/libexec/gofro/mode}
 NMCLI=${GOFRO_NMCLI_COMMAND:-nmcli}
