@@ -5,6 +5,11 @@ ROOT="$(CDPATH='' cd "$(dirname "$0")/../../.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+grep -Fq 'systemctl disable --now avahi-daemon.service avahi-daemon.socket' \
+	"$ROOT/deploy/raspios/install.sh"
+grep -Fq 'systemctl disable --now avahi-daemon.service avahi-daemon.socket' \
+	"$ROOT/deploy/raspios/root/usr/sbin/gofro-setup"
+
 cat > "$TMP/ip" <<'EOF'
 #!/bin/sh
 echo "ip $*" >> "$GOFRO_TEST_LOG"

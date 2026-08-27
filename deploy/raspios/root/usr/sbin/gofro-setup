@@ -91,6 +91,7 @@ sysctl --system >/dev/null
 
 systemctl daemon-reload
 systemctl disable --now nftables.service >/dev/null 2>&1 || true
+systemctl disable --now avahi-daemon.service avahi-daemon.socket >/dev/null 2>&1 || true
 systemctl enable gofro-recover.service gofro-network.service gofro-relay.service \
 	gofro-agent.service gofro-updater.service dnsmasq.service >/dev/null
 systemctl restart gofro-network.service
