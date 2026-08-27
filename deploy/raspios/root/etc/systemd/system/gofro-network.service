@@ -1,0 +1,13 @@
+[Unit]
+Description=Gofro Raspberry Pi network
+Requires=gofro-recover.service NetworkManager.service
+After=gofro-recover.service NetworkManager.service
+Before=gofro-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/gofro/network start
+
+[Install]
+WantedBy=multi-user.target

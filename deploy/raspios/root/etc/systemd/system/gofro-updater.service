@@ -1,0 +1,13 @@
+[Unit]
+Description=Gofro signed update scheduler
+Requires=gofro-recover.service
+After=gofro-recover.service network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/libexec/gofro/update
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

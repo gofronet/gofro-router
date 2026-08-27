@@ -1,0 +1,14 @@
+[Unit]
+Description=Gofro WireGuard relay
+Requires=gofro-recover.service
+After=gofro-recover.service network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/gofro/relay-endpoint
+
+[Service]
+ExecStart=/usr/bin/gofro-relay client --server-file /etc/gofro/relay-endpoint
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

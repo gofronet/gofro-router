@@ -1,0 +1,87 @@
+#!/bin/sh
+set -eu
+
+DIRECT_MARK=0x10000
+VPN_MARK=0x20000
+MARK_MASK=0x30000
+LAN_SUBNET=10.203.1.0/24
+LAN_INTERFACE=wlan0
+UPLINK_INTERFACE=eth0
+TUNNEL_INTERFACE=gt0
+
+clear_rules() {
+	while ip rule del pref 90 2>/dev/null; do :; done
+	while ip rule del pref 81 2>/dev/null; do :; done
+	while ip rule del pref 80 2>/dev/null; do :; done
+}
+
+apply_firewall() {
+	case "$1" in
+		vpn)
+			nft -f - <<EOF
+destroy table inet gofro_platform
+table inet gofro_platform {
+  chain input {
+    type filter hook input priority filter; policy accept;
+    iifname "$LAN_INTERFACE" udp dport { 53, 67 } accept
+    iifname "$LAN_INTERFACE" tcp dport { 53, 8080 } accept
+    iifname "$LAN_INTERFACE" ip protocol icmp accept
+    iifname "$LAN_INTERFACE" drop
+  }
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    iifname "$TUNNEL_INTERFACE" oifname "$LAN_INTERFACE" ct state established,related accept
+    iifname "$UPLINK_INTERFACE" oifname "$LAN_INTERFACE" ct state established,related accept
+    iifname "$LAN_INTERFACE" oifname "$TUNNEL_INTERFACE" accept
+    iifname "$LAN_INTERFACE" oifname "$UPLINK_INTERFACE" accept
+    iifname "$LAN_INTERFACE" drop
+    oifname "$LAN_INTERFACE" drop
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "$UPLINK_INTERFACE" ip saddr $LAN_SUBNET masquerade
+  }
+}
+EOF
+			;;
+		bypass)
+			nft -f - <<EOF
+destroy table inet gofro_platform
+table inet gofro_platform {
+  chain input {
+    type filter hook input priority filter; policy accept;
+    iifname "$LAN_INTERFACE" udp dport { 53, 67 } accept
+    iifname "$LAN_INTERFACE" tcp dport { 53, 8080 } accept
+    iifname "$LAN_INTERFACE" ip protocol icmp accept
+    iifname "$LAN_INTERFACE" drop
+  }
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    iifname "$UPLINK_INTERFACE" oifname "$LAN_INTERFACE" ct state established,related accept
+    iifname "$LAN_INTERFACE" oifname "$UPLINK_INTERFACE" accept
+    iifname "$LAN_INTERFACE" drop
+    oifname "$LAN_INTERFACE" drop
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "$UPLINK_INTERFACE" ip saddr $LAN_SUBNET masquerade
+  }
+}
+EOF
+			;;
+	esac
+}
+
+clear_rules
+case "${1:-}" in
+	vpn)
+		ip route replace "$LAN_SUBNET" dev "$LAN_INTERFACE" table 100
+		ip route replace unreachable default table 100 metric 32767
+		ip rule add pref 80 fwmark "$DIRECT_MARK/$MARK_MASK" lookup main
+		ip rule add pref 81 fwmark "$VPN_MARK/$MARK_MASK" lookup 100
+		ip rule add pref 90 from "$LAN_SUBNET" lookup 100
+		apply_firewall vpn
+		;;
+	bypass) apply_firewall bypass ;;
+	*) echo "Usage: $0 vpn|bypass" >&2; exit 2 ;;
+esac

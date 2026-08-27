@@ -8,7 +8,7 @@ LOG=$STATE_DIR/update.log
 VERSION_FILE=${GOFRO_VERSION_FILE:-/etc/gofro/version}
 UPDATE=${GOFRO_UPDATE_COMMAND:-/usr/sbin/gofro-update}
 LOGGER=${GOFRO_LOGGER_COMMAND:-logger}
-SERVICE=${GOFRO_UPDATE_SERVICE:-/etc/init.d/gofro-updater}
+SERVICE=${GOFRO_UPDATE_SERVICE:-systemctl}
 LOCK=${GOFRO_UPDATE_LOCK:-/tmp/gofro-update.lock}
 CHECK_INTERVAL=${GOFRO_UPDATE_CHECK_INTERVAL:-21600}
 START_DELAY=${GOFRO_UPDATE_START_DELAY:-300}
@@ -24,7 +24,7 @@ request_update() {
 	[ ! -e "$TRIGGER" ] || return 0
 	rm -f "$RESULT" "$RESULT.new"
 	: > "$TRIGGER"
-	if ! "$SERVICE" start; then
+	if ! "$SERVICE" start gofro-updater.service; then
 		rm -f "$TRIGGER"
 		return 1
 	fi

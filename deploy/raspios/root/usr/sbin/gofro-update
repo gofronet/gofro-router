@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-ARCHIVE=
-MANIFEST=
-TARGET=
+TARGET=aarch64-raspios-linux-musl
+ARCHIVE=gofro-router-$TARGET.tar.gz
+MANIFEST=gofro-router-manifest-$TARGET.json
 DEFAULT_BASE_URL=https://github.com/gofronet/gofro-router/releases/latest/download
 BASE_URL=${GOFRO_RELEASE_URL:-$DEFAULT_BASE_URL}
 KEY=/etc/gofro/update-public.pem
@@ -44,7 +44,6 @@ version_newer() {
 	set -- $old
 	old_major=$1 old_minor=$2 old_patch=$3
 	IFS=$old_ifs
-
 	[ "$new_major" -gt "$old_major" ] && return 0
 	[ "$new_major" = "$old_major" ] || return 1
 	[ "$new_minor" -gt "$old_minor" ] && return 0
@@ -61,24 +60,19 @@ EOF
 }
 
 platform_for() {
-	case "$1:$2" in
-		mediatek/filogic:cudy,tr3000-256mb-v1) echo aarch64-openwrt-linux-musl ;;
+	case "$1:$2:$3:$4" in
+		aarch64:debian:trixie:Raspberry\ Pi\ 5\ Model*|aarch64:raspbian:trixie:Raspberry\ Pi\ 5\ Model*) echo "$TARGET" ;;
 		*) return 1 ;;
 	esac
 }
 
 detect_platform() {
-	[ -r /etc/openwrt_release ] || die 'OpenWrt is required'
+	[ -r /etc/os-release ] || die 'Raspberry Pi OS is required'
 	# shellcheck disable=SC1091
-	. /etc/openwrt_release
-	case "${DISTRIB_RELEASE:-}" in 25.12.*) ;; *) die 'OpenWrt 25.12 is required' ;; esac
-	IFS= read -r board < /tmp/sysinfo/board_name || die 'router model is unavailable'
-	TARGET="$(platform_for "${DISTRIB_TARGET:-}" "$board")" || die "unsupported router: $board"
-	ARCHIVE="gofro-router-$TARGET.tar.gz"
-	case "$TARGET" in
-		aarch64-openwrt-linux-musl) MANIFEST=gofro-router-manifest.json ;;
-		*) MANIFEST="gofro-router-manifest-$TARGET.json" ;;
-	esac
+	. /etc/os-release
+	model="$(tr -d '\000' < /proc/device-tree/model 2>/dev/null || true)"
+	detected="$(platform_for "$(uname -m)" "${ID:-}" "${VERSION_CODENAME:-}" "$model")" || die 'Raspberry Pi 5 with 64-bit Raspberry Pi OS Trixie is required'
+	[ "$detected" = "$TARGET" ] || die 'release target mismatch'
 }
 
 [ "$(id -u)" = 0 ] || die 'run as root'
@@ -93,9 +87,10 @@ case "${1:-}" in
 esac
 
 detect_platform
-
 if [ "$mode" = install ]; then
 	[ ! -e /etc/gofro/version ] || die 'Gofro is already installed'
+	apt-get update
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq openssl
 else
 	[ -s "$KEY" ] || die 'update public key is missing'
 fi
@@ -104,25 +99,22 @@ mkdir "$LOCK" 2>/dev/null || die 'another update is running'
 LOCKED=1
 TMP="$(mktemp -d)"
 BASE_URL=${BASE_URL%/}
-
 if [ "$mode" = install ]; then
-	apk update
-	apk add ca-bundle jsonfilter openssl-util uclient-fetch
 	KEY=$TMP/update-public.pem
 	write_public_key "$KEY"
 fi
 
-uclient-fetch -q -T 60 -O "$TMP/$MANIFEST" "$BASE_URL/$MANIFEST"
-uclient-fetch -q -T 60 -O "$TMP/$MANIFEST.sig" "$BASE_URL/$MANIFEST.sig"
+curl --fail --silent --show-error --location --retry 3 --max-time 60 -o "$TMP/$MANIFEST" "$BASE_URL/$MANIFEST"
+curl --fail --silent --show-error --location --retry 3 --max-time 60 -o "$TMP/$MANIFEST.sig" "$BASE_URL/$MANIFEST.sig"
 openssl pkeyutl -verify -pubin -inkey "$KEY" -rawin \
 	-in "$TMP/$MANIFEST" -sigfile "$TMP/$MANIFEST.sig" >/dev/null \
 	|| die 'release signature is invalid'
 
-schema="$(jsonfilter -i "$TMP/$MANIFEST" -e '@.schema')"
-version="$(jsonfilter -i "$TMP/$MANIFEST" -e '@.version')"
-target="$(jsonfilter -i "$TMP/$MANIFEST" -e '@.target')"
-archive="$(jsonfilter -i "$TMP/$MANIFEST" -e '@.archive')"
-sha256="$(jsonfilter -i "$TMP/$MANIFEST" -e '@.sha256')"
+schema="$(jq -r '.schema' "$TMP/$MANIFEST")"
+version="$(jq -r '.version' "$TMP/$MANIFEST")"
+target="$(jq -r '.target' "$TMP/$MANIFEST")"
+archive="$(jq -r '.archive' "$TMP/$MANIFEST")"
+sha256="$(jq -r '.sha256' "$TMP/$MANIFEST")"
 [ "$schema" = 1 ] || die 'release schema is invalid'
 valid_version "$version" || die 'release version is invalid'
 [ "$target" = "$TARGET" ] || die 'release target is invalid'
@@ -141,9 +133,8 @@ fi
 
 asset_url=$BASE_URL
 [ "$BASE_URL" != "$DEFAULT_BASE_URL" ] || asset_url="https://github.com/gofronet/gofro-router/releases/download/v$version"
-uclient-fetch -q -T 300 -O "$TMP/$ARCHIVE" "$asset_url/$ARCHIVE"
-printf '%s  %s\n' "$sha256" "$TMP/$ARCHIVE" | sha256sum -c - >/dev/null \
-	|| die 'release checksum does not match'
+curl --fail --silent --show-error --location --retry 3 --max-time 300 -o "$TMP/$ARCHIVE" "$asset_url/$ARCHIVE"
+printf '%s  %s\n' "$sha256" "$TMP/$ARCHIVE" | sha256sum -c - >/dev/null || die 'release checksum does not match'
 
 mkdir "$TMP/bundle"
 tar -xzf "$TMP/$ARCHIVE" -C "$TMP/bundle"
