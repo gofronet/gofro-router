@@ -119,7 +119,7 @@ ExecStartPost=/usr/sbin/ip link set dev ${WG_INTERFACE} mtu ${WG_MTU}
 EOF
 
 if [[ -f $SERVER_BINARY ]]; then
-  install -m 755 "$SERVER_BINARY" /usr/local/bin/gofro-server
+  install -m 755 "$SERVER_BINARY" /usr/local/bin/gofro-router-server
 else
   printf 'warning: %s not found; install the server CLI later\n' "$SERVER_BINARY" >&2
 fi

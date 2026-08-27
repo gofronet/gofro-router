@@ -161,6 +161,7 @@ EOF
 }
 
 restart_services() {
+	systemctl disable --now avahi-daemon.service avahi-daemon.socket >/dev/null 2>&1 || true
 	systemctl restart gofro-network.service || return 1
 	systemctl restart dnsmasq.service || return 1
 	systemctl restart gofro-relay.service || return 1

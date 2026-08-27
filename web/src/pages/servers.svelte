@@ -338,7 +338,7 @@
         {:else}
           <p class="m-0 text-xs leading-relaxed text-[#74747d]">
             На VPS выполните <code
-              >sudo gofro-server create-profile --endpoint &lt;VPS-IP&gt;:8443</code
+              >sudo gofro-router-server create-profile --endpoint &lt;VPS-IP&gt;:8443</code
             > и вставьте весь полученный профиль. Повторный импорт обновит ключ
             подключения к этому серверу.
           </p>
