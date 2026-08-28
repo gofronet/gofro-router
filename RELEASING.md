@@ -26,6 +26,7 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cd web && bun install --frozen-lockfile && bun run check && bun run build
 cd .. && sh deploy/openwrt/tests/mode.sh && sh deploy/openwrt/tests/transaction.sh
+sh deploy/openwrt/tests/tunnel.sh
 sh deploy/openwrt/tests/update.sh
 sh deploy/openwrt/tests/version.sh
 sh deploy/raspios/tests/mode.sh
