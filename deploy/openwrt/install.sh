@@ -149,7 +149,7 @@ backup_panel() {
 	sync
 }
 
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 restore_panel() {
 	[ -s "$PANEL_BACKUP" ] || return 0
 	uci import uhttpd < "$PANEL_BACKUP" || return 1
