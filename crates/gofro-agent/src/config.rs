@@ -24,7 +24,9 @@ pub(crate) fn validate_server(server: &ServerProfile) -> Result<()> {
     }
     validate_endpoint(&server.endpoint)?;
     validate_wireguard_key(&server.public_key, "public")?;
-    normalize_tunnel_address(&server.client_tunnel_address)?;
+    if let Some(address) = &server.client_tunnel_address {
+        normalize_tunnel_address(address)?;
+    }
     if let Some(private_key) = &server.client_private_key {
         validate_wireguard_key(private_key, "private")?;
     }
@@ -158,7 +160,7 @@ pub(crate) fn parse_server_profile(name: String, profile: &str) -> Result<Server
         name,
         endpoint: required_profile_value(endpoint, "Endpoint")?,
         public_key: required_profile_value(public_key, "PublicKey")?,
-        client_tunnel_address,
+        client_tunnel_address: Some(client_tunnel_address),
         client_private_key: Some(required_profile_value(private_key, "PrivateKey")?),
     };
     server.name = server.name.trim().to_owned();
@@ -283,7 +285,6 @@ pub(crate) fn save(path: &Path, config: &ControllerConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::DEFAULT_CLIENT_TUNNEL_ADDRESS;
 
     #[test]
     fn validates_server_profile() {
@@ -291,7 +292,7 @@ mod tests {
             name: "Primary".into(),
             endpoint: "vpn.example.com:8443".into(),
             public_key: "aq2K6tZ6JqYCpNPLseGJPHceMMxxEdkx5AeRm6cEfSE=".into(),
-            client_tunnel_address: DEFAULT_CLIENT_TUNNEL_ADDRESS.into(),
+            client_tunnel_address: Some("10.202.0.2/32".into()),
             client_private_key: None,
         };
         assert!(validate_server(&server).is_ok());
@@ -313,7 +314,10 @@ mod tests {
             PersistentKeepalive = 10
         "#;
         let server = parse_server_profile("Primary".into(), profile).unwrap();
-        assert_eq!(server.client_tunnel_address, "10.202.0.5/32");
+        assert_eq!(
+            server.client_tunnel_address.as_deref(),
+            Some("10.202.0.5/32")
+        );
         assert!(server.client_private_key.is_some());
         let status = crate::model::ServerStatus::from(&server);
         let json = serde_json::to_string(&status).unwrap();
@@ -348,7 +352,7 @@ mod tests {
                 name: "Private".into(),
                 endpoint: "vpn.example.com:8443".into(),
                 public_key: "aq2K6tZ6JqYCpNPLseGJPHceMMxxEdkx5AeRm6cEfSE=".into(),
-                client_tunnel_address: DEFAULT_CLIENT_TUNNEL_ADDRESS.into(),
+                client_tunnel_address: Some("10.202.0.2/32".into()),
                 client_private_key: Some("4E64fyqMJsXY6YaAp8M3qM7r6Xj6YjAfuPeWbdMvIHE=".into()),
             }],
             routing: RoutingConfig::default(),
@@ -373,10 +377,7 @@ mod tests {
             r#"{"vpn_enabled":false,"active_server_key":null,"servers":[{"name":"Old","endpoint":"vpn.example.com:8443","public_key":"aq2K6tZ6JqYCpNPLseGJPHceMMxxEdkx5AeRm6cEfSE="}],"ap_ssid":"Old Wi-Fi"}"#,
         )
         .unwrap();
-        assert_eq!(
-            config.servers[0].client_tunnel_address,
-            DEFAULT_CLIENT_TUNNEL_ADDRESS
-        );
+        assert_eq!(config.servers[0].client_tunnel_address, None);
         assert!(config.servers[0].client_private_key.is_none());
         assert!(
             serde_json::to_value(&config)

@@ -13,6 +13,7 @@ STATUS_FILE=
 LOCK=/tmp/gofro-install.lock
 LOCKED=
 PENDING=/etc/gofro/update-previous
+PANEL_BACKUP=/etc/gofro/update-uhttpd
 ROLLBACK=
 PLATFORM=
 
@@ -33,7 +34,7 @@ cleanup() {
 	status=$?
 	trap - EXIT HUP INT TERM
 	set +e
-	if [ -n "$ROLLBACK" ] && switch_current "$ROLLBACK"; then
+	if [ -n "$ROLLBACK" ] && restore_panel && switch_current "$ROLLBACK"; then
 		if restart_services && write_version "${ROLLBACK##*/}"; then
 			clear_pending
 			[ -z "${release:-}" ] || [ "$release" = "$ROLLBACK" ] || rm -rf "$release"
@@ -41,6 +42,7 @@ cleanup() {
 	fi
 	[ -z "$STAGING" ] || rm -rf "$STAGING"
 	[ -z "$CURRENT_TMP" ] || rm -f "$CURRENT_TMP"
+	rm -f "$PANEL_BACKUP.new"
 	rm -f "$STATUS_FILE"
 	[ -z "$LOCKED" ] || rmdir "$LOCK"
 	exit "$status"
@@ -139,11 +141,36 @@ clear_pending() {
 	sync
 }
 
+backup_panel() {
+	[ ! -s "$PANEL_BACKUP" ] || return 0
+	uci export uhttpd > "$PANEL_BACKUP.new" || return 1
+	chmod 600 "$PANEL_BACKUP.new" || return 1
+	mv -f "$PANEL_BACKUP.new" "$PANEL_BACKUP" || return 1
+	sync
+}
+
+# shellcheck disable=SC2317,SC2329
+restore_panel() {
+	[ -s "$PANEL_BACKUP" ] || return 0
+	uci import uhttpd < "$PANEL_BACKUP" || return 1
+	uci commit uhttpd || return 1
+	/etc/init.d/uhttpd restart || return 1
+	rm -f "$PANEL_BACKUP" || return 1
+	sync
+}
+
+clear_panel_backup() {
+	rm -f "$PANEL_BACKUP" || return 1
+	sync
+}
+
 configure_panel() {
 	uci -q del_list dhcp.@dnsmasq[0].address='/wifi.gofro.net/10.203.1.1' || true
 	uci add_list dhcp.@dnsmasq[0].address='/wifi.gofro.net/10.203.1.1' || return 1
 	uci -q delete uhttpd.main.listen_http || true
 	uci add_list uhttpd.main.listen_http='10.203.1.1:81' || return 1
+	uci -q delete uhttpd.main.listen_https || true
+	uci add_list uhttpd.main.listen_https='10.203.1.1:444' || return 1
 	uci commit uhttpd || return 1
 	/etc/init.d/uhttpd restart || return 1
 	uci commit dhcp || return 1
@@ -272,10 +299,11 @@ fi
 if [ "$previous" = "$release" ]; then
 	if [ "$mode" = update ] && [ -n "$pending" ]; then
 		ROLLBACK=$pending
-		if configure_panel && restart_services && healthy; then
+		if backup_panel && configure_panel && restart_services && healthy; then
 			write_version "$VERSION"
 			clear_pending
 			ROLLBACK=
+			clear_panel_backup
 			echo "Gofro recovered update to $VERSION"
 			exit 0
 		fi
@@ -335,6 +363,7 @@ fi
 
 ROLLBACK=$previous
 write_pending "$previous"
+backup_panel || die 'failed to back up panel configuration'
 configure_panel || die 'failed to configure panel address'
 link_runtime
 /etc/init.d/gofro-agent stop || true
@@ -347,6 +376,7 @@ if restart_services && healthy; then
 	write_version "$VERSION"
 	clear_pending
 	ROLLBACK=
+	clear_panel_backup
 	prune_releases "$release" ''
 	echo "Gofro updated to $VERSION"
 	exit 0

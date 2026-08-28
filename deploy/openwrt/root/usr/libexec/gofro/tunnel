@@ -4,6 +4,7 @@ set -eu
 [ "$#" = 2 ] || { echo "Usage: $0 ACTION INTERFACE" >&2; exit 2; }
 EXPECTED="$(uci -q get gofro.main.interface || echo gt0)"
 [ "$2" = "$EXPECTED" ] || { echo "Unknown WireGuard interface: $2" >&2; exit 2; }
+CONFIG_DIR=${GOFRO_WIREGUARD_DIR:-/etc/wireguard}
 
 case "$1" in
 	start)
@@ -14,17 +15,23 @@ case "$1" in
 			sleep 1
 			count=$((count + 1))
 		done
-		mkdir -p /etc/wireguard
+		count=0
+		while [ -z "$(ip -o -4 address show dev "$2" scope global)" ]; do
+			[ "$count" -lt 10 ] || exit 1
+			sleep 1
+			count=$((count + 1))
+		done
+		mkdir -p "$CONFIG_DIR"
 		umask 077
-		wg showconf "$2" > "/etc/wireguard/$2.conf"
+		wg showconf "$2" > "$CONFIG_DIR/$2.conf"
 		;;
 	stop) ifdown "$2" ;;
 	status) ip link show "$2" >/dev/null 2>&1 ;;
 	save)
-		mkdir -p /etc/wireguard
+		mkdir -p "$CONFIG_DIR"
 		umask 077
-		wg showconf "$2" > "/etc/wireguard/$2.conf.tmp"
-		mv "/etc/wireguard/$2.conf.tmp" "/etc/wireguard/$2.conf"
+		wg showconf "$2" > "$CONFIG_DIR/$2.conf.tmp"
+		mv "$CONFIG_DIR/$2.conf.tmp" "$CONFIG_DIR/$2.conf"
 		;;
 	*) echo "Unknown action: $1" >&2; exit 2 ;;
 esac

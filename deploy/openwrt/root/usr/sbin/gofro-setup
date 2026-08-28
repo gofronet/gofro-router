@@ -72,6 +72,8 @@ uci -q del_list dhcp.@dnsmasq[0].address='/wifi.gofro.net/10.203.1.1' || true
 uci add_list dhcp.@dnsmasq[0].address='/wifi.gofro.net/10.203.1.1'
 uci -q delete uhttpd.main.listen_http || true
 uci add_list uhttpd.main.listen_http='10.203.1.1:81'
+uci -q delete uhttpd.main.listen_https || true
+uci add_list uhttpd.main.listen_https='10.203.1.1:444'
 
 configured_wifi=0
 for section in $wifi_sections; do

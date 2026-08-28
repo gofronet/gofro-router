@@ -9,7 +9,13 @@ recover_update() {
 	current=$app_root/current
 	state_dir=${STATE_DIR:-/etc/gofro}
 	pending=$state_dir/update-previous
-	[ -s "$pending" ] || return 0
+	panel_backup=$state_dir/update-uhttpd
+	uci_command=${UCI_COMMAND:-uci}
+	uhttpd_init=${UHTTPD_INIT:-/etc/init.d/uhttpd}
+	if [ ! -s "$pending" ]; then
+		rm -f "$panel_backup" || return 1
+		return 0
+	fi
 
 	IFS= read -r previous < "$pending" || return 1
 	version=${previous#"$releases/"}
@@ -17,6 +23,13 @@ recover_update() {
 	[ "$previous" = "$releases/$version" ] || return 1
 	[ -d "$previous" ] || return 1
 
+	if [ -s "$panel_backup" ]; then
+		"$uci_command" import uhttpd < "$panel_backup" || return 1
+		"$uci_command" commit uhttpd || return 1
+		"$uhttpd_init" restart || return 1
+		rm -f "$panel_backup" || return 1
+		sync || return 1
+	fi
 	current_tmp=$app_root/current.new.$$
 	version_tmp=$state_dir/version.new
 	rm -f "$current_tmp" "$version_tmp"

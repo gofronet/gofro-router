@@ -16,6 +16,8 @@ The bootstrap downloads the signed release manifest, verifies the archive, adds
 the required OpenWrt packages, changes the LAN address to `10.203.1.1`, and
 prints the generated Wi-Fi password. Reconnect to `GofroWIFI 2` or, on the
 dual-band TR3000, `GofroWIFI 5`, then open `http://wifi.gofro.net`.
+LuCI remains available at `http://10.203.1.1:81` or
+`https://10.203.1.1:444` with its self-signed certificate.
 
 The bundle contains the complete GeoSite and GeoIP databases.
 

@@ -18,6 +18,7 @@ const RELAY_LOCAL_ENDPOINT: &str = "127.0.0.1:51822";
 const SERVICE_COMMAND: &str = "/usr/libexec/gofro/service";
 const TUNNEL_COMMAND: &str = "/usr/libexec/gofro/tunnel";
 const TUNNEL_MTU: &str = "1280";
+const LEGACY_TUNNEL_ADDRESS: &str = "10.202.0.2/32";
 const WIFI_COMMAND: &str = "/usr/libexec/gofro/wifi";
 const DEVICE_PRIVATE_KEY: &str = "/etc/wireguard/client.key";
 
@@ -200,7 +201,8 @@ fn set_peer(interface: &str, server: &ServerProfile) -> Result<()> {
     let config = format!("/etc/wireguard/{interface}.conf");
     let peers = run(Command::new("wg").args(["show", interface, "peers"]))?;
     let previous_addresses = tunnel_addresses(interface)?;
-    let next_addresses = vec![server.client_tunnel_address.clone()];
+    let next_addresses =
+        next_tunnel_addresses(server.client_tunnel_address.as_deref(), &previous_addresses);
     let address_changed = previous_addresses != next_addresses;
     let result = (|| {
         set_private_key(interface, server.client_private_key.as_deref())?;
@@ -247,6 +249,19 @@ fn set_peer(interface: &str, server: &ServerProfile) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn next_tunnel_addresses(configured: Option<&str>, previous: &[String]) -> Vec<String> {
+    configured.map_or_else(
+        || {
+            if previous.is_empty() {
+                vec![LEGACY_TUNNEL_ADDRESS.to_owned()]
+            } else {
+                previous.to_vec()
+            }
+        },
+        |address| vec![address.to_owned()],
+    )
 }
 
 pub(crate) fn apply_mode(state: &AppState, mode: &str) -> Result<()> {
@@ -312,5 +327,19 @@ mod tests {
         assert_eq!(networks[0].ssid, "GofroWIFI 2");
         assert_eq!(networks[1].ssid, "GofroWIFI 5");
         assert!(parse_access_points("6g\tUnsupported\n").is_err());
+    }
+
+    #[test]
+    fn preserves_legacy_tunnel_address() {
+        let previous = vec!["10.202.0.4/32".to_owned()];
+        assert_eq!(next_tunnel_addresses(None, &previous), previous);
+        assert_eq!(
+            next_tunnel_addresses(None, &[]),
+            vec![LEGACY_TUNNEL_ADDRESS]
+        );
+        assert_eq!(
+            next_tunnel_addresses(Some("10.202.0.5/32"), &previous),
+            vec!["10.202.0.5/32"]
+        );
     }
 }

@@ -88,6 +88,7 @@ jobs:
           sh deploy/openwrt/tests/health.sh
           sh deploy/openwrt/tests/hotplug.sh
           sh deploy/openwrt/tests/transaction.sh
+          sh deploy/openwrt/tests/tunnel.sh
           sh deploy/openwrt/tests/update.sh
           sh deploy/openwrt/tests/version.sh
           sh deploy/openwrt/tests/wifi.sh
