@@ -167,6 +167,7 @@ clear_panel_backup() {
 configure_panel() {
 	uci -q del_list dhcp.@dnsmasq[0].address='/wifi.gofro.net/10.203.1.1' || true
 	uci add_list dhcp.@dnsmasq[0].address='/wifi.gofro.net/10.203.1.1' || return 1
+	uci set dhcp.@dnsmasq[0].localuse='0' || return 1
 	uci -q delete uhttpd.main.listen_http || true
 	uci add_list uhttpd.main.listen_http='10.203.1.1:81' || return 1
 	uci -q delete uhttpd.main.listen_https || true
@@ -174,10 +175,14 @@ configure_panel() {
 	uci commit uhttpd || return 1
 	/etc/init.d/uhttpd restart || return 1
 	uci commit dhcp || return 1
-	/etc/init.d/dnsmasq restart
+	/etc/init.d/dnsmasq restart || return 1
+	ln -sf /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf || return 1
+	/etc/init.d/sysntpd restart
 }
 
 restart_services() {
+	/etc/init.d/gofro-agent disable || return 1
+	/etc/init.d/gofro-agent enable || return 1
 	/etc/init.d/gofro-relay restart || return 1
 	/etc/init.d/gofro-agent restart
 }

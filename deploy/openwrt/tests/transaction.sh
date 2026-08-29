@@ -1,14 +1,24 @@
 #!/bin/sh
 set -eu
 
-# BusyBox and GNU mv support -T; macOS mv does not.
-[ "$(uname -s)" != Darwin ] || exit 0
-
 ROOT="$(CDPATH='' cd "$(dirname "$0")/../../.." && pwd)"
 
 grep -Fq "address='/wifi.gofro.net/10.203.1.1'" "$ROOT/deploy/openwrt/install.sh"
 grep -Fq "listen_http='10.203.1.1:81'" "$ROOT/deploy/openwrt/install.sh"
 grep -Fq "listen_https='10.203.1.1:444'" "$ROOT/deploy/openwrt/install.sh"
+grep -Fq "START=99" "$ROOT/deploy/openwrt/root/etc/init.d/gofro-agent"
+grep -Fq "localuse='0'" "$ROOT/deploy/openwrt/root/usr/sbin/gofro-setup"
+grep -Fq "localuse='0'" "$ROOT/deploy/openwrt/install.sh"
+grep -Fq 'ln -sf /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf' \
+	"$ROOT/deploy/openwrt/root/usr/sbin/gofro-setup"
+grep -Fq 'ln -sf /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf' \
+	"$ROOT/deploy/openwrt/install.sh"
+grep -Fq '/etc/init.d/sysntpd restart' "$ROOT/deploy/openwrt/root/usr/sbin/gofro-setup"
+grep -Fq '/etc/init.d/sysntpd restart' "$ROOT/deploy/openwrt/install.sh"
+grep -Fq '/etc/init.d/gofro-agent disable' "$ROOT/deploy/openwrt/install.sh"
+
+# BusyBox and GNU mv support -T; macOS mv does not.
+[ "$(uname -s)" != Darwin ] || exit 0
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
