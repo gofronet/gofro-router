@@ -109,7 +109,7 @@ switch_current "$RELEASES/0.4.0"
 )
 [ -e "$STATE_DIR/update-previous" ]
 
-# Installation refuses to fill overlay without one release plus a small margin.
+# Installation checks the filesystem that will hold the release, plus a small margin.
 sed -n '/^enough_space() {$/,/^}$/p' "$ROOT/deploy/openwrt/install.sh" > "$TMP/enough-space.sh"
 # shellcheck disable=SC1091
 . "$TMP/enough-space.sh"

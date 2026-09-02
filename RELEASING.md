@@ -1,7 +1,7 @@
 # Releases
 
-Stable tags cross-compile static AArch64 musl binaries with a pinned OpenWrt
-25.12 SDK and publish signed TR3000 and Raspberry Pi 5 installation bundles.
+Stable tags cross-compile static musl binaries for the supported OpenWrt 25.12
+ABIs and publish signed OpenWrt and Raspberry Pi 5 installation bundles.
 
 ## Create a release
 

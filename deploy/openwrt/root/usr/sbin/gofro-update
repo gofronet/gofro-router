@@ -75,10 +75,22 @@ route_release_assets() {
 }
 
 platform_for() {
-	case "$1:$2" in
-		mediatek/filogic:cudy,tr3000-256mb-v1) echo aarch64-openwrt-linux-musl ;;
+	case "$1" in
+		aarch64_*) echo aarch64-openwrt-linux-musl ;;
+		arm_arm926ej-s|arm_xscale) echo armv5te-openwrt-linux-musleabi ;;
+		arm_arm1176jzf-s_vfp) echo armv6-openwrt-linux-musleabihf ;;
+		arm_cortex-*_neon*|arm_cortex-*_vfp*) echo armv7-openwrt-linux-musleabihf ;;
+		arm_cortex-*) echo armv7-openwrt-linux-musleabi ;;
+		i386_pentium-mmx|i386_pentium4) echo i586-openwrt-linux-musl ;;
+		riscv64_generic) echo riscv64-openwrt-linux-musl ;;
+		x86_64) echo x86_64-openwrt-linux-musl ;;
 		*) return 1 ;;
 	esac
+}
+
+enough_memory() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 196608 ]
 }
 
 detect_platform() {
@@ -86,8 +98,7 @@ detect_platform() {
 	# shellcheck disable=SC1091
 	. /etc/openwrt_release
 	case "${DISTRIB_RELEASE:-}" in 25.12.*) ;; *) die 'OpenWrt 25.12 is required' ;; esac
-	IFS= read -r board < /tmp/sysinfo/board_name || die 'router model is unavailable'
-	TARGET="$(platform_for "${DISTRIB_TARGET:-}" "$board")" || die "unsupported router: $board"
+	TARGET="$(platform_for "${DISTRIB_ARCH:-}")" || die "unsupported OpenWrt architecture: ${DISTRIB_ARCH:-unknown}"
 	ARCHIVE="gofro-router-$TARGET.tar.gz"
 	case "$TARGET" in
 		aarch64-openwrt-linux-musl) MANIFEST=gofro-router-manifest.json ;;
@@ -107,6 +118,8 @@ case "${1:-}" in
 esac
 
 detect_platform
+MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2; exit }' /proc/meminfo)" || die 'router memory is unavailable'
+enough_memory "$MEMORY_KIB" || die 'at least 192 MiB RAM must be visible to OpenWrt'
 
 if [ "$mode" = install ]; then
 	[ ! -e /etc/gofro/version ] || die 'Gofro is already installed'
