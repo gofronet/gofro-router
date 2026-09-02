@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Превратите отдельный роутер или Raspberry Pi 5 в Wi-Fi-сеть с VPN.</strong><br>
+  <strong>Превратите роутер с OpenWrt или Raspberry Pi 5 в Wi-Fi-сеть с VPN.</strong><br>
   Подключайте телевизор, консоль, телефон или ноутбук без VPN-приложений на каждом устройстве.
 </p>
 
@@ -16,7 +16,7 @@
 
 ## Отдельный Wi-Fi с VPN
 
-**Gofro Router** работает на отдельном Cudy TR3000 или Raspberry Pi 5. Он
+**Gofro Router** работает на отдельном роутере с OpenWrt 25.12 или Raspberry Pi 5. Он
 получает интернет от основного домашнего роутера по Ethernet и создаёт обычную
 Wi-Fi-сеть для консоли, телевизора или телефона. Маршрутизация через VPS
 выполняется на устройстве Gofro.
@@ -26,9 +26,10 @@ Wi-Fi-сеть для консоли, телевизора или телефон
 
 ## Платформа
 
-Поддерживаются Cudy TR3000-256MB V1.0 с официальным OpenWrt 25.12 и Raspberry
-Pi 5 с 64-битной Raspberry Pi OS Lite Trixie. Репозиторий собирает общие
-статические бинарники и отдельные платформенные архивы; собственной ОС и образов
+OpenWrt-версия не привязана к производителю или модели: установщик выбирает
+статический бинарник по ABI устройства. Поддерживаемые ABI и требования
+перечислены в [инструкции OpenWrt](deploy/openwrt/README.md). Также поддерживается
+Raspberry Pi 5 с 64-битной Raspberry Pi OS Lite Trixie. Собственной ОС и образов
 прошивки здесь нет.
 
 Установщик добавляет:
@@ -47,7 +48,7 @@ Rust workspace разделён по runtime-ролям:
 
 ## Установка
 
-На свежем TR3000 с OpenWrt замените `RU` на двухбуквенный код страны:
+На свежем роутере с OpenWrt 25.12 замените `RU` на двухбуквенный код страны:
 
 ```sh
 tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && uclient-fetch -q -O "$tmp" https://github.com/gofronet/gofro-router/releases/latest/download/gofro-install && sh "$tmp" --install RU
@@ -68,7 +69,7 @@ tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL -o "$tmp" https://gith
 ```mermaid
 flowchart LR
     INTERNET[Интернет] --> HOME[Домашний роутер]
-    HOME -->|Ethernet| GOFRO[TR3000 или Pi 5<br>Gofro]
+    HOME -->|Ethernet| GOFRO[OpenWrt-роутер или Pi 5<br>Gofro]
     GOFRO -->|GofroWIFI| DEVICES[Консоль · ТВ<br>Телефон · Ноутбук]
     GOFRO -->|WireGuard| VPS[Ваш VPS]
     VPS --> INTERNET
@@ -116,13 +117,10 @@ WireGuard. Это транспортная обфускация против б�
 
 ## Что понадобится
 
-- Cudy TR3000-256MB V1.0 с OpenWrt 25.12 или Raspberry Pi 5 с 64-битной
-  Raspberry Pi OS Lite Trixie;
+- совместимый роутер с официальным OpenWrt 25.12 или Raspberry Pi 5 с
+  64-битной Raspberry Pi OS Lite Trixie;
 - Ethernet-подключение к основному роутеру;
 - VPS с публичным IPv4;
-
-Для устройств с серийным кодом `2544` и новее нельзя использовать старый Cudy
-intermediate image: их NAND требует поддержки `F50L1G41LC`.
 
 ## Обновления
 

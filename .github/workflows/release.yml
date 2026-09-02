@@ -20,9 +20,9 @@ concurrency:
 
 jobs:
   build:
-    name: Build OpenWrt bundle
+    name: Build release bundles
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -108,41 +108,83 @@ jobs:
           bun run check
           bun run build
 
-      - name: Download OpenWrt SDK
+      - name: Install cross compiler
         env:
-          AARCH64_SDK: openwrt-sdk-25.12.0-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-          AARCH64_SHA256: 7e45a85b4af8af53ff17ca610ad6a7df312568cb52b730f93a21a91899f33139
+          ZIG_FILE: zig-x86_64-linux-0.15.2.tar.xz
+          ZIG_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends zstd
-          download_sdk() {
-            local target=$1 file=$2 sha256=$3
-            curl --fail --location --retry 3 \
-              "https://downloads.openwrt.org/releases/25.12.0/targets/$target/$file" \
-              -o "$RUNNER_TEMP/$file"
-            printf '%s  %s\n' "$sha256" "$RUNNER_TEMP/$file" | sha256sum -c -
-            tar --use-compress-program=unzstd -xf "$RUNNER_TEMP/$file" -C "$RUNNER_TEMP"
-          }
-          download_sdk mediatek/filogic "$AARCH64_SDK" "$AARCH64_SHA256"
+          sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabi qemu-user
+          curl --fail --location --retry 3 \
+            "https://ziglang.org/download/0.15.2/$ZIG_FILE" -o "$RUNNER_TEMP/$ZIG_FILE"
+          printf '%s  %s\n' "$ZIG_SHA256" "$RUNNER_TEMP/$ZIG_FILE" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/$ZIG_FILE" -C "$RUNNER_TEMP"
+          printf '%s\n' "$RUNNER_TEMP/${ZIG_FILE%.tar.xz}" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/${ZIG_FILE%.tar.xz}:$PATH"
+          cargo install --locked --version 0.23.3 cargo-zigbuild
 
       - name: Cross-compile static binaries
         run: |
           set -euo pipefail
-          rustup target add aarch64-unknown-linux-musl
-          AARCH64_TOOLCHAIN=$(printf '%s\n' "$RUNNER_TEMP"/openwrt-sdk-25.12.0-mediatek-*/staging_dir/toolchain-aarch64_cortex-a53_gcc-*_musl)
-          STAGING_DIR=$(dirname "$AARCH64_TOOLCHAIN")
-          export STAGING_DIR
-          AARCH64_CC=$AARCH64_TOOLCHAIN/bin/aarch64-openwrt-linux-musl-gcc
-          export CC_aarch64_unknown_linux_musl=$AARCH64_CC
-          export AR_aarch64_unknown_linux_musl=$AARCH64_TOOLCHAIN/bin/aarch64-openwrt-linux-musl-gcc-ar
-          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=$AARCH64_CC
-          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-cpu=cortex-a53 -C target-feature=+crt-static'
+          targets=(
+            aarch64-unknown-linux-musl
+            armv5te-unknown-linux-musleabi
+            arm-unknown-linux-musleabihf
+            armv7-unknown-linux-musleabi
+            armv7-unknown-linux-musleabihf
+            i586-unknown-linux-musl
+            riscv64gc-unknown-linux-musl
+            x86_64-unknown-linux-musl
+          )
+          rustup target add "${targets[@]}"
           export CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target/openwrt
-          cargo build --locked --release --target aarch64-unknown-linux-musl \
-            -p gofro-agent -p gofro-relay
-          file target/openwrt/aarch64-unknown-linux-musl/release/gofro-agent | grep -q 'statically linked'
-          file target/openwrt/aarch64-unknown-linux-musl/release/gofro-relay | grep -q 'statically linked'
+          ARMV5_LIBGCC=$(arm-linux-gnueabi-gcc -print-libgcc-file-name)
+          export CARGO_TARGET_ARMV5TE_UNKNOWN_LINUX_MUSLEABI_RUSTFLAGS="-C target-cpu=arm926ej-s -C link-arg=$ARMV5_LIBGCC"
+          ARMV7_SOFT_CPU=generic+v7a+thumb2+soft_float+strict_align
+          export CFLAGS_armv7_unknown_linux_musleabi="-mcpu=$ARMV7_SOFT_CPU"
+          export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABI_RUSTFLAGS="-C link-arg=-mcpu=$ARMV7_SOFT_CPU"
+          for target in "${targets[@]}"; do
+            cargo zigbuild --locked --release \
+              --target "$target" -p gofro-agent -p gofro-relay
+            for binary in gofro-agent gofro-relay; do
+              path="target/openwrt/$target/release/$binary"
+              if readelf -l "$path" | grep -q INTERP; then
+                echo "$path has a dynamic interpreter" >&2
+                exit 1
+              fi
+              if readelf -d "$path" | grep -q NEEDED; then
+                echo "$path has dynamic dependencies" >&2
+                exit 1
+              fi
+            done
+          done
+          readelf -h target/openwrt/armv7-unknown-linux-musleabi/release/gofro-agent |
+            grep -q 'soft-float ABI'
+          readelf -h target/openwrt/armv7-unknown-linux-musleabihf/release/gofro-agent |
+            grep -q 'hard-float ABI'
+          readelf -A target/openwrt/armv5te-unknown-linux-musleabi/release/gofro-agent |
+            grep -q 'Tag_CPU_arch: v5TE'
+          readelf -A target/openwrt/arm-unknown-linux-musleabihf/release/gofro-agent |
+            grep -q 'Tag_CPU_arch: v6'
+          readelf -A target/openwrt/armv7-unknown-linux-musleabi/release/gofro-agent |
+            grep -q 'Tag_CPU_arch: v7'
+          run_versions() {
+            local runner=$1 cpu=$2 target=$3
+            for binary in gofro-agent gofro-relay; do
+              "$runner" -cpu "$cpu" "target/openwrt/$target/release/$binary" --version
+            done
+          }
+          run_versions qemu-aarch64 cortex-a53 aarch64-unknown-linux-musl
+          run_versions qemu-arm arm926 armv5te-unknown-linux-musleabi
+          run_versions qemu-arm arm1176 arm-unknown-linux-musleabihf
+          run_versions qemu-arm cortex-a7 armv7-unknown-linux-musleabi
+          run_versions qemu-arm cortex-a7 armv7-unknown-linux-musleabihf
+          run_versions qemu-i386 pentium i586-unknown-linux-musl
+          run_versions qemu-riscv64 rv64 riscv64gc-unknown-linux-musl
+          for binary in gofro-agent gofro-relay; do
+            "target/openwrt/x86_64-unknown-linux-musl/release/$binary" --version
+          done
 
       - name: Package bundle
         env:
@@ -192,10 +234,19 @@ jobs:
               '{schema: 1, version: $version, target: $target, archive: $archive, sha256: $sha256}' \
               > "$DIST/$manifest"
           }
-          package aarch64-unknown-linux-musl aarch64-openwrt-linux-musl \
-            gofro-router-manifest.json openwrt
-          package aarch64-unknown-linux-musl aarch64-raspios-linux-musl \
-            gofro-router-manifest-aarch64-raspios-linux-musl.json raspios
+          while read -r rust_target release_target manifest platform; do
+            package "$rust_target" "$release_target" "$manifest" "$platform"
+          done <<'EOF'
+          aarch64-unknown-linux-musl aarch64-openwrt-linux-musl gofro-router-manifest.json openwrt
+          armv5te-unknown-linux-musleabi armv5te-openwrt-linux-musleabi gofro-router-manifest-armv5te-openwrt-linux-musleabi.json openwrt
+          arm-unknown-linux-musleabihf armv6-openwrt-linux-musleabihf gofro-router-manifest-armv6-openwrt-linux-musleabihf.json openwrt
+          armv7-unknown-linux-musleabi armv7-openwrt-linux-musleabi gofro-router-manifest-armv7-openwrt-linux-musleabi.json openwrt
+          armv7-unknown-linux-musleabihf armv7-openwrt-linux-musleabihf gofro-router-manifest-armv7-openwrt-linux-musleabihf.json openwrt
+          i586-unknown-linux-musl i586-openwrt-linux-musl gofro-router-manifest-i586-openwrt-linux-musl.json openwrt
+          riscv64gc-unknown-linux-musl riscv64-openwrt-linux-musl gofro-router-manifest-riscv64-openwrt-linux-musl.json openwrt
+          x86_64-unknown-linux-musl x86_64-openwrt-linux-musl gofro-router-manifest-x86_64-openwrt-linux-musl.json openwrt
+          aarch64-unknown-linux-musl aarch64-raspios-linux-musl gofro-router-manifest-aarch64-raspios-linux-musl.json raspios
+          EOF
           install -m 755 deploy/openwrt/root/usr/sbin/gofro-update "$DIST/gofro-install"
           install -m 755 deploy/raspios/root/usr/sbin/gofro-update "$DIST/gofro-install-raspios"
 
@@ -266,9 +317,9 @@ jobs:
             grep -qx root/usr/sbin/gofro-update <<< "$members"
             [[ $(tar -xOzf "$DIST/$archive" TARGET) == "$target" ]]
           }
-          validate aarch64-openwrt-linux-musl gofro-router-manifest.json
-          validate aarch64-raspios-linux-musl \
-            gofro-router-manifest-aarch64-raspios-linux-musl.json
+          for manifest in "$DIST"/gofro-router-manifest*.json; do
+            validate "$(jq -r .target "$manifest")" "$(basename "$manifest")"
+          done
           test -s "$DIST/gofro-install"
           test -s "$DIST/gofro-install-raspios"
 
@@ -295,16 +346,9 @@ jobs:
           set -euo pipefail
           DIST=$RUNNER_TEMP/dist
           TAG=v$VERSION
-          ASSETS=(
-            "$DIST/gofro-router-aarch64-openwrt-linux-musl.tar.gz"
-            "$DIST/gofro-router-aarch64-raspios-linux-musl.tar.gz"
-            "$DIST/gofro-router-manifest.json"
-            "$DIST/gofro-router-manifest.json.sig"
-            "$DIST/gofro-router-manifest-aarch64-raspios-linux-musl.json"
-            "$DIST/gofro-router-manifest-aarch64-raspios-linux-musl.json.sig"
-            "$DIST/gofro-install"
-            "$DIST/gofro-install-raspios"
-          )
+          ASSETS=("$DIST"/gofro-router-*.tar.gz "$DIST"/gofro-router-manifest*.json \
+            "$DIST"/gofro-router-manifest*.json.sig "$DIST/gofro-install" \
+            "$DIST/gofro-install-raspios")
           if STATE=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             [[ $STATE == true ]] || { echo 'published release already exists' >&2; exit 1; }
             gh release delete "$TAG" --yes
