@@ -55,6 +55,7 @@ uci add_list "firewall.gofro_vpn.network=$interface"
 uci set firewall.gofro_vpn.input='REJECT'
 uci set firewall.gofro_vpn.output='ACCEPT'
 uci set firewall.gofro_vpn.forward='REJECT'
+uci set firewall.gofro_vpn.mtu_fix='1'
 uci -q delete firewall.gofro_lan_vpn || true
 uci set firewall.gofro_lan_vpn='forwarding'
 uci set firewall.gofro_lan_vpn.src='lan'
