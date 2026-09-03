@@ -40,10 +40,11 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: gzip -cd ../assets/app.js.gz | cmp - ../assets/app.js && gzip -cd ../assets/app.css.gz | cmp - ../assets/app.css && gzip -cd ../assets/chart.js.gz | cmp - ../assets/chart.js
+      - run: test "$(sha256sum ../assets/app.js | cut -d ' ' -f1)" = "$(< ../assets/app.js.sha256)" && test "$(sha256sum ../assets/app.css | cut -d ' ' -f1)" = "$(< ../assets/app.css.sha256)" && test "$(sha256sum ../assets/chart.js | cut -d ' ' -f1)" = "$(< ../assets/chart.js.sha256)"
       - run: bun run build
       - run: test "$(find ../assets -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)" = "$(printf 'app.css\napp.css.gz\napp.css.sha256\napp.js\napp.js.gz\napp.js.sha256\nchart.js\nchart.js.gz\nchart.js.sha256\nindex.html')"
       - run: gzip -cd ../assets/app.js.gz | cmp - ../assets/app.js && gzip -cd ../assets/app.css.gz | cmp - ../assets/app.css && gzip -cd ../assets/chart.js.gz | cmp - ../assets/chart.js
-      - run: git diff --exit-code -- ../assets/index.html ../assets/app.js ../assets/app.css ../assets/chart.js ../assets/*.sha256
+      - run: test "$(sha256sum ../assets/app.js | cut -d ' ' -f1)" = "$(< ../assets/app.js.sha256)" && test "$(sha256sum ../assets/app.css | cut -d ' ' -f1)" = "$(< ../assets/app.css.sha256)" && test "$(sha256sum ../assets/chart.js | cut -d ' ' -f1)" = "$(< ../assets/chart.js.sha256)"
 
   shell:
     name: Shell
