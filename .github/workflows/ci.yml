@@ -39,9 +39,11 @@ jobs:
           bun-version: '1.3.14'
       - run: bun install --frozen-lockfile
       - run: bun run check
+      - run: gzip -cd ../assets/app.js.gz | cmp - ../assets/app.js && gzip -cd ../assets/app.css.gz | cmp - ../assets/app.css && gzip -cd ../assets/chart.js.gz | cmp - ../assets/chart.js
       - run: bun run build
-      - run: test "$(find ../assets -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)" = "$(printf 'app.css\napp.js\nindex.html')"
-      - run: test -z "$(git status --porcelain --untracked-files=all -- ../assets)"
+      - run: test "$(find ../assets -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)" = "$(printf 'app.css\napp.css.gz\napp.css.sha256\napp.js\napp.js.gz\napp.js.sha256\nchart.js\nchart.js.gz\nchart.js.sha256\nindex.html')"
+      - run: gzip -cd ../assets/app.js.gz | cmp - ../assets/app.js && gzip -cd ../assets/app.css.gz | cmp - ../assets/app.css && gzip -cd ../assets/chart.js.gz | cmp - ../assets/chart.js
+      - run: git diff --exit-code -- ../assets/index.html ../assets/app.js ../assets/app.css ../assets/chart.js ../assets/*.sha256
 
   shell:
     name: Shell

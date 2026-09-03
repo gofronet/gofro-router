@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use fake_dns::FakeDns;
 use geodata::GeoData;
-use model::ControllerConfig;
+use model::{ApNetwork, ControllerConfig};
 use routing::RoutingPolicy;
 use stats::StatsTracker;
 use tracing::{error, info};
@@ -76,6 +76,7 @@ pub(crate) struct AppState {
     pub(crate) config_path: PathBuf,
     pub(crate) mode_command: PathBuf,
     pub(crate) config: Arc<Mutex<ControllerConfig>>,
+    pub(crate) access_points: Arc<Mutex<Vec<ApNetwork>>>,
     pub(crate) stats: Arc<Mutex<StatsTracker>>,
     pub(crate) geodata: Arc<GeoData>,
     pub(crate) routing: Arc<RwLock<RoutingPolicy>>,
@@ -93,6 +94,7 @@ async fn main() -> Result<()> {
     let geodata = Arc::new(GeoData::load(&args.geosite, &args.geoip)?);
     let routing = RoutingPolicy::compile(config.routing.clone(), Arc::clone(&geodata))?;
     let fake_dns = Arc::new(FakeDns::open(&args.routing_state)?);
+    let access_points = network::access_points()?;
     let state = AppState {
         interface: args.interface,
         lan_interface: args.lan_interface,
@@ -100,6 +102,7 @@ async fn main() -> Result<()> {
         config_path: args.config,
         mode_command: args.mode_command,
         config: Arc::new(Mutex::new(config)),
+        access_points: Arc::new(Mutex::new(access_points)),
         stats: Arc::new(Mutex::new(StatsTracker::default())),
         geodata,
         routing: Arc::new(RwLock::new(routing)),
