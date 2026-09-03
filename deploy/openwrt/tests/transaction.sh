@@ -12,11 +12,14 @@ grep -Fq "localuse='0'" "$ROOT/deploy/openwrt/install.sh"
 grep -Fq "firewall.gofro_vpn.mtu_fix='1'" \
 	"$ROOT/deploy/openwrt/root/usr/sbin/gofro-setup"
 grep -Fq "firewall.gofro_vpn.mtu_fix='1'" "$ROOT/deploy/openwrt/install.sh"
+grep -Fq "firewall.gofro_vpn.masq='1'" \
+	"$ROOT/deploy/openwrt/root/usr/sbin/gofro-setup"
+grep -Fq "firewall.gofro_vpn.masq='1'" "$ROOT/deploy/openwrt/install.sh"
 grep -Fq 'uci commit firewall' "$ROOT/deploy/openwrt/install.sh"
 grep -Fq '/etc/init.d/firewall reload' "$ROOT/deploy/openwrt/install.sh"
-grep -Fq 'configure_panel && configure_mtu_fix && restart_services' \
+grep -Fq 'configure_panel && configure_vpn_zone && restart_services' \
 	"$ROOT/deploy/openwrt/install.sh"
-grep -Fq 'if configure_mtu_fix && restart_services && healthy' \
+grep -Fq 'if configure_vpn_zone && restart_services && healthy' \
 	"$ROOT/deploy/openwrt/install.sh"
 grep -Fq 'ln -sf /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf' \
 	"$ROOT/deploy/openwrt/root/usr/sbin/gofro-setup"
