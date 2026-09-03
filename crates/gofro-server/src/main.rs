@@ -24,13 +24,14 @@ struct Args {
 }
 
 #[derive(Debug, Subcommand)]
+// Deprecated compatibility only; remove all `subnet` fields in the next breaking release.
 enum ServerCommand {
     AddPeer {
         #[arg(long)]
         public_key: String,
         #[arg(long)]
         tunnel_ip: String,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         subnet: Option<String>,
     },
     CreateProfile {
@@ -38,13 +39,13 @@ enum ServerCommand {
         endpoint: String,
         #[arg(long)]
         tunnel_ip: String,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         subnet: Option<String>,
     },
     RemovePeer {
         #[arg(long)]
         public_key: String,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         subnet: Option<String>,
     },
     Status,
@@ -346,6 +347,19 @@ mod tests {
         assert!(validate_tunnel_ip("10.202.0.1/32").is_err());
         assert!(validate_subnet(CLIENT_SUBNET).is_ok());
         assert!(validate_subnet("0.0.0.0/0").is_err());
+        assert!(
+            Args::try_parse_from([
+                "gofro-router-server",
+                "create-profile",
+                "--endpoint",
+                "vpn.test:8443",
+                "--tunnel-ip",
+                "10.202.0.5/32",
+                "--subnet",
+                CLIENT_SUBNET,
+            ])
+            .is_ok()
+        );
         let routes = [validate_tunnel_ip("10.202.0.5/32").unwrap()];
         assert!(routes_conflict(
             "other-key\t10.202.0.5/32\n",

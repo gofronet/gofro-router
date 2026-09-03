@@ -192,10 +192,11 @@ configure_panel() {
 	/etc/init.d/sysntpd restart
 }
 
-configure_mtu_fix() {
+configure_vpn_zone() {
 	interface="$(uci -q get gofro.main.interface || echo gt0)"
 	uci set "network.$interface.mtu=1280" || return 1
 	uci set firewall.gofro_vpn.mtu_fix='1' || return 1
+	uci set firewall.gofro_vpn.masq='1' || return 1
 	uci commit network || return 1
 	uci commit firewall || return 1
 	/etc/init.d/firewall reload
@@ -326,7 +327,7 @@ fi
 if [ "$previous" = "$release" ]; then
 	if [ "$mode" = update ] && [ -n "$pending" ]; then
 		ROLLBACK=$pending
-		if backup_panel && configure_panel && configure_mtu_fix && restart_services && healthy; then
+		if backup_panel && configure_panel && configure_vpn_zone && restart_services && healthy; then
 			write_version "$VERSION"
 			clear_pending
 			ROLLBACK=
@@ -396,7 +397,7 @@ link_runtime
 /etc/init.d/gofro-agent stop || true
 /etc/init.d/gofro-relay stop || true
 switch_current "$release"
-if configure_mtu_fix && restart_services && healthy; then
+if configure_vpn_zone && restart_services && healthy; then
 	write_version "$VERSION"
 	clear_pending
 	ROLLBACK=
