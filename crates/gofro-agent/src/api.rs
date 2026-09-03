@@ -170,9 +170,9 @@ fn preferred_encoding(headers: &HeaderMap) -> Option<AssetEncoding> {
     if !headers.contains_key(header::ACCEPT_ENCODING) {
         return Some(AssetEncoding::Identity);
     }
-    let mut gzip_quality: Option<f32> = None;
-    let mut identity_quality: Option<f32> = None;
-    let mut wildcard_quality: Option<f32> = None;
+    let mut gzip_quality: Option<u16> = None;
+    let mut identity_quality: Option<u16> = None;
+    let mut wildcard_quality: Option<u16> = None;
     for value in headers.get_all(header::ACCEPT_ENCODING) {
         let Ok(value) = value.to_str() else {
             continue;
@@ -180,43 +180,45 @@ fn preferred_encoding(headers: &HeaderMap) -> Option<AssetEncoding> {
         for coding in value.split(',') {
             let mut parts = coding.split(';');
             let encoding = parts.next().unwrap_or_default().trim();
-            let mut quality = 1.0_f32;
+            let mut quality = 1000;
             for parameter in parts {
                 let Some((name, value)) = parameter.split_once('=') else {
                     continue;
                 };
                 if name.trim().eq_ignore_ascii_case("q") {
-                    quality = value
-                        .trim()
-                        .parse()
-                        .ok()
-                        .filter(|value| (0.0..=1.0).contains(value))
-                        .unwrap_or(0.0);
+                    quality = parse_quality(value.trim()).unwrap_or(0);
                 }
             }
             if encoding.eq_ignore_ascii_case("gzip") {
-                gzip_quality = Some(gzip_quality.unwrap_or(0.0).max(quality));
+                gzip_quality = Some(gzip_quality.unwrap_or(0).max(quality));
             } else if encoding.eq_ignore_ascii_case("identity") {
-                identity_quality = Some(identity_quality.unwrap_or(0.0).max(quality));
+                identity_quality = Some(identity_quality.unwrap_or(0).max(quality));
             } else if encoding == "*" {
-                wildcard_quality = Some(wildcard_quality.unwrap_or(0.0).max(quality));
+                wildcard_quality = Some(wildcard_quality.unwrap_or(0).max(quality));
             }
         }
     }
-    let gzip_quality = gzip_quality.or(wildcard_quality).unwrap_or(0.0);
-    let identity_quality = identity_quality.unwrap_or_else(|| {
-        if wildcard_quality == Some(0.0) {
-            0.0
-        } else {
-            1.0
-        }
-    });
-    if gzip_quality <= 0.0 && identity_quality <= 0.0 {
+    let gzip_quality = gzip_quality.or(wildcard_quality).unwrap_or(0);
+    let identity_quality =
+        identity_quality.unwrap_or_else(|| if wildcard_quality == Some(0) { 0 } else { 1000 });
+    if gzip_quality == 0 && identity_quality == 0 {
         None
     } else if gzip_quality >= identity_quality {
         Some(AssetEncoding::Gzip)
     } else {
         Some(AssetEncoding::Identity)
+    }
+}
+
+fn parse_quality(value: &str) -> Option<u16> {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if fraction.len() > 3 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    match whole {
+        "0" => Some(fraction.parse().unwrap_or(0) * 10_u16.pow(3 - fraction.len() as u32)),
+        "1" if fraction.bytes().all(|byte| byte == b'0') => Some(1000),
+        _ => None,
     }
 }
 
