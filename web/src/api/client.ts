@@ -1,13 +1,62 @@
-import axios, { AxiosError } from "axios";
 import { z, type ZodType } from "zod";
 
 const errorResponseSchema = z.object({ error: z.string() });
 
-export const http = axios.create({
-  baseURL: "/api",
-  headers: { "Content-Type": "application/json" },
-  timeout: 10_000,
-});
+type Options = { data?: unknown; timeout?: number };
+
+async function send(
+  method: string,
+  path: string,
+  body?: unknown,
+  options: Options = {},
+): Promise<{ data: unknown }> {
+  const controller = options.timeout === 0 ? undefined : new AbortController();
+  const timeout = controller
+    ? window.setTimeout(() => controller.abort(), options.timeout ?? 10_000)
+    : undefined;
+
+  try {
+    const response = await fetch(`/api${path}`, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller?.signal,
+      cache: "no-store",
+    });
+    let data: unknown;
+    try {
+      data = await response.json();
+    } catch (error) {
+      if (
+        error instanceof TypeError ||
+        (error instanceof DOMException && error.name === "AbortError")
+      ) {
+        throw error;
+      }
+      data = null;
+    }
+    if (!response.ok) {
+      const parsed = errorResponseSchema.safeParse(data);
+      throw new ApiError(
+        parsed.success ? parsed.data.error : `Ошибка HTTP ${response.status}`,
+        response.status,
+      );
+    }
+    return { data };
+  } finally {
+    if (timeout !== undefined) window.clearTimeout(timeout);
+  }
+}
+
+export const http = {
+  get: (path: string) => send("GET", path),
+  post: (path: string, body: unknown, options?: Options) =>
+    send("POST", path, body, options),
+  put: (path: string, body: unknown, options?: Options) =>
+    send("PUT", path, body, options),
+  delete: (path: string, options?: Options) =>
+    send("DELETE", path, options?.data, options),
+};
 
 export class ApiError extends Error {
   constructor(
@@ -23,21 +72,13 @@ export class ApiError extends Error {
 function apiError(error: unknown): ApiError {
   if (error instanceof ApiError) return error;
 
-  if (error instanceof AxiosError) {
-    const parsed = errorResponseSchema.safeParse(error.response?.data);
-    return new ApiError(
-      parsed.success
-        ? parsed.data.error
-        : error.response
-          ? `Ошибка HTTP ${error.response.status}`
-          : "Устройство не отвечает",
-      error.response?.status,
-      error,
-    );
-  }
-
   return new ApiError(
-    error instanceof Error ? error.message : "Неизвестная ошибка",
+    (error instanceof DOMException && error.name === "AbortError") ||
+      error instanceof TypeError
+      ? "Устройство не отвечает"
+      : error instanceof Error
+        ? error.message
+        : "Неизвестная ошибка",
     undefined,
     error,
   );

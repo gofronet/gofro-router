@@ -5,10 +5,9 @@
   "scripts": {
     "dev": "vite",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "build": "vite build"
+    "build": "vite build && bun finalize-assets.mjs"
   },
   "dependencies": {
-    "axios": "^1.19.0",
     "chart.js": "^4.5.0",
     "lucide-svelte": "^1.0.1",
     "sv-router": "^0.18.1",

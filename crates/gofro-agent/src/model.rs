@@ -226,7 +226,7 @@ pub(crate) struct ApStatus {
     pub(crate) domain: &'static str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct ApNetwork {
     pub(crate) band: WifiBand,
     pub(crate) ssid: String,

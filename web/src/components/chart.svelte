@@ -1,18 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import {
-    CategoryScale,
+  import type {
     Chart,
-    Filler,
-    Legend,
-    LinearScale,
-    LineController,
-    LineElement,
-    PointElement,
-    Tooltip,
-    type ChartConfiguration,
-    type ChartDataset,
-    type ScriptableContext,
+    ChartConfiguration,
+    ChartDataset,
+    ScriptableContext,
   } from "chart.js";
   import { formatRate } from "../format";
   import type { HistoryPoint } from "../domain/models";
@@ -27,19 +19,9 @@
     label: string;
   } = $props();
 
-  Chart.register(
-    CategoryScale,
-    LinearScale,
-    LineController,
-    LineElement,
-    PointElement,
-    Filler,
-    Tooltip,
-    Legend,
-  );
-
   let canvas: HTMLCanvasElement;
   let chart: Chart<"line"> | null = null;
+  let loadFailed = $state(false);
   const time = new Intl.DateTimeFormat("ru-RU", {
     hour: "2-digit",
     minute: "2-digit",
@@ -196,16 +178,50 @@
   }
 
   onMount(() => {
-    chart = new Chart(canvas, config(history));
-    return () => chart?.destroy();
+    let mounted = true;
+    void import("chart.js")
+      .then(
+        ({
+          CategoryScale,
+          Chart,
+          Filler,
+          Legend,
+          LinearScale,
+          LineController,
+          LineElement,
+          PointElement,
+          Tooltip,
+        }) => {
+          if (!mounted) return;
+          Chart.register(
+            CategoryScale,
+            LinearScale,
+            LineController,
+            LineElement,
+            PointElement,
+            Filler,
+            Tooltip,
+            Legend,
+          );
+          chart = new Chart(canvas, config(history));
+        },
+      )
+      .catch(() => {
+        if (mounted) loadFailed = true;
+      });
+    return () => {
+      mounted = false;
+      chart?.destroy();
+    };
   });
 
   $effect(() => {
+    const points = history;
     if (!chart) return;
-    chart.data.labels = history.map((point) =>
+    chart.data.labels = points.map((point) =>
       time.format(date(point.timestamp)),
     );
-    chart.data.datasets = datasets(history);
+    chart.data.datasets = datasets(points);
     chart.update("none");
   });
 </script>
@@ -214,11 +230,11 @@
   class={`relative w-full ${kind === "system" ? "h-57.5 lg:h-65" : "h-65 lg:h-82.5"}`}
 >
   <canvas bind:this={canvas} aria-label={label}>{label}</canvas>
-  {#if history.length === 0}
+  {#if loadFailed || history.length === 0}
     <div
       class="absolute inset-x-1 bottom-6 top-14 grid place-items-center rounded-2xl border border-dashed border-[#dedee1] text-center text-xs text-[#74747d]"
     >
-      График появится после первых замеров
+      {loadFailed ? "Обновите страницу для загрузки графика" : "График появится после первых замеров"}
     </div>
   {/if}
 </div>

@@ -51,7 +51,7 @@
   >
     <div class="min-w-0">
       <span class="text-xs font-bold tracking-[0.18em] text-[#74747d] uppercase"
-        >Обновление каждые 2 секунды</span
+        >Обновление каждые 5 секунд</span
       >
       <h1
         class="mt-2 text-[clamp(2.25rem,11vw,3.25rem)] leading-[0.98] font-extrabold tracking-[-0.06em] lg:text-[clamp(3rem,5vw,4.2rem)]"
