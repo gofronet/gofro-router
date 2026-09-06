@@ -1,4 +1,11 @@
-use std::{fs, net::SocketAddr, net::UdpSocket, path::PathBuf, thread};
+use std::{
+    fs,
+    io::{self, ErrorKind},
+    net::{SocketAddr, UdpSocket},
+    path::PathBuf,
+    thread,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 
@@ -8,18 +15,29 @@ use crate::{
     configure_socket,
 };
 
+const CONNECT_RETRY_DELAY: Duration = Duration::from_secs(1);
+
 pub(crate) fn run(listen: SocketAddr, server_file: PathBuf) -> Result<()> {
     let endpoint = fs::read_to_string(&server_file)
         .with_context(|| format!("failed to read {}", server_file.display()))?;
 
     let local = UdpSocket::bind(listen).with_context(|| format!("failed to bind {listen}"))?;
-    let remote = UdpSocket::bind("0.0.0.0:0").context("failed to bind relay client socket")?;
     configure_socket(&local).context("failed to configure local relay socket")?;
-    configure_socket(&remote).context("failed to configure remote relay socket")?;
-
-    remote
-        .connect(endpoint.trim())
-        .with_context(|| format!("failed to connect to {}", endpoint.trim()))?;
+    let endpoint = endpoint.trim();
+    let remote = loop {
+        let remote = UdpSocket::bind("0.0.0.0:0").context("failed to bind relay client socket")?;
+        configure_socket(&remote).context("failed to configure remote relay socket")?;
+        match remote.connect(endpoint) {
+            Ok(()) => break remote,
+            Err(error) if retry_connect(&error) => {
+                eprintln!("relay network unavailable for {endpoint}; retrying in 1s");
+                thread::sleep(CONNECT_RETRY_DELAY);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to connect to {endpoint}"));
+            }
+        }
+    };
 
     let mut plain = [0_u8; BUFFER_SIZE];
     let (size, wireguard) = local
@@ -31,7 +49,7 @@ pub(crate) fn run(listen: SocketAddr, server_file: PathBuf) -> Result<()> {
         .context("failed to connect local WireGuard socket")?;
 
     send_encoded(&remote, &plain[..size])?;
-    println!("relay client: {wireguard} -> {}", endpoint.trim());
+    println!("relay client: {wireguard} -> {endpoint}");
 
     let send_local = local.try_clone()?;
     let send_remote = remote.try_clone()?;
@@ -42,6 +60,10 @@ pub(crate) fn run(listen: SocketAddr, server_file: PathBuf) -> Result<()> {
         }
     });
     forward_decoded(&remote, &local)
+}
+
+fn retry_connect(error: &io::Error) -> bool {
+    error.kind() == ErrorKind::NetworkUnreachable
 }
 
 fn forward_encoded(input: &UdpSocket, output: &UdpSocket) -> Result<()> {
@@ -80,5 +102,18 @@ fn forward_decoded(input: &UdpSocket, output: &UdpSocket) -> Result<()> {
         }
         send_many(output, &plain, &plain_lengths, decoded_count)
             .context("UDP batch send failed")?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retries_only_when_network_is_unreachable() {
+        assert!(retry_connect(&io::Error::from(
+            ErrorKind::NetworkUnreachable
+        )));
+        assert!(!retry_connect(&io::Error::from(ErrorKind::InvalidInput)));
     }
 }
