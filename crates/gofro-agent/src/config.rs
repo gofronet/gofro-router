@@ -1,7 +1,7 @@
 use std::{
     fs::{self, OpenOptions, Permissions},
     io::Write,
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::Path,
 };
@@ -9,7 +9,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use ipnet::Ipv4Net;
 
-use crate::model::{ControllerConfig, DomainMatch, IpMatch, RoutingConfig, ServerProfile};
+use crate::model::{
+    ControllerConfig, DomainMatch, IpMatch, ManagedServer, RoutingConfig, ServerProfile,
+};
 
 const MAX_RULES: usize = 128;
 const MAX_PROFILE_SIZE: usize = 4096;
@@ -30,6 +32,23 @@ pub(crate) fn validate_server(server: &ServerProfile) -> Result<()> {
     if let Some(private_key) = &server.client_private_key {
         validate_wireguard_key(private_key, "private")?;
     }
+    if let Some(management) = &server.management {
+        validate_management(management)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_management(management: &ManagedServer) -> Result<()> {
+    let host = management.host.parse::<IpAddr>();
+    if host.as_ref().is_err()
+        || host
+            .ok()
+            .is_some_and(|host| host.to_string() != management.host)
+        || management.port == 0
+    {
+        bail!("управляемый сервер должен иметь IP-адрес и ненулевой SSH-порт");
+    }
+    crate::managed::parse_host_key(&management.host_key)?;
     Ok(())
 }
 
@@ -162,6 +181,7 @@ pub(crate) fn parse_server_profile(name: String, profile: &str) -> Result<Server
         public_key: required_profile_value(public_key, "PublicKey")?,
         client_tunnel_address: Some(client_tunnel_address),
         client_private_key: Some(required_profile_value(private_key, "PrivateKey")?),
+        management: None,
     };
     server.name = server.name.trim().to_owned();
     validate_server(&server)?;
@@ -294,6 +314,7 @@ mod tests {
             public_key: "aq2K6tZ6JqYCpNPLseGJPHceMMxxEdkx5AeRm6cEfSE=".into(),
             client_tunnel_address: Some("10.202.0.2/32".into()),
             client_private_key: None,
+            management: None,
         };
         assert!(validate_server(&server).is_ok());
         assert!(validate_endpoint("missing-port").is_err());
@@ -354,6 +375,7 @@ mod tests {
                 public_key: "aq2K6tZ6JqYCpNPLseGJPHceMMxxEdkx5AeRm6cEfSE=".into(),
                 client_tunnel_address: Some("10.202.0.2/32".into()),
                 client_private_key: Some("4E64fyqMJsXY6YaAp8M3qM7r6Xj6YjAfuPeWbdMvIHE=".into()),
+                management: None,
             }],
             routing: RoutingConfig::default(),
         };

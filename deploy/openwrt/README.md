@@ -33,7 +33,9 @@ tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && uclient-fetch -q -O "$tmp" https:
 The bootstrap downloads the signed release manifest, verifies the archive, adds
 the required OpenWrt packages, changes the LAN address to `10.203.1.1`, and
 prints the generated Wi-Fi password. Reconnect to `GofroWIFI 2` or, when the
-router has a 5 GHz radio, `GofroWIFI 5`, then open `http://wifi.gofro.net`.
+router has a 5 GHz radio, `GofroWIFI 5`, then open `https://wifi.gofro.net`.
+Confirm the router's HTTPS certificate, then use the current Wi-Fi password to
+create an administrator password of at least 12 characters.
 LuCI remains available at `http://10.203.1.1:81` or
 `https://10.203.1.1:444` with its self-signed certificate.
 
@@ -41,16 +43,23 @@ The bundle contains the complete GeoSite and GeoIP databases.
 
 ## VPS
 
-On the VPS, check out the same release tag, then build and install the server:
+For a fresh x86_64 Debian or Ubuntu VPS, use **Servers -> New VPS** in the
+Gofro panel. Enter the IP address, SSH port and current root password, then
+verify the SSH fingerprint before confirming. Password SSH login as root must
+be enabled. Gofro installs a signed server bundle and uses a restricted SSH key
+for subsequent management; the root password is not saved.
+
+Alternatively, install the signed bundle directly on the VPS:
 
 ```sh
-cargo build --release -p gofro-server -p gofro-relay
-sudo deploy/server/install.sh
+tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL -o "$tmp" https://github.com/gofronet/gofro-router/releases/latest/download/gofro-server-install && sudo bash "$tmp" --install
 ```
 
-When upgrading a customized v0.3 VPS, pass the same `WG_INTERFACE`, `WG_PORT`,
-and `RELAY_PORT` values to `sudo -E deploy/server/install.sh`. The defaults are
-`gt0`, `51820`, and `8443`.
+Allow UDP port `8443` in the VPS/cloud firewall. When migrating a customized
+v0.3 VPS, preserve its `WG_INTERFACE`, `WG_PORT`, and `RELAY_PORT` environment
+values when running the downloaded installer with `sudo -E bash "$tmp" --install`.
+The defaults are `gt0`, `51820`, and `8443`.
+Once a signed server bundle is installed, update it with `sudo gofro-server-install`.
 
 Generate a one-time router profile on the VPS:
 
@@ -58,7 +67,7 @@ Generate a one-time router profile on the VPS:
 sudo gofro-router-server create-profile --endpoint 203.0.113.10:8443 --tunnel-ip 10.202.0.2/32
 ```
 
-Copy the complete output, open **Servers → Add** in the Gofro web panel, name
+Copy the complete output, open **Servers -> Import** in the Gofro web panel, name
 the server, and paste the profile. The VPS does not retain the generated client
 private key. Store the output securely if you need to restore it after a router
 reset. If the VPS peer is lost, run the command again and import the new profile;

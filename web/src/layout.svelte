@@ -3,6 +3,7 @@
 
   import ChartNoAxesCombined from "lucide-svelte/icons/chart-no-axes-combined";
   import House from "lucide-svelte/icons/house";
+  import LogOut from "lucide-svelte/icons/log-out";
   import Route from "lucide-svelte/icons/route";
   import ServerCog from "lucide-svelte/icons/server-cog";
   import WifiCog from "lucide-svelte/icons/wifi-cog";
@@ -61,7 +62,7 @@
       >
     </a>
     <nav class="mt-14 grid gap-2">
-      {#each navigation as item}
+      {#each navigation as item (item.path)}
         {@const Icon = item.icon}
         <a
           href={p(item.path)}
@@ -82,9 +83,10 @@
             ? "Режим DIRECT"
             : "VPN недоступен"}</span
       >
-      <a class="text-xs text-[#74747d] no-underline" href="http://wifi.gofro.net"
+      <a class="text-xs text-[#74747d] no-underline" href="https://wifi.gofro.net"
         >wifi.gofro.net</a
       >
+      <button class="flex min-h-11 items-center gap-2 text-left text-xs font-bold text-[#74747d]" type="button" onclick={app.logoutAuth}><LogOut size={17} />Выйти</button>
     </div>
   </aside>
 
@@ -104,6 +106,7 @@
       >
       <span><strong class="font-extrabold">Gofro</strong> Router</span>
     </a>
+    <div class="flex items-center gap-3">
     <span
       class={`flex items-center gap-2 text-xs font-bold ${status?.tunnel_active ? "text-[#09090b]" : "text-[#74747d]"}`}
       aria-label="Состояние подключения"
@@ -111,6 +114,8 @@
         ? "DIRECT"
         : "VPN"}</span
     >
+    <button class="grid size-11 place-items-center rounded-xl border border-[#dedee1] bg-white" type="button" aria-label="Выйти" onclick={app.logoutAuth}><LogOut size={18} /></button>
+    </div>
   </header>
 
   <main
@@ -179,7 +184,7 @@
     class="fixed inset-x-0 bottom-0 z-50 grid min-h-[calc(4.75rem+env(safe-area-inset-bottom))] grid-cols-5 border-t border-[#dedee1] bg-white/95 px-1.5 pt-1.5 pb-[env(safe-area-inset-bottom)] shadow-[0_-8px_24px_rgba(0,0,0,0.04)] backdrop-blur-xl lg:hidden"
     aria-label="Основная навигация"
   >
-    {#each navigation as item}
+    {#each navigation as item (item.path)}
       {@const Icon = item.icon}
       <a
         href={p(item.path)}

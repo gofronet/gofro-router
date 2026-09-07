@@ -26,7 +26,7 @@ cleanup() {
 	status=$?
 	trap - EXIT HUP INT TERM
 	set +e
-	if [ -n "$ROLLBACK" ] && switch_current "$ROLLBACK"; then
+	if [ -n "$ROLLBACK" ] && switch_current "$ROLLBACK" && install_units; then
 		if restart_services && write_version "${ROLLBACK##*/}"; then
 			clear_pending
 			[ -z "${release:-}" ] || [ "$release" = "$ROLLBACK" ] || rm -rf "$release"
@@ -117,19 +117,26 @@ copy_default() {
 }
 
 install_units() {
-	for unit in "$ROOTFS"/etc/systemd/system/gofro-*.service; do
+	for unit in "$CURRENT"/etc/systemd/system/gofro-*.service; do
 		install -m 644 "$unit" "/etc/systemd/system/${unit##*/}"
 	done
 	systemctl daemon-reload
 }
 
-verify_units() {
-	for unit in "$ROOTFS"/etc/systemd/system/gofro-*.service; do
-		installed=/etc/systemd/system/${unit##*/}
-		if [ ! -f "$installed" ] || ! cmp "$unit" "$installed"; then
-			die "systemd unit ${unit##*/} requires a fresh install"
-		fi
-	done
+sync_setup_code() {
+	[ ! -e /etc/gofro/admin-password ] || return 0
+	password="$(nmcli --show-secrets --terse --escape no --get-values 802-11-wireless-security.psk connection show gofro-ap)" || return 1
+	[ -n "$password" ] || return 1
+	printf '%s\n' "$password" > /etc/gofro/ap-password.new || return 1
+	chmod 600 /etc/gofro/ap-password.new || return 1
+	mv -f /etc/gofro/ap-password.new /etc/gofro/ap-password || return 1
+}
+
+init_security() {
+	chmod 700 /etc/gofro || return 1
+	sync_setup_code || return 1
+	fingerprint="$(/usr/bin/gofro-agent --init-security)" || return 1
+	logger -t gofro "Gofro HTTPS certificate fingerprint: $fingerprint"
 }
 
 write_version() {
@@ -170,14 +177,14 @@ restart_services() {
 
 status_healthy() {
 	[ "$(jq -r '.version' "$STATUS_FILE" 2>/dev/null)" = "$VERSION" ] || return 1
-	[ "$(jq -r '.routing.dns_active' "$STATUS_FILE" 2>/dev/null)" = true ] || return 1
-	[ "$(jq -r '.routing.dataplane_active' "$STATUS_FILE" 2>/dev/null)" = true ] || return 1
+	[ "$(jq -r '.dns_active' "$STATUS_FILE" 2>/dev/null)" = true ] || return 1
+	[ "$(jq -r '.dataplane_active' "$STATUS_FILE" 2>/dev/null)" = true ] || return 1
 	vpn_enabled="$(jq -r '.vpn_enabled' "$STATUS_FILE" 2>/dev/null)"
 	[ "$vpn_enabled" = false ] && return 0
 	[ "$vpn_enabled" = true ] || return 1
 	[ "$(jq -r '.tunnel_active' "$STATUS_FILE" 2>/dev/null)" = true ] || return 1
 	ip link show gt0 | grep -q ' mtu 1280 ' || return 1
-	handshake_age="$(jq -r '.peer.handshake_age_seconds' "$STATUS_FILE" 2>/dev/null)"
+	handshake_age="$(jq -r '.handshake_age_seconds' "$STATUS_FILE" 2>/dev/null)"
 	case "$handshake_age" in ''|*[!0-9]*) return 1 ;; esac
 	[ "$handshake_age" -le 180 ]
 }
@@ -188,7 +195,7 @@ healthy() {
 		if systemctl is-active --quiet dnsmasq.service && \
 			nmcli --terse --fields NAME connection show --active | grep -Fxq gofro-ap && \
 			[ "$(dig +short +time=1 +tries=1 @127.0.0.1 gofrowifi.net A)" = 10.203.1.1 ] && \
-			curl --fail --silent --show-error --max-time 2 -o "$STATUS_FILE" http://10.203.1.1/api/status 2>/dev/null && status_healthy && \
+			curl --fail --silent --show-error --max-time 2 -o "$STATUS_FILE" http://127.0.0.1:8080/healthz 2>/dev/null && status_healthy && \
 			{ [ ! -s /etc/gofro/relay-endpoint ] || systemctl is-active --quiet gofro-relay.service; }; then
 			return 0
 		fi
@@ -279,13 +286,14 @@ if [ "$mode" = install ]; then
 	apt-get update
 	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 		ca-certificates curl dnsmasq dnsutils iproute2 iw jq network-manager nftables \
-		openssl rfkill wireguard-tools
+		openssl openssh-client rfkill sshpass wireguard-tools
 	systemctl is-active --quiet NetworkManager.service || die 'NetworkManager is not active'
 	default_interface="$(ip -4 route get 1.1.1.1 | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)"
 	[ "$default_interface" = eth0 ] || die 'Ethernet eth0 must be the active uplink'
 else
 	[ -n "$previous" ] || die 'Gofro is not installed'
-	verify_units
+	apt-get update
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-client sshpass
 fi
 
 release=$RELEASES/$VERSION
@@ -296,7 +304,7 @@ prune_releases "$previous" "$pending"
 if [ "$previous" = "$release" ]; then
 	if [ "$mode" = update ] && [ -n "$pending" ]; then
 		ROLLBACK=$pending
-		if restart_services && healthy && configure_panel_domain; then
+		if install_units && init_security && restart_services && healthy && configure_panel_domain; then
 			write_version "$VERSION"
 			clear_pending
 			ROLLBACK=
@@ -323,6 +331,7 @@ if [ "$mode" = install ] && [ -n "$previous" ] && [ -e /etc/gofro/version ]; the
 fi
 
 mkdir -p "$RELEASES" /etc/gofro /var/lib/gofro
+chmod 700 /etc/gofro
 STAGING=$RELEASES/.$VERSION.$$
 rm -rf "$STAGING"
 mkdir "$STAGING"
@@ -355,7 +364,8 @@ write_pending "$previous"
 systemctl stop gofro-agent.service || true
 systemctl stop gofro-relay.service || true
 switch_current "$release"
-if restart_services && healthy && configure_panel_domain; then
+install_units
+if init_security && restart_services && healthy && configure_panel_domain; then
 	write_version "$VERSION"
 	clear_pending
 	ROLLBACK=

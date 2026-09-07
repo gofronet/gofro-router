@@ -4,7 +4,28 @@ export const serverSchema = z.object({
   name: z.string(),
   endpoint: z.string(),
   public_key: z.string(),
+  managed: z.boolean(),
 });
+
+export const serverProbeSchema = z.object({
+  host: z.string(),
+  port: z.number().int(),
+  host_key: z.string(),
+  fingerprint: z.string(),
+});
+
+export const serverVersionSchema = z.object({
+  version: z.string(),
+  update_available: z.boolean(),
+});
+
+export const profileSchema = z.object({ profile: z.string() });
+
+export const authStatusSchema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("setup"), csrf_token: z.string() }),
+  z.object({ state: z.literal("login"), csrf_token: z.string() }),
+  z.object({ state: z.literal("authenticated"), csrf_token: z.string() }),
+]);
 
 export const wifiBandSchema = z.enum(["2g", "5g"]);
 
@@ -121,7 +142,11 @@ export const statusSchema = z.object({
   }),
 });
 
-export const serverInputSchema = serverSchema;
+export const serverInputSchema = serverSchema.pick({
+  name: true,
+  endpoint: true,
+  public_key: true,
+});
 export const profileInputSchema = z.object({
   name: z.string(),
   profile: z.string(),
@@ -133,6 +158,10 @@ export const wifiInputSchema = z.object({
 });
 
 export type Server = z.infer<typeof serverSchema>;
+export type ServerProbe = z.infer<typeof serverProbeSchema>;
+export type ServerVersion = z.infer<typeof serverVersionSchema>;
+export type Profile = z.infer<typeof profileSchema>;
+export type AuthStatus = z.infer<typeof authStatusSchema>;
 export type HistoryPoint = z.infer<typeof historyPointSchema>;
 export type Device = z.infer<typeof deviceSchema>;
 export type Status = z.infer<typeof statusSchema>;

@@ -1,15 +1,18 @@
 #![forbid(unsafe_code)]
 
 mod api;
+mod auth;
 mod config;
 mod controller;
 mod dataplane;
 mod fake_dns;
 mod geodata;
+mod managed;
 mod model;
 mod network;
 mod routing;
 mod stats;
+mod tls;
 mod wifi;
 
 use std::{
@@ -31,11 +34,29 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Parser)]
 #[command(about = "Local controller for Gofro Router", version)]
 struct Args {
-    #[arg(long, default_value = "10.203.1.1:8080")]
+    #[arg(long, default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
 
     #[arg(long, default_value = "10.203.1.1:80")]
-    panel_listen: SocketAddr,
+    http_listen: SocketAddr,
+
+    #[arg(long, default_value = "10.203.1.1:443")]
+    https_listen: SocketAddr,
+
+    #[arg(long, default_value = "/etc/gofro/tls-cert.pem")]
+    tls_cert: PathBuf,
+
+    #[arg(long, default_value = "/etc/gofro/tls-key.pem")]
+    tls_key: PathBuf,
+
+    #[arg(long)]
+    init_security: bool,
+
+    #[arg(long, default_value = "/etc/gofro/admin-password")]
+    admin_password: PathBuf,
+
+    #[arg(long, default_value = "/etc/gofro/ap-password")]
+    setup_code: PathBuf,
 
     #[arg(long, default_value = "gt0")]
     interface: String,
@@ -48,6 +69,9 @@ struct Args {
 
     #[arg(long, default_value = "/etc/gofro/controller.json")]
     config: PathBuf,
+
+    #[arg(long, default_value = "/etc/gofro/managed-vps")]
+    management_dir: PathBuf,
 
     #[arg(long, default_value = "/usr/libexec/gofro/mode")]
     mode_command: PathBuf,
@@ -75,12 +99,15 @@ pub(crate) struct AppState {
     pub(crate) wifi_interface: String,
     pub(crate) config_path: PathBuf,
     pub(crate) mode_command: PathBuf,
+    pub(crate) management_dir: PathBuf,
     pub(crate) config: Arc<Mutex<ControllerConfig>>,
     pub(crate) access_points: Arc<Mutex<Vec<ApNetwork>>>,
     pub(crate) stats: Arc<Mutex<StatsTracker>>,
     pub(crate) geodata: Arc<GeoData>,
     pub(crate) routing: Arc<RwLock<RoutingPolicy>>,
     pub(crate) fake_dns: Arc<FakeDns>,
+    pub(crate) auth: Arc<auth::Auth>,
+    pub(crate) managed_operations: Arc<Mutex<()>>,
 }
 
 #[tokio::main]
@@ -90,23 +117,35 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    if args.init_security {
+        println!("{}", tls::ensure(&args.tls_cert, &args.tls_key)?);
+        return Ok(());
+    }
+    if !args.listen.ip().is_loopback() {
+        bail!("--listen must be loopback-only");
+    }
     let config = config::load(&args.config)?;
     let geodata = Arc::new(GeoData::load(&args.geosite, &args.geoip)?);
     let routing = RoutingPolicy::compile(config.routing.clone(), Arc::clone(&geodata))?;
     let fake_dns = Arc::new(FakeDns::open(&args.routing_state)?);
     let access_points = network::access_points()?;
+    let tls_fingerprint = tls::ensure(&args.tls_cert, &args.tls_key)?;
+    let auth = Arc::new(auth::Auth::open(args.admin_password, args.setup_code)?);
     let state = AppState {
         interface: args.interface,
         lan_interface: args.lan_interface,
         wifi_interface: args.wifi_interface,
         config_path: args.config,
         mode_command: args.mode_command,
+        management_dir: args.management_dir,
         config: Arc::new(Mutex::new(config)),
         access_points: Arc::new(Mutex::new(access_points)),
         stats: Arc::new(Mutex::new(StatsTracker::default())),
         geodata,
         routing: Arc::new(RwLock::new(routing)),
         fake_dns,
+        auth,
+        managed_operations: Arc::new(Mutex::new(())),
     };
 
     controller::reconcile(&state).context("failed to restore configured network mode")?;
@@ -120,19 +159,22 @@ async fn main() -> Result<()> {
     .await?;
     let mut dns_task = tokio::spawn(dns.run());
 
-    let listener = tokio::net::TcpListener::bind(args.listen)
+    let health_listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("failed to bind {}", args.listen))?;
-    let panel_listener = tokio::net::TcpListener::bind(args.panel_listen)
+    let http_listener = tokio::net::TcpListener::bind(args.http_listen)
         .await
-        .with_context(|| format!("failed to bind {}", args.panel_listen))?;
-    info!(listen = %args.listen, "Gofro agent started");
+        .with_context(|| format!("failed to bind {}", args.http_listen))?;
+    let tls_config =
+        axum_server::tls_openssl::OpenSSLConfig::from_pem_file(&args.tls_cert, &args.tls_key)?;
+    info!(health = %args.listen, https = %args.https_listen, tls_fingerprint, "Gofro agent started");
 
     let http = async {
-        let router = api::router(state);
+        let secure = api::secure_router(state.clone());
         tokio::select! {
-            result = axum::serve(listener, router.clone()).with_graceful_shutdown(shutdown_signal()) => result,
-            result = axum::serve(panel_listener, router).with_graceful_shutdown(shutdown_signal()) => result,
+            result = axum::serve(health_listener, api::health_router(state.clone())).with_graceful_shutdown(shutdown_signal()) => result.map_err(anyhow::Error::from),
+            result = axum::serve(http_listener, api::redirect_router()).with_graceful_shutdown(shutdown_signal()) => result.map_err(anyhow::Error::from),
+            result = axum_server::bind_openssl(args.https_listen, tls_config).serve(secure.into_make_service()) => result.map_err(anyhow::Error::from),
         }
     };
     tokio::pin!(http);

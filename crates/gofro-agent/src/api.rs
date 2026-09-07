@@ -6,19 +6,20 @@ use axum::{
     body::Body,
     extract::State,
     http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
+    middleware,
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use serde::Serialize;
 use tracing::error;
 use wireguard_status::wireguard_peers;
 
 use crate::{
-    AppState, controller, dataplane,
+    AppState, auth, controller, dataplane,
     model::{
         AP_ADDRESS, AP_DOMAIN, AgentStatus, ApInput, ApStatus, ModeInput, ProfileInput,
         RoutingConfig, RoutingStatus, RoutingTestInput, RoutingTestResult, ServerKeyInput,
-        ServerProfile, ServerStatus, ServerUpdate, UpdateInput, UpdateResult, UpdateStatus,
+        ServerStatus, ServerUpdate, UpdateInput, UpdateResult, UpdateStatus,
     },
     network::service_active,
     stats, wifi,
@@ -59,25 +60,81 @@ impl IntoResponse for ApiError {
     }
 }
 
-pub(crate) fn router(state: AppState) -> Router {
+pub(crate) fn secure_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/app.js", get(javascript))
         .route("/app.css", get(stylesheet))
         .route("/chart.js", get(chart))
+        .route("/api/auth/status", get(auth::status))
+        .route("/api/auth/setup", post(auth::setup))
+        .route("/api/auth/login", post(auth::login))
+        .merge(private_router().layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        )))
+        .with_state(state)
+}
+
+fn private_router() -> Router<AppState> {
+    Router::new()
+        .route("/api/auth/logout", post(auth::logout))
         .route("/api/status", get(status))
         .route("/api/update", post(start_update))
         .route("/api/mode", post(set_mode))
         .route(
             "/api/servers",
-            post(add_server).put(update_server).delete(delete_server),
+            axum::routing::put(update_server).delete(delete_server),
         )
         .route("/api/servers/import", post(import_server))
+        .route("/api/servers/probe", post(probe_server))
+        .route("/api/servers/bootstrap", post(bootstrap_server))
+        .route("/api/servers/check", post(check_managed_server))
+        .route("/api/servers/update-managed", post(update_managed_server))
+        .route("/api/servers/create-profile", post(create_managed_profile))
         .route("/api/servers/select", post(select_server))
         .route("/api/ap", post(update_ap))
         .route("/api/routing", post(update_routing))
         .route("/api/routing/test", post(test_routing))
+}
+
+pub(crate) fn redirect_router() -> Router {
+    Router::new().fallback(any(redirect))
+}
+
+async fn redirect(uri: Uri) -> Response {
+    let location = format!("https://wifi.gofro.net{uri}");
+    (
+        StatusCode::TEMPORARY_REDIRECT,
+        [(header::LOCATION, location)],
+    )
+        .into_response()
+}
+
+#[derive(Serialize)]
+struct Health {
+    version: &'static str,
+    dns_active: bool,
+    dataplane_active: bool,
+    vpn_enabled: bool,
+    tunnel_active: bool,
+    handshake_age_seconds: Option<u64>,
+}
+pub(crate) fn health_router(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(health))
         .with_state(state)
+}
+async fn health(State(state): State<AppState>) -> Result<Json<Health>, ApiError> {
+    let status = load_status(&state).map_err(ApiError)?;
+    Ok(Json(Health {
+        version: status.version,
+        dns_active: status.routing.dns_active,
+        dataplane_active: status.routing.dataplane_active,
+        vpn_enabled: status.vpn_enabled,
+        tunnel_active: status.tunnel_active,
+        handshake_age_seconds: status.peer.and_then(|peer| peer.handshake_age_seconds),
+    }))
 }
 
 async fn index() -> impl IntoResponse {
@@ -243,16 +300,6 @@ async fn set_mode(
     .await
 }
 
-async fn add_server(
-    State(state): State<AppState>,
-    Json(mut server): Json<ServerProfile>,
-) -> Result<Json<AgentStatus>, ApiError> {
-    server.name = server.name.trim().to_owned();
-    server.endpoint = server.endpoint.trim().to_owned();
-    server.public_key = server.public_key.trim().to_owned();
-    run_blocking(state, move |state| controller::add_server(state, server)).await
-}
-
 async fn update_server(
     State(state): State<AppState>,
     Json(mut update): Json<ServerUpdate>,
@@ -273,6 +320,126 @@ async fn import_server(
         controller::import_server(state, input.name, input.profile)
     })
     .await
+}
+
+#[derive(serde::Deserialize)]
+struct ProbeInput {
+    host: String,
+    port: u16,
+}
+#[derive(serde::Deserialize)]
+struct BootstrapInput {
+    name: String,
+    host: String,
+    port: u16,
+    password: String,
+    host_key: String,
+}
+#[derive(Serialize)]
+struct ProbeResult {
+    host: String,
+    port: u16,
+    host_key: String,
+    fingerprint: String,
+}
+#[derive(Serialize)]
+struct ManagedVersion {
+    version: String,
+    update_available: bool,
+}
+#[derive(Serialize)]
+struct CreatedProfile {
+    profile: String,
+}
+
+async fn probe_server(Json(input): Json<ProbeInput>) -> Result<Json<ProbeResult>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed::probe(input.host.trim().to_owned(), input.port)
+    })
+    .await
+    .context("probe task failed")
+    .map_err(ApiError)?
+    .map(|probe| {
+        Json(ProbeResult {
+            host: probe.host,
+            port: probe.port,
+            host_key: probe.host_key,
+            fingerprint: probe.fingerprint,
+        })
+    })
+    .map_err(ApiError)
+}
+
+async fn bootstrap_server(
+    State(state): State<AppState>,
+    Json(input): Json<BootstrapInput>,
+) -> Result<Json<AgentStatus>, ApiError> {
+    run_blocking(state, move |state| {
+        crate::managed::bootstrap(
+            state,
+            input.name.trim().to_owned(),
+            input.host.trim().to_owned(),
+            input.port,
+            input.password,
+            input.host_key.trim().to_owned(),
+        )
+    })
+    .await
+}
+
+async fn check_managed_server(
+    State(state): State<AppState>,
+    Json(input): Json<ServerKeyInput>,
+) -> Result<Json<ManagedVersion>, ApiError> {
+    managed_version(state, input.public_key).await
+}
+
+async fn update_managed_server(
+    State(state): State<AppState>,
+    Json(input): Json<ServerKeyInput>,
+) -> Result<Json<ManagedVersion>, ApiError> {
+    tokio::task::spawn_blocking(move || crate::managed::update(&state, input.public_key.trim()))
+        .await
+        .context("managed update task failed")
+        .map_err(ApiError)?
+        .map(|version| {
+            Json(ManagedVersion {
+                version: version.version,
+                update_available: version.update_available,
+            })
+        })
+        .map_err(ApiError)
+}
+
+async fn managed_version(
+    state: AppState,
+    public_key: String,
+) -> Result<Json<ManagedVersion>, ApiError> {
+    tokio::task::spawn_blocking(move || crate::managed::check(&state, public_key.trim()))
+        .await
+        .context("managed check task failed")
+        .map_err(ApiError)?
+        .map(|version| {
+            Json(ManagedVersion {
+                version: version.version,
+                update_available: version.update_available,
+            })
+        })
+        .map_err(ApiError)
+}
+
+async fn create_managed_profile(
+    State(state): State<AppState>,
+    Json(input): Json<ServerKeyInput>,
+) -> Result<Json<CreatedProfile>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed::create_profile(&state, input.public_key.trim())
+    })
+    .await
+    .context("create profile task failed")
+    .map_err(ApiError)?
+    .map(|profile| Json(CreatedProfile { profile }))
+    .map_err(ApiError)
 }
 
 async fn update_ap(

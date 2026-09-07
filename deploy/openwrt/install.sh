@@ -209,26 +209,51 @@ restart_services() {
 	/etc/init.d/gofro-agent restart
 }
 
+sync_setup_code() {
+	[ ! -e /etc/gofro/admin-password ] || return 0
+	: > /etc/gofro/ap-password.new || return 1
+	chmod 600 /etc/gofro/ap-password.new || return 1
+	for section in $(uci show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+		[ "$(uci -q get "wireless.$section.mode" || true)" = ap ] || continue
+		[ "$(uci -q get "wireless.$section.network" || true)" = lan ] || continue
+		[ "$(uci -q get "wireless.$section.disabled" || true)" != 1 ] || continue
+		device="$(uci -q get "wireless.$section.device" || true)"
+		band="$(uci -q get "wireless.$device.band" || true)"
+		case "$band" in 2g|5g) ;; *) continue ;; esac
+		password="$(uci -q get "wireless.$section.key" || true)"
+		[ -n "$password" ] || continue
+		printf '%s\n' "$password" >> /etc/gofro/ap-password.new || return 1
+	done
+	[ -s /etc/gofro/ap-password.new ] || return 1
+	mv -f /etc/gofro/ap-password.new /etc/gofro/ap-password || return 1
+}
+
+init_security() {
+	chmod 700 /etc/gofro || return 1
+	sync_setup_code || return 1
+	fingerprint="$(/usr/bin/gofro-agent --init-security)" || return 1
+	logger -t gofro "Gofro HTTPS certificate fingerprint: $fingerprint"
+}
+
 status_healthy() {
 	[ "$(jsonfilter -i "$STATUS_FILE" -e '@.version' 2>/dev/null)" = "$VERSION" ] || return 1
-	[ "$(jsonfilter -i "$STATUS_FILE" -e '@.routing.dns_active' 2>/dev/null)" = true ] || return 1
-	[ "$(jsonfilter -i "$STATUS_FILE" -e '@.routing.dataplane_active' 2>/dev/null)" = true ] || return 1
+	[ "$(jsonfilter -i "$STATUS_FILE" -e '@.dns_active' 2>/dev/null)" = true ] || return 1
+	[ "$(jsonfilter -i "$STATUS_FILE" -e '@.dataplane_active' 2>/dev/null)" = true ] || return 1
 	vpn_enabled="$(jsonfilter -i "$STATUS_FILE" -e '@.vpn_enabled' 2>/dev/null)"
 	[ "$vpn_enabled" = false ] && return 0
 	[ "$vpn_enabled" = true ] || return 1
 	[ "$(jsonfilter -i "$STATUS_FILE" -e '@.tunnel_active' 2>/dev/null)" = true ] || return 1
 	interface="$(uci -q get gofro.main.interface || echo gt0)"
 	ip link show "$interface" | grep -q ' mtu 1280 ' || return 1
-	handshake_age="$(jsonfilter -i "$STATUS_FILE" -e '@.peer.handshake_age_seconds' 2>/dev/null)"
+	handshake_age="$(jsonfilter -i "$STATUS_FILE" -e '@.handshake_age_seconds' 2>/dev/null)"
 	case "$handshake_age" in ''|*[!0-9]*) return 1 ;; esac
 	[ "$handshake_age" -le 180 ]
 }
 
 healthy() {
-	listen="$(uci -q get gofro.main.listen || echo 10.203.1.1:8080)"
 	count=0
 	while [ "$count" -lt 30 ]; do
-		if uclient-fetch -q -T 2 -O "$STATUS_FILE" "http://$listen/api/status" 2>/dev/null &&
+		if uclient-fetch -q -T 2 -O "$STATUS_FILE" 'http://127.0.0.1:8080/healthz' 2>/dev/null &&
 			status_healthy &&
 			{ [ ! -s /etc/gofro/relay-endpoint ] || /etc/init.d/gofro-relay running; }; then
 			return 0
@@ -317,9 +342,11 @@ prune_releases "$previous" "$pending"
 if [ "$mode" = install ]; then
 	apk update
 	apk add ca-bundle dnsmasq firewall4 ip-full iw jsonfilter kmod-wireguard \
-		openssl-util uclient-fetch uhttpd wireguard-tools
+		openssl-util openssh-client openssh-client-utils openssh-keygen sshpass uclient-fetch uhttpd wireguard-tools
 else
 	[ -n "$previous" ] || die 'Gofro is not installed'
+	apk update
+	apk add openssh-client openssh-client-utils openssh-keygen sshpass
 fi
 
 [ "$previous" = "$release" ] || enough_space || die 'not enough persistent space for this release'
@@ -327,7 +354,7 @@ fi
 if [ "$previous" = "$release" ]; then
 	if [ "$mode" = update ] && [ -n "$pending" ]; then
 		ROLLBACK=$pending
-		if backup_panel && configure_panel && configure_vpn_zone && restart_services && healthy; then
+		if backup_panel && configure_panel && configure_vpn_zone && init_security && restart_services && healthy; then
 			write_version "$VERSION"
 			clear_pending
 			ROLLBACK=
@@ -357,6 +384,7 @@ if [ "$mode" = install ] && [ -n "$previous" ] && [ -e /etc/gofro/version ]; the
 fi
 
 mkdir -p "$RELEASES" /etc/gofro
+chmod 700 /etc/gofro
 STAGING=$RELEASES/.$VERSION.$$
 rm -rf "$STAGING"
 mkdir "$STAGING"
@@ -397,7 +425,7 @@ link_runtime
 /etc/init.d/gofro-agent stop || true
 /etc/init.d/gofro-relay stop || true
 switch_current "$release"
-if configure_vpn_zone && restart_services && healthy; then
+if configure_vpn_zone && init_security && restart_services && healthy; then
 	write_version "$VERSION"
 	clear_pending
 	ROLLBACK=

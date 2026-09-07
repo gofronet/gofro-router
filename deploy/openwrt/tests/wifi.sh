@@ -35,6 +35,8 @@ EOF
 chmod +x "$TMP/uci" "$TMP/wifi" "$TMP/sleep"
 
 export GOFRO_TEST_LOG="$TMP/log"
+export GOFRO_STATE_DIR="$TMP/state"
+mkdir "$GOFRO_STATE_DIR"
 output="$(PATH="$TMP:$PATH" sh "$ROOT/deploy/openwrt/root/usr/libexec/gofro/wifi" list)"
 [ "$output" = "$(printf '2g\tOld 2\n5g\tOld 5')" ]
 output="$(GOFRO_TEST_SINGLE_BAND=1 PATH="$TMP:$PATH" sh "$ROOT/deploy/openwrt/root/usr/libexec/gofro/wifi" list)"
@@ -44,6 +46,7 @@ PATH="$TMP:$PATH" sh "$ROOT/deploy/openwrt/root/usr/libexec/gofro/wifi" \
 	set 5g 'GofroWIFI 5' 'secret123'
 grep -q '^set wireless\.ap5\.ssid=GofroWIFI 5$' "$TMP/log"
 grep -q '^set wireless\.ap5\.key=secret123$' "$TMP/log"
+[ "$(cat "$GOFRO_STATE_DIR/ap-password")" = secret123 ]
 if grep -q 'wireless\.ap2' "$TMP/log"; then exit 1; fi
 
 : > "$TMP/log"

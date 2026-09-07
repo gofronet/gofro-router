@@ -1,7 +1,7 @@
 # Releases
 
 Stable tags cross-compile static musl binaries for the supported OpenWrt 25.12
-ABIs and publish signed OpenWrt and Raspberry Pi 5 installation bundles.
+ABIs and publish signed OpenWrt, Raspberry Pi 5 and x86_64 VPS installation bundles.
 
 ## Create a release
 
@@ -37,6 +37,7 @@ sh deploy/raspios/tests/tunnel.sh
 sh deploy/raspios/tests/update.sh
 sh deploy/raspios/tests/version.sh
 sh deploy/raspios/tests/wifi.sh
+bash deploy/server/tests/version.sh
 ```
 
 ## Upgrade a router

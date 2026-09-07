@@ -19,8 +19,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build release bundles
+  validate:
+    name: Validate release
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -84,6 +84,7 @@ jobs:
             deploy/raspios/root/usr/sbin/* \
             deploy/raspios/tests/*.sh
           cmp deploy/openwrt/update-public.pem deploy/raspios/update-public.pem
+          cmp deploy/openwrt/update-public.pem deploy/server/update-public.pem
           sh deploy/openwrt/tests/mode.sh
           sh deploy/openwrt/tests/health.sh
           sh deploy/openwrt/tests/hotplug.sh
@@ -92,6 +93,7 @@ jobs:
           sh deploy/openwrt/tests/update.sh
           sh deploy/openwrt/tests/version.sh
           sh deploy/openwrt/tests/wifi.sh
+          sh deploy/raspios/tests/health.sh
           sh deploy/raspios/tests/mode.sh
           sh deploy/raspios/tests/network.sh
           sh deploy/raspios/tests/recover.sh
@@ -100,6 +102,9 @@ jobs:
           sh deploy/raspios/tests/update.sh
           sh deploy/raspios/tests/version.sh
           sh deploy/raspios/tests/wifi.sh
+          bash -n deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install
+          shellcheck -s bash deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install deploy/server/tests/*.sh
+          bash deploy/server/tests/*.sh
 
       - name: Build web UI
         working-directory: web
@@ -107,6 +112,43 @@ jobs:
           bun install --frozen-lockfile
           bun run check
           bun run build
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: release-web-assets
+          path: assets
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-unknown-linux-musl
+          - armv5te-unknown-linux-musleabi
+          - arm-unknown-linux-musleabihf
+          - armv7-unknown-linux-musleabi
+          - armv7-unknown-linux-musleabihf
+          - i586-unknown-linux-musl
+          - riscv64gc-unknown-linux-musl
+          - x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-web-assets
+          path: assets
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: '1.98.0'
+          targets: ${{ matrix.target }}
 
       - name: Install cross compiler
         env:
@@ -125,66 +167,103 @@ jobs:
           cargo install --locked --version 0.23.3 cargo-zigbuild
 
       - name: Cross-compile static binaries
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          targets=(
-            aarch64-unknown-linux-musl
-            armv5te-unknown-linux-musleabi
-            arm-unknown-linux-musleabihf
-            armv7-unknown-linux-musleabi
-            armv7-unknown-linux-musleabihf
-            i586-unknown-linux-musl
-            riscv64gc-unknown-linux-musl
-            x86_64-unknown-linux-musl
-          )
-          rustup target add "${targets[@]}"
           export CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target/openwrt
           ARMV5_LIBGCC=$(arm-linux-gnueabi-gcc -print-libgcc-file-name)
           export CARGO_TARGET_ARMV5TE_UNKNOWN_LINUX_MUSLEABI_RUSTFLAGS="-C target-cpu=arm926ej-s -C link-arg=$ARMV5_LIBGCC"
           ARMV7_SOFT_CPU=generic+v7a+thumb2+soft_float+strict_align
           export CFLAGS_armv7_unknown_linux_musleabi="-mcpu=$ARMV7_SOFT_CPU"
           export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABI_RUSTFLAGS="-C link-arg=-mcpu=$ARMV7_SOFT_CPU"
-          for target in "${targets[@]}"; do
-            cargo zigbuild --locked --release \
-              --target "$target" -p gofro-agent -p gofro-relay
-            for binary in gofro-agent gofro-relay; do
-              path="target/openwrt/$target/release/$binary"
-              if readelf -l "$path" | grep -q INTERP; then
-                echo "$path has a dynamic interpreter" >&2
-                exit 1
-              fi
-              if readelf -d "$path" | grep -q NEEDED; then
-                echo "$path has dynamic dependencies" >&2
-                exit 1
-              fi
-            done
-          done
-          readelf -h target/openwrt/armv7-unknown-linux-musleabi/release/gofro-agent |
-            grep -q 'soft-float ABI'
-          readelf -h target/openwrt/armv7-unknown-linux-musleabihf/release/gofro-agent |
-            grep -q 'hard-float ABI'
-          readelf -A target/openwrt/armv5te-unknown-linux-musleabi/release/gofro-agent |
-            grep -q 'Tag_CPU_arch: v5TE'
-          readelf -A target/openwrt/arm-unknown-linux-musleabihf/release/gofro-agent |
-            grep -q 'Tag_CPU_arch: v6'
-          readelf -A target/openwrt/armv7-unknown-linux-musleabi/release/gofro-agent |
-            grep -q 'Tag_CPU_arch: v7'
-          run_versions() {
-            local runner=$1 cpu=$2 target=$3
-            for binary in gofro-agent gofro-relay; do
-              "$runner" -cpu "$cpu" "target/openwrt/$target/release/$binary" --version
-            done
-          }
-          run_versions qemu-aarch64 cortex-a53 aarch64-unknown-linux-musl
-          run_versions qemu-arm arm926 armv5te-unknown-linux-musleabi
-          run_versions qemu-arm arm1176 arm-unknown-linux-musleabihf
-          run_versions qemu-arm cortex-a7 armv7-unknown-linux-musleabi
-          run_versions qemu-arm cortex-a7 armv7-unknown-linux-musleabihf
-          run_versions qemu-i386 pentium i586-unknown-linux-musl
-          run_versions qemu-riscv64 rv64 riscv64gc-unknown-linux-musl
+          cargo zigbuild --locked --release \
+            --target "$TARGET" -p gofro-agent -p gofro-relay
+          if [[ $TARGET == x86_64-unknown-linux-musl ]]; then
+            cargo zigbuild --locked --release --target "$TARGET" -p gofro-server
+          fi
           for binary in gofro-agent gofro-relay; do
-            "target/openwrt/x86_64-unknown-linux-musl/release/$binary" --version
+            path="target/openwrt/$TARGET/release/$binary"
+            if readelf -l "$path" | grep -q INTERP; then
+              echo "$path has a dynamic interpreter" >&2
+              exit 1
+            fi
+            if readelf -d "$path" | grep -q NEEDED; then
+              echo "$path has dynamic dependencies" >&2
+              exit 1
+            fi
           done
+          if [[ $TARGET == x86_64-unknown-linux-musl ]]; then
+            path=target/openwrt/$TARGET/release/gofro-server
+            if readelf -l "$path" | grep -q INTERP; then exit 1; fi
+            if readelf -d "$path" | grep -q NEEDED; then exit 1; fi
+            "$path" --version
+          fi
+          path="target/openwrt/$TARGET/release/gofro-agent"
+          case "$TARGET" in
+            armv5te-unknown-linux-musleabi)
+              readelf -A "$path" | grep -q 'Tag_CPU_arch: v5TE'
+              runner=qemu-arm cpu=arm926 ;;
+            arm-unknown-linux-musleabihf)
+              readelf -A "$path" | grep -q 'Tag_CPU_arch: v6'
+              runner=qemu-arm cpu=arm1176 ;;
+            armv7-unknown-linux-musleabi)
+              readelf -h "$path" | grep -q 'soft-float ABI'
+              readelf -A "$path" | grep -q 'Tag_CPU_arch: v7'
+              runner=qemu-arm cpu=cortex-a7 ;;
+            armv7-unknown-linux-musleabihf)
+              readelf -h "$path" | grep -q 'hard-float ABI'
+              runner=qemu-arm cpu=cortex-a7 ;;
+            aarch64-unknown-linux-musl) runner=qemu-aarch64 cpu=cortex-a53 ;;
+            i586-unknown-linux-musl) runner=qemu-i386 cpu=pentium ;;
+            riscv64gc-unknown-linux-musl) runner=qemu-riscv64 cpu=rv64 ;;
+            x86_64-unknown-linux-musl) runner='' cpu='' ;;
+          esac
+          for binary in gofro-agent gofro-relay; do
+            path="target/openwrt/$TARGET/release/$binary"
+            if [[ -n $runner ]]; then
+              "$runner" -cpu "$cpu" "$path" --version
+            else
+              "$path" --version
+            fi
+          done
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: release-binaries-${{ matrix.target }}
+          path: |
+            target/openwrt/${{ matrix.target }}/release/gofro-agent
+            target/openwrt/${{ matrix.target }}/release/gofro-relay
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        with:
+          name: release-server-${{ matrix.target }}
+          path: target/openwrt/${{ matrix.target }}/release/gofro-server
+          if-no-files-found: error
+          retention-days: 7
+
+  package:
+    name: Package release bundles
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: release-binaries-*
+          path: ${{ runner.temp }}/binaries
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-server-x86_64-unknown-linux-musl
+          path: ${{ runner.temp }}/binaries/release-server-x86_64-unknown-linux-musl
 
       - name: Package bundle
         env:
@@ -196,6 +275,7 @@ jobs:
           set -euo pipefail
           DIST=$RUNNER_TEMP/dist
           GEODATA=$RUNNER_TEMP/geodata
+          BINARIES=$RUNNER_TEMP/binaries
           mkdir -p "$DIST" "$GEODATA"
           curl --fail --location --retry 3 \
             "https://github.com/v2fly/domain-list-community/releases/download/$GEOSITE_VERSION/dlc.dat" \
@@ -214,19 +294,28 @@ jobs:
             local archive="gofro-router-$release_target.tar.gz"
             local bundle="$RUNNER_TEMP/bundle-$release_target"
             mkdir -p "$bundle"
-            cp -R "deploy/$platform/root" "deploy/$platform/defaults" "$bundle/"
+            if [[ $platform == server ]]; then
+              install -D -m 755 deploy/server/gofro-server-install "$bundle/root/usr/local/sbin/gofro-server-install"
+              install -D -m 755 deploy/server/gofro-managed "$bundle/root/usr/local/sbin/gofro-managed"
+              install -D -m 755 "$BINARIES/release-server-$rust_target/gofro-server" "$bundle/root/usr/local/bin/gofro-router-server"
+              install -D -m 755 "$BINARIES/release-binaries-$rust_target/gofro-relay" "$bundle/root/usr/local/bin/gofro-relay"
+            else
+              cp -R "deploy/$platform/root" "deploy/$platform/defaults" "$bundle/"
+              install -D -m 755 "$BINARIES/release-binaries-$rust_target/gofro-agent" "$bundle/root/usr/bin/gofro-agent"
+              install -D -m 755 "$BINARIES/release-binaries-$rust_target/gofro-relay" "$bundle/root/usr/bin/gofro-relay"
+              install -D -m 644 GEODATA-LICENSES.md "$bundle/root/usr/share/gofro/GEODATA-LICENSES.md"
+              install -m 644 "$GEODATA/geosite.dat" "$bundle/root/usr/share/gofro/geosite.dat"
+              install -m 644 "$GEODATA/geoip.dat" "$bundle/root/usr/share/gofro/geoip.dat"
+            fi
             install -m 755 "deploy/$platform/install.sh" "$bundle/install.sh"
             install -m 644 "deploy/$platform/update-public.pem" "$bundle/update-public.pem"
             printf '%s\n' "$VERSION" > "$bundle/VERSION"
             printf '%s\n' "$release_target" > "$bundle/TARGET"
-            install -D -m 755 "target/openwrt/$rust_target/release/gofro-agent" "$bundle/root/usr/bin/gofro-agent"
-            install -D -m 755 "target/openwrt/$rust_target/release/gofro-relay" "$bundle/root/usr/bin/gofro-relay"
-            install -D -m 644 GEODATA-LICENSES.md "$bundle/root/usr/share/gofro/GEODATA-LICENSES.md"
-            install -m 644 "$GEODATA/geosite.dat" "$bundle/root/usr/share/gofro/geosite.dat"
-            install -m 644 "$GEODATA/geoip.dat" "$bundle/root/usr/share/gofro/geoip.dat"
+            local members=(TARGET VERSION install.sh root update-public.pem)
+            [[ $platform == server ]] || members+=(defaults)
             tar -C "$bundle" --owner=0 --group=0 --numeric-owner \
               --mtime="@$SOURCE_DATE_EPOCH" -czf "$DIST/$archive" \
-              TARGET VERSION defaults install.sh root update-public.pem
+              "${members[@]}"
             local sha
             sha=$(sha256sum "$DIST/$archive" | cut -d ' ' -f1)
             jq -S -n --arg version "$VERSION" --arg target "$release_target" \
@@ -246,9 +335,11 @@ jobs:
           riscv64gc-unknown-linux-musl riscv64-openwrt-linux-musl gofro-router-manifest-riscv64-openwrt-linux-musl.json openwrt
           x86_64-unknown-linux-musl x86_64-openwrt-linux-musl gofro-router-manifest-x86_64-openwrt-linux-musl.json openwrt
           aarch64-unknown-linux-musl aarch64-raspios-linux-musl gofro-router-manifest-aarch64-raspios-linux-musl.json raspios
+          x86_64-unknown-linux-musl x86_64-server-linux-musl gofro-router-manifest-x86_64-server-linux-musl.json server
           EOF
           install -m 755 deploy/openwrt/root/usr/sbin/gofro-update "$DIST/gofro-install"
           install -m 755 deploy/raspios/root/usr/sbin/gofro-update "$DIST/gofro-install-raspios"
+          install -m 755 deploy/server/gofro-server-install "$DIST/gofro-server-install"
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
@@ -259,7 +350,7 @@ jobs:
 
   publish:
     name: Sign and publish
-    needs: build
+    needs: package
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: release
@@ -314,7 +405,15 @@ jobs:
             grep -qx TARGET <<< "$members"
             grep -qx VERSION <<< "$members"
             grep -qx install.sh <<< "$members"
-            grep -qx root/usr/sbin/gofro-update <<< "$members"
+            grep -qx update-public.pem <<< "$members"
+            if [[ $target == x86_64-server-linux-musl ]]; then
+              grep -qx root/usr/local/bin/gofro-router-server <<< "$members"
+              grep -qx root/usr/local/bin/gofro-relay <<< "$members"
+              grep -qx root/usr/local/sbin/gofro-server-install <<< "$members"
+              grep -qx root/usr/local/sbin/gofro-managed <<< "$members"
+            else
+              grep -qx root/usr/sbin/gofro-update <<< "$members"
+            fi
             [[ $(tar -xOzf "$DIST/$archive" TARGET) == "$target" ]]
           }
           for manifest in "$DIST"/gofro-router-manifest*.json; do
@@ -322,6 +421,7 @@ jobs:
           done
           test -s "$DIST/gofro-install"
           test -s "$DIST/gofro-install-raspios"
+          test -s "$DIST/gofro-server-install"
 
       - name: Create release tag
         env:
@@ -348,7 +448,7 @@ jobs:
           TAG=v$VERSION
           ASSETS=("$DIST"/gofro-router-*.tar.gz "$DIST"/gofro-router-manifest*.json \
             "$DIST"/gofro-router-manifest*.json.sig "$DIST/gofro-install" \
-            "$DIST/gofro-install-raspios")
+            "$DIST/gofro-install-raspios" "$DIST/gofro-server-install")
           if STATE=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             [[ $STATE == true ]] || { echo 'published release already exists' >&2; exit 1; }
             gh release delete "$TAG" --yes

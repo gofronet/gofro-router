@@ -17,11 +17,14 @@ EOF
 chmod +x "$TMP/nmcli" "$TMP/sleep"
 
 export GOFRO_TEST_LOG="$TMP/log"
+export GOFRO_STATE_DIR="$TMP/state"
+mkdir "$GOFRO_STATE_DIR"
 output="$(PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/wifi" list)"
 [ "$output" = "$(printf '5g\tGofroWIFI 5')" ]
 PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/wifi" set 5g Gaming password123
 grep -q 'connection modify gofro-ap 802-11-wireless.ssid Gaming' "$TMP/log"
 grep -q 'connection modify gofro-ap wifi-sec.psk password123' "$TMP/log"
+[ "$(cat "$GOFRO_STATE_DIR/ap-password")" = password123 ]
 if PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/wifi" set 2g Unsupported 2>/dev/null; then
 	exit 1
 fi
