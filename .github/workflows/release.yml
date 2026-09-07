@@ -177,6 +177,11 @@ jobs:
           ARMV7_SOFT_CPU=generic+v7a+thumb2+soft_float+strict_align
           export CFLAGS_armv7_unknown_linux_musleabi="-mcpu=$ARMV7_SOFT_CPU"
           export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABI_RUSTFLAGS="-C link-arg=-mcpu=$ARMV7_SOFT_CPU"
+          if [[ $TARGET == arm* || $TARGET == i586-* ]]; then
+            # ponytail: use OpenSSL's pthread fallback until Zig supplies 32-bit __atomic_is_lock_free.
+            cflags=CFLAGS_${TARGET//-/_}
+            export "$cflags=${!cflags:-} -DBROKEN_CLANG_ATOMICS"
+          fi
           cargo zigbuild --locked --release \
             --target "$TARGET" -p gofro-agent -p gofro-relay
           if [[ $TARGET == x86_64-unknown-linux-musl ]]; then
@@ -227,6 +232,13 @@ jobs:
               "$path" --version
             fi
           done
+          security=$(mktemp -d)
+          agent=("target/openwrt/$TARGET/release/gofro-agent" --init-security
+            --tls-cert "$security/cert.pem" --tls-key "$security/key.pem")
+          if [[ -n $runner ]]; then agent=("$runner" -cpu "$cpu" "${agent[@]}"); fi
+          fingerprint=$("${agent[@]}")
+          [[ -n $fingerprint && $("${agent[@]}") == "$fingerprint" ]]
+          rm -rf "$security"
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:

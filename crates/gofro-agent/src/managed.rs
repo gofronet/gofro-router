@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicUsize, Ordering},
         mpsc,
     },
     thread,
@@ -17,7 +17,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::{AppState, config::parse_server_profile, controller, model::ManagedServer};
 
-static TEMPORARY: AtomicU64 = AtomicU64::new(0);
+static TEMPORARY: AtomicUsize = AtomicUsize::new(0);
 const SERVER_INSTALLER: &str = include_str!("../../../deploy/server/gofro-server-install");
 const SSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const SSH_UPDATE_TIMEOUT: Duration = Duration::from_secs(960);

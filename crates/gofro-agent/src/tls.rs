@@ -69,7 +69,7 @@ fn generate(cert: &Path, key: &Path) -> Result<()> {
     certificate.set_issuer_name(&name)?;
     certificate.set_pubkey(&private)?;
     let not_before = Asn1Time::from_unix(0)?;
-    let not_after = Asn1Time::from_unix(2524608000)?;
+    let not_after = Asn1Time::from_str_x509("20500101000000Z")?;
     certificate.set_not_before(&not_before)?;
     certificate.set_not_after(&not_after)?;
     certificate.append_extension(BasicConstraints::new().critical().build()?)?;
@@ -145,6 +145,13 @@ mod tests {
         let cert = dir.join("cert.pem");
         let key = dir.join("key.pem");
         let first = ensure(&cert, &key).unwrap();
+        assert_eq!(
+            X509::from_pem(&fs::read(&cert).unwrap())
+                .unwrap()
+                .not_after()
+                .to_string(),
+            "Jan  1 00:00:00 2050 GMT"
+        );
         fs::rename(&cert, cert.with_extension("new")).unwrap();
         assert_eq!(first, ensure(&cert, &key).unwrap());
         assert_eq!(
