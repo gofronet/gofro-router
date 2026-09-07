@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    fs::{File, OpenOptions},
     io::Write,
     net::Ipv4Addr,
     process::{Command, Stdio},
@@ -12,6 +13,7 @@ use ipnet::Ipv4Net;
 use wireguard_status::wireguard_peers;
 
 const CLIENT_SUBNET: &str = "10.203.1.0/24";
+const TUNNEL_LOCK: &str = "/run/lock/gofro-server.lock";
 
 #[derive(Debug, Parser)]
 #[command(about = "Manage WireGuard peers on a Gofro server", version)]
@@ -38,7 +40,7 @@ enum ServerCommand {
         #[arg(long)]
         endpoint: String,
         #[arg(long)]
-        tunnel_ip: String,
+        tunnel_ip: Option<String>,
         #[arg(long, hide = true)]
         subnet: Option<String>,
     },
@@ -100,6 +102,7 @@ fn main() -> Result<()> {
             subnet,
         } => {
             require_root()?;
+            let _lock = mutating_lock()?;
             add_peer(&args.interface, &public_key, &tunnel_ip, subnet.as_deref())?;
             println!("peer added: {tunnel_ip} via {}", args.interface);
         }
@@ -109,7 +112,17 @@ fn main() -> Result<()> {
             subnet,
         } => {
             require_root()?;
+            let _lock = mutating_lock()?;
             validate_endpoint(&endpoint)?;
+            let tunnel_ip = match tunnel_ip {
+                Some(tunnel_ip) => tunnel_ip,
+                None => allocate_tunnel_ip(&run(Command::new("wg").args([
+                    "show",
+                    &args.interface,
+                    "allowed-ips",
+                ]))?)?
+                .to_string(),
+            };
             let private_key = run(Command::new("wg").arg("genkey"))?;
             let public_key = run_with_input(Command::new("wg").arg("pubkey"), &private_key)?;
             let server_public_key =
@@ -133,6 +146,7 @@ fn main() -> Result<()> {
         }
         ServerCommand::RemovePeer { public_key, subnet } => {
             require_root()?;
+            let _lock = mutating_lock()?;
             let subnet = subnet
                 .as_deref()
                 .map(validate_subnet)
@@ -156,6 +170,17 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn mutating_lock() -> Result<File> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(TUNNEL_LOCK)
+        .with_context(|| format!("failed to open {TUNNEL_LOCK}"))?;
+    lock.lock()
+        .with_context(|| format!("failed to lock {TUNNEL_LOCK}"))?;
+    Ok(lock)
 }
 
 fn add_peer(
@@ -230,6 +255,20 @@ fn validate_tunnel_ip(value: &str) -> Result<Ipv4Net> {
         bail!("tunnel IP must be in 10.202.0.2-10.202.0.254/32");
     }
     Ok(network)
+}
+
+fn allocate_tunnel_ip(assigned: &str) -> Result<Ipv4Net> {
+    let assigned: Vec<_> = assigned
+        .split_whitespace()
+        .filter_map(|value| value.parse::<Ipv4Net>().ok())
+        .collect();
+    for host in 2..=254 {
+        let candidate = Ipv4Addr::new(10, 202, 0, host);
+        if !assigned.iter().any(|network| network.contains(&candidate)) {
+            return validate_tunnel_ip(&format!("{candidate}/32"));
+        }
+    }
+    bail!("no tunnel IP addresses are available")
 }
 
 fn validate_subnet(value: &str) -> Result<Ipv4Net> {
@@ -347,7 +386,21 @@ mod tests {
         assert!(validate_tunnel_ip("10.202.0.1/32").is_err());
         assert!(validate_subnet(CLIENT_SUBNET).is_ok());
         assert!(validate_subnet("0.0.0.0/0").is_err());
-        assert!(
+        assert!(matches!(
+            Args::try_parse_from([
+                "gofro-router-server",
+                "create-profile",
+                "--endpoint",
+                "vpn.test:8443",
+            ])
+            .unwrap()
+            .command,
+            ServerCommand::CreateProfile {
+                tunnel_ip: None,
+                ..
+            }
+        ));
+        assert!(matches!(
             Args::try_parse_from([
                 "gofro-router-server",
                 "create-profile",
@@ -355,11 +408,19 @@ mod tests {
                 "vpn.test:8443",
                 "--tunnel-ip",
                 "10.202.0.5/32",
-                "--subnet",
-                CLIENT_SUBNET,
             ])
-            .is_ok()
+            .unwrap()
+            .command,
+            ServerCommand::CreateProfile {
+                tunnel_ip: Some(tunnel_ip),
+                ..
+            } if tunnel_ip == "10.202.0.5/32"
+        ));
+        assert_eq!(
+            allocate_tunnel_ip("one\t10.202.0.2/32\ntwo\t10.202.0.4/32").unwrap(),
+            validate_tunnel_ip("10.202.0.3/32").unwrap()
         );
+        assert!(allocate_tunnel_ip("one\t10.202.0.0/24").is_err());
         let routes = [validate_tunnel_ip("10.202.0.5/32").unwrap()];
         assert!(routes_conflict(
             "other-key\t10.202.0.5/32\n",

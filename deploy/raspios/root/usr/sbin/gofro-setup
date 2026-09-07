@@ -97,9 +97,11 @@ systemctl enable gofro-recover.service gofro-network.service gofro-relay.service
 systemctl restart gofro-network.service
 systemctl restart dnsmasq.service
 systemctl restart gofro-relay.service
+fingerprint="$(/usr/bin/gofro-agent --init-security)"
 systemctl restart gofro-agent.service
 systemctl restart gofro-updater.service
 
 echo "Gofro Wi-Fi password: $password"
-echo 'Connect to GofroWIFI 5 and open http://wifi.gofro.net'
+echo "Gofro HTTPS certificate fingerprint: $fingerprint"
+echo 'Connect to GofroWIFI 5 and open https://wifi.gofro.net'
 echo 'On the VPS, replace the example IP and choose an unused tunnel IP: sudo gofro-router-server create-profile --endpoint 203.0.113.10:8443 --tunnel-ip 10.202.0.3/32'

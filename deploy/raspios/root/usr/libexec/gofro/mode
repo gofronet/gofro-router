@@ -24,9 +24,8 @@ table inet gofro_platform {
   chain input {
     type filter hook input priority filter; policy accept;
     iifname "$LAN_INTERFACE" udp dport { 53, 67 } accept
-    iifname "$LAN_INTERFACE" tcp dport { 53, 80, 8080 } accept
+    iifname "$LAN_INTERFACE" tcp dport { 53, 80, 443 } accept
     iifname "$LAN_INTERFACE" ip protocol icmp accept
-    iifname "$LAN_INTERFACE" tcp dport 443 reject with tcp reset
     iifname "$LAN_INTERFACE" drop
   }
   chain forward {
@@ -57,9 +56,8 @@ table inet gofro_platform {
   chain input {
     type filter hook input priority filter; policy accept;
     iifname "$LAN_INTERFACE" udp dport { 53, 67 } accept
-    iifname "$LAN_INTERFACE" tcp dport { 53, 80, 8080 } accept
+    iifname "$LAN_INTERFACE" tcp dport { 53, 80, 443 } accept
     iifname "$LAN_INTERFACE" ip protocol icmp accept
-    iifname "$LAN_INTERFACE" tcp dport 443 reject with tcp reset
     iifname "$LAN_INTERFACE" drop
   }
   chain forward {

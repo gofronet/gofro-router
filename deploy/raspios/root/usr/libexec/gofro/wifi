@@ -2,6 +2,7 @@
 set -eu
 
 CONNECTION=gofro-ap
+STATE_DIR=${GOFRO_STATE_DIR:-/etc/gofro}
 
 usage() {
 	echo "Usage: $0 list | set BAND SSID [PASSWORD]" >&2
@@ -20,6 +21,11 @@ case "${1:-}" in
 		case "$2" in 5g|all) ;; *) usage ;; esac
 		nmcli connection modify "$CONNECTION" 802-11-wireless.ssid "$3"
 		[ "$#" = 3 ] || nmcli connection modify "$CONNECTION" wifi-sec.psk "$4"
+		if [ "$#" = 4 ] && [ ! -e "$STATE_DIR/admin-password" ]; then
+			printf '%s\n' "$4" > "$STATE_DIR/ap-password.new"
+			chmod 600 "$STATE_DIR/ap-password.new"
+			mv -f "$STATE_DIR/ap-password.new" "$STATE_DIR/ap-password"
+		fi
 		(sleep 2; nmcli connection down "$CONNECTION"; nmcli connection up "$CONNECTION") >/dev/null 2>&1 &
 		;;
 	*) usage ;;

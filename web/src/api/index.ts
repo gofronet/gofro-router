@@ -1,13 +1,21 @@
 import { http, request } from "./client";
 import {
   profileInputSchema,
+  profileSchema,
+  authStatusSchema,
+  serverProbeSchema,
   serverInputSchema,
+  serverVersionSchema,
   routingConfigSchema,
   routingTestSchema,
   statusSchema,
   wifiInputSchema,
   type ProfileInput,
+  type Profile,
+  type AuthStatus,
+  type ServerProbe,
   type ServerInput,
+  type ServerVersion,
   type RoutingConfig,
   type RoutingTest,
   type Status,
@@ -20,6 +28,15 @@ const statusRequest = (factory: () => Promise<{ data: unknown }>) =>
 const mutation = { timeout: 0 };
 
 export const api = {
+  auth: {
+    status: (): Promise<AuthStatus> => request(authStatusSchema, () => http.get("/auth/status")),
+    setup: (setupCode: string, password: string): Promise<AuthStatus> =>
+      request(authStatusSchema, () => http.post("/auth/setup", { setup_code: setupCode, password }, mutation)),
+    login: (password: string): Promise<AuthStatus> =>
+      request(authStatusSchema, () => http.post("/auth/login", { password }, mutation)),
+    logout: (): Promise<AuthStatus> =>
+      request(authStatusSchema, () => http.post("/auth/logout", {}, mutation)),
+  },
   status: {
     get: (): Promise<Status> => statusRequest(() => http.get("/status")),
   },
@@ -59,6 +76,36 @@ export const api = {
           ...mutation,
         }),
       ),
+    probe: (host: string, port: number): Promise<ServerProbe> =>
+      request(serverProbeSchema, () =>
+        http.post("/servers/probe", { host, port }, mutation),
+      ),
+    bootstrap: (
+      name: string,
+      host: string,
+      port: number,
+      password: string,
+      hostKey: string,
+    ): Promise<Status> =>
+      statusRequest(() =>
+        http.post(
+          "/servers/bootstrap",
+          { name, host, port, password, host_key: hostKey },
+          mutation,
+        ),
+      ),
+    check: (publicKey: string): Promise<ServerVersion> =>
+      request(serverVersionSchema, () =>
+        http.post("/servers/check", { public_key: publicKey }, mutation),
+      ),
+    updateManaged: (publicKey: string): Promise<ServerVersion> =>
+      request(serverVersionSchema, () =>
+        http.post("/servers/update-managed", { public_key: publicKey }, mutation),
+      ),
+    createProfile: (publicKey: string): Promise<Profile> =>
+      request(profileSchema, () =>
+        http.post("/servers/create-profile", { public_key: publicKey }, mutation),
+      ),
   },
   wifi: {
     save: (input: WifiInput): Promise<Status> => {
@@ -86,8 +133,12 @@ export type {
   RoutingConfig,
   RoutingTest,
   ProfileInput,
+  Profile,
+  AuthStatus,
   Server,
+  ServerProbe,
   ServerInput,
+  ServerVersion,
   Status,
   WifiBand,
   WifiInput,

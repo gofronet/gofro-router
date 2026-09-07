@@ -24,6 +24,15 @@ pub(crate) struct ServerProfile {
     pub(crate) client_tunnel_address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) client_private_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) management: Option<ManagedServer>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct ManagedServer {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) host_key: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -31,6 +40,7 @@ pub(crate) struct ServerStatus {
     pub(crate) name: String,
     pub(crate) endpoint: String,
     pub(crate) public_key: String,
+    pub(crate) managed: bool,
 }
 
 impl From<&ServerProfile> for ServerStatus {
@@ -39,6 +49,7 @@ impl From<&ServerProfile> for ServerStatus {
             name: server.name.clone(),
             endpoint: server.endpoint.clone(),
             public_key: server.public_key.clone(),
+            managed: server.management.is_some(),
         }
     }
 }
@@ -241,5 +252,17 @@ mod tests {
         let input: ApInput =
             serde_json::from_str(r#"{"ssid":"Legacy","password":"secret123"}"#).unwrap();
         assert_eq!(input.band, None);
+    }
+
+    #[test]
+    fn legacy_profiles_are_imported_and_status_omits_secrets() {
+        let server: ServerProfile =
+            serde_json::from_str(r#"{"name":"Old","endpoint":"vpn:8443","public_key":"key"}"#)
+                .unwrap();
+        assert!(server.management.is_none());
+        let json = serde_json::to_string(&ServerStatus::from(&server)).unwrap();
+        assert!(json.contains("\"managed\":false"));
+        assert!(!json.contains("management"));
+        assert!(!json.contains("private"));
     }
 }

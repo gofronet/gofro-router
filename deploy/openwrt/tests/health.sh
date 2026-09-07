@@ -19,11 +19,11 @@ jsonfilter() {
 	done
 	case "$expression" in
 		'@.version') printf '%s\n' "$TEST_VERSION" ;;
-		'@.routing.dns_active') printf '%s\n' "$TEST_DNS" ;;
-		'@.routing.dataplane_active') printf '%s\n' "$TEST_DATAPLANE" ;;
+		'@.dns_active') printf '%s\n' "$TEST_DNS" ;;
+		'@.dataplane_active') printf '%s\n' "$TEST_DATAPLANE" ;;
 		'@.vpn_enabled') printf '%s\n' "$TEST_VPN" ;;
 		'@.tunnel_active') printf '%s\n' "$TEST_TUNNEL" ;;
-		'@.peer.handshake_age_seconds') printf '%s\n' "$TEST_HANDSHAKE_AGE" ;;
+		'@.handshake_age_seconds') printf '%s\n' "$TEST_HANDSHAKE_AGE" ;;
 		*) return 1 ;;
 	esac
 }

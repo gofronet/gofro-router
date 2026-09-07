@@ -106,8 +106,10 @@ uci commit uhttpd
 /etc/init.d/gofro-relay enable
 /etc/init.d/gofro-agent enable
 
+fingerprint="$(/usr/bin/gofro-agent --init-security)"
 echo "Gofro Wi-Fi password: $password"
-echo 'After reconnecting, open http://wifi.gofro.net'
+echo "Gofro HTTPS certificate fingerprint: $fingerprint"
+echo 'After reconnecting, open https://wifi.gofro.net'
 echo 'On the VPS, replace the example IP and run: sudo gofro-router-server create-profile --endpoint 203.0.113.10:8443 --tunnel-ip 10.202.0.2/32'
 
 if [ -n "$install_version" ]; then

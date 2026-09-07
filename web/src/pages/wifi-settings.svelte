@@ -2,12 +2,12 @@
     import CheckCircle2 from "lucide-svelte/icons/circle-check";
     import ExternalLink from "lucide-svelte/icons/external-link";
     import Globe2 from "lucide-svelte/icons/globe-2";
-    import KeyRound from "lucide-svelte/icons/key-round";
     import RefreshCw from "lucide-svelte/icons/refresh-cw";
     import Router from "lucide-svelte/icons/router";
     import Wifi from "lucide-svelte/icons/wifi";
 
     import { getAppContext } from "../app-context";
+    import PasswordInput from "../components/password-input.svelte";
     import type { WifiBand } from "../domain/models";
 
     type WifiForm = {
@@ -119,8 +119,8 @@
             </p>
             <a
                 class="mb-5 flex min-h-14 w-full max-w-md items-center justify-center gap-2.5 rounded-2xl border border-[#3b3b40] bg-[#202024] px-4 font-mono text-xs text-white no-underline"
-                href="http://wifi.gofro.net"
-                ><Globe2 size={19} />http://wifi.gofro.net<ExternalLink
+                href="https://wifi.gofro.net"
+                ><Globe2 size={19} />https://wifi.gofro.net<ExternalLink
                     size={16}
                 /></a
             >
@@ -185,31 +185,22 @@
                                     />
                                 </div>
                             </label>
-                            <label>
-                                <span
-                                    class="mb-2 block text-xs font-semibold text-[#74747d]"
-                                    >Новый пароль</span
-                                >
-                                <div class="relative">
-                                    <KeyRound
-                                        class="pointer-events-none absolute left-4 top-4.5 text-[#74747d]"
-                                        size={19}
-                                    /><input
-                                        class="h-14 w-full rounded-2xl border border-[#dedee1] bg-white pl-12 pr-4 text-base"
-                                        bind:value={network.password}
-                                        type="password"
-                                        minlength="8"
-                                        maxlength="63"
-                                        autocomplete="new-password"
-                                        placeholder="Не менять"
-                                    />
-                                </div>
+                            <div>
+                                <PasswordInput
+                                    label="Новый пароль"
+                                    bind:value={network.password}
+                                    minlength={8}
+                                    maxlength={63}
+                                    autocomplete="new-password"
+                                    placeholder="Не менять"
+                                    disabled={busy}
+                                />
                                 <small
                                     class="mt-2 block text-xs leading-relaxed text-[#74747d]"
                                     >Оставьте поле пустым, чтобы сохранить
                                     текущий пароль.</small
                                 >
-                            </label>
+                            </div>
                             {#if network.error}<p
                                     class="m-0 rounded-2xl border border-red-200 bg-red-50 p-3 text-xs leading-relaxed text-red-700"
                                     role="alert"

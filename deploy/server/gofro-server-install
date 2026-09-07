@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET=x86_64-server-linux-musl
+ARCHIVE="gofro-router-$TARGET.tar.gz"
+MANIFEST="gofro-router-manifest-$TARGET.json"
+DEFAULT_BASE_URL=https://github.com/gofronet/gofro-router/releases/latest/download
+BASE_URL=${GOFRO_RELEASE_URL:-$DEFAULT_BASE_URL}
+KEY=/etc/gofro/update-public.pem
+LOCK=/run/lock/gofro-server-install.lock
+LOCKED=
+TMP=
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+cleanup() { [[ -z $TMP ]] || rm -rf "$TMP"; [[ -z $LOCKED ]] || rmdir "$LOCK" 2>/dev/null || true; }
+trap cleanup EXIT
+
+valid_version() { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+version_newer() {
+  local new=$1 old=$2 IFS=.
+  local -a n o
+  read -r -a n <<< "$new"
+  read -r -a o <<< "$old"
+  (( n[0] > o[0] || n[0] == o[0] && n[1] > o[1] || n[0] == o[0] && n[1] == o[1] && n[2] > o[2] ))
+}
+write_public_key() {
+  cat > "$1" <<'EOF'
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA49UWlsfVa3Coq+iY4WJSf5UPQEwC6nalT/CeOy+gdvk=
+-----END PUBLIC KEY-----
+EOF
+}
+manifest_valid() {
+  local manifest=$1 version target archive sha256
+  version=$(jq -r .version "$manifest")
+  target=$(jq -r .target "$manifest")
+  archive=$(jq -r .archive "$manifest")
+  sha256=$(jq -r .sha256 "$manifest")
+  [[ $(jq -r .schema "$manifest") == 1 ]] && valid_version "$version" &&
+    [[ $target == "$TARGET" && $archive == "$ARCHIVE" && $sha256 =~ ^[0-9a-f]{64}$ ]]
+}
+
+[[ $(id -u) == 0 ]] || die 'run as root'
+[[ $(uname -m) == x86_64 ]] || die 'x86_64 is required'
+# shellcheck disable=SC1091
+source /etc/os-release 2>/dev/null || die 'Debian or Ubuntu is required'
+[[ ${ID:-} == debian || ${ID:-} == ubuntu ]] || die 'Debian or Ubuntu is required'
+case ${1:-} in
+  --install) mode=install ;;
+  '') mode=update ;;
+  *) die 'usage: gofro-server-install [--install]' ;;
+esac
+mkdir "$LOCK" 2>/dev/null || die 'another install or update is running'
+LOCKED=1
+if [[ $mode == install ]]; then
+  [[ ! -e /etc/gofro/version ]] || die 'Gofro is already installed'
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq openssl wireguard-tools nftables
+else
+  [[ -s $KEY ]] || die 'update public key is missing'
+fi
+TMP=$(mktemp -d)
+BASE_URL=${BASE_URL%/}
+if [[ $mode == install ]]; then KEY=$TMP/update-public.pem; write_public_key "$KEY"; fi
+curl --fail --silent --show-error --location --retry 3 --max-time 60 -o "$TMP/$MANIFEST" "$BASE_URL/$MANIFEST"
+curl --fail --silent --show-error --location --retry 3 --max-time 60 -o "$TMP/$MANIFEST.sig" "$BASE_URL/$MANIFEST.sig"
+openssl pkeyutl -verify -pubin -inkey "$KEY" -rawin -in "$TMP/$MANIFEST" -sigfile "$TMP/$MANIFEST.sig" >/dev/null || die 'release signature is invalid'
+manifest_valid "$TMP/$MANIFEST" || die 'release manifest is invalid'
+version=$(jq -r .version "$TMP/$MANIFEST")
+if [[ $mode == update ]]; then
+  read -r installed < /etc/gofro/version || die 'installed version is missing'
+  valid_version "$installed" || die 'installed version is invalid'
+  [[ $version == "$installed" ]] && { printf 'Gofro %s is up to date\n' "$installed"; exit 0; }
+  version_newer "$version" "$installed" || die "Gofro $version is older than $installed"
+fi
+asset_url=$BASE_URL
+[[ $BASE_URL != "$DEFAULT_BASE_URL" ]] || asset_url="https://github.com/gofronet/gofro-router/releases/download/v$version"
+curl --fail --silent --show-error --location --retry 3 --max-time 300 -o "$TMP/$ARCHIVE" "$asset_url/$ARCHIVE"
+printf '%s  %s\n' "$(jq -r .sha256 "$TMP/$MANIFEST")" "$TMP/$ARCHIVE" | sha256sum -c - >/dev/null || die 'release checksum does not match'
+mkdir "$TMP/bundle"
+tar -xzf "$TMP/$ARCHIVE" -C "$TMP/bundle"
+[[ $(< "$TMP/bundle/TARGET") == "$TARGET" && $(< "$TMP/bundle/VERSION") == "$version" && -x $TMP/bundle/install.sh ]] || die 'release bundle is invalid'
+"$TMP/bundle/install.sh" "--$mode"

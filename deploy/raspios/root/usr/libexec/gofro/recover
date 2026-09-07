@@ -6,6 +6,8 @@ RELEASES=$APP_ROOT/releases
 CURRENT=$APP_ROOT/current
 PENDING=${GOFRO_UPDATE_PREVIOUS:-/etc/gofro/update-previous}
 VERSION_FILE=${GOFRO_VERSION_FILE:-/etc/gofro/version}
+UNIT_DIR=${GOFRO_UNIT_DIR:-/etc/systemd/system}
+SYSTEMCTL=${GOFRO_SYSTEMCTL_COMMAND:-systemctl}
 
 [ -s "$PENDING" ] || exit 0
 IFS= read -r previous < "$PENDING"
@@ -19,6 +21,10 @@ temporary=$APP_ROOT/current.recover.$$
 trap 'rm -f "$temporary"' EXIT
 ln -s "$previous" "$temporary"
 mv -Tf "$temporary" "$CURRENT"
+for unit in "$CURRENT"/etc/systemd/system/gofro-*.service; do
+	install -m 644 "$unit" "$UNIT_DIR/${unit##*/}"
+done
+"$SYSTEMCTL" daemon-reload
 printf '%s\n' "$version" > "$VERSION_FILE.new"
 mv -f "$VERSION_FILE.new" "$VERSION_FILE"
 rm -f "$PENDING"

@@ -7,6 +7,14 @@ grep -Fq "address='/wifi.gofro.net/10.203.1.1'" "$ROOT/deploy/openwrt/install.sh
 grep -Fq "listen_http='10.203.1.1:81'" "$ROOT/deploy/openwrt/install.sh"
 grep -Fq "listen_https='10.203.1.1:444'" "$ROOT/deploy/openwrt/install.sh"
 grep -Fq "START=99" "$ROOT/deploy/openwrt/root/etc/init.d/gofro-agent"
+grep -Fq -- '--listen 127.0.0.1:8080' "$ROOT/deploy/openwrt/root/etc/init.d/gofro-agent"
+grep -Fq -- '--http-listen 10.203.1.1:80' "$ROOT/deploy/openwrt/root/etc/init.d/gofro-agent"
+grep -Fq -- '--https-listen 10.203.1.1:443' "$ROOT/deploy/openwrt/root/etc/init.d/gofro-agent"
+if grep -Fq -- '--listen 10.203.1.1:8080' "$ROOT/deploy/openwrt/root/etc/init.d/gofro-agent"; then
+	exit 1
+fi
+grep -Fq 'http://127.0.0.1:8080/healthz' "$ROOT/deploy/openwrt/install.sh"
+grep -Fq -- '--init-security' "$ROOT/deploy/openwrt/install.sh"
 grep -Fq "localuse='0'" "$ROOT/deploy/openwrt/root/usr/sbin/gofro-setup"
 grep -Fq "localuse='0'" "$ROOT/deploy/openwrt/install.sh"
 grep -Fq "firewall.gofro_vpn.mtu_fix='1'" \
@@ -17,9 +25,9 @@ grep -Fq "firewall.gofro_vpn.masq='1'" \
 grep -Fq "firewall.gofro_vpn.masq='1'" "$ROOT/deploy/openwrt/install.sh"
 grep -Fq 'uci commit firewall' "$ROOT/deploy/openwrt/install.sh"
 grep -Fq '/etc/init.d/firewall reload' "$ROOT/deploy/openwrt/install.sh"
-grep -Fq 'configure_panel && configure_vpn_zone && restart_services' \
+grep -Fq 'configure_panel && configure_vpn_zone && init_security && restart_services' \
 	"$ROOT/deploy/openwrt/install.sh"
-grep -Fq 'if configure_vpn_zone && restart_services && healthy' \
+grep -Fq 'if configure_vpn_zone && init_security && restart_services && healthy' \
 	"$ROOT/deploy/openwrt/install.sh"
 grep -Fq 'ln -sf /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf' \
 	"$ROOT/deploy/openwrt/root/usr/sbin/gofro-setup"

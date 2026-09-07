@@ -10,6 +10,11 @@ use crate::{
 
 pub(crate) fn import_server(state: &AppState, name: String, profile: String) -> Result<()> {
     let server = parse_server_profile(name, &profile)?;
+    upsert_server(state, server)
+}
+
+pub(crate) fn upsert_server(state: &AppState, server: ServerProfile) -> Result<()> {
+    validate_server(&server)?;
     let mut config = state
         .config
         .lock()
@@ -49,7 +54,12 @@ fn replace_imported_server(
     let reconnect =
         config.vpn_enabled && config.active_server_key.as_deref() == Some(&server.public_key);
     let mut next = config.clone();
-    next.servers[index] = server.clone();
+    let mut server = server.clone();
+    if previous.management.is_some() {
+        server.management = previous.management.clone();
+        server.endpoint = previous.endpoint.clone();
+    }
+    next.servers[index] = server;
     Some((next, previous, reconnect, index))
 }
 
@@ -88,6 +98,11 @@ pub(crate) fn update_server(state: &AppState, update: ServerUpdate) -> Result<()
         .position(|server| server.public_key == update.previous_public_key)
         .context("сервер не найден")?;
     let mut server = config.servers[index].clone();
+    if server.management.is_some()
+        && (server.endpoint != update.endpoint || server.public_key != update.public_key)
+    {
+        bail!("нельзя изменить endpoint или public key управляемого сервера");
+    }
     server.name = update.name;
     server.endpoint = update.endpoint;
     server.public_key = update.public_key;
@@ -227,7 +242,7 @@ pub(crate) fn delete_server(state: &AppState, public_key: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::RoutingConfig;
+    use crate::model::{ManagedServer, RoutingConfig};
 
     #[test]
     fn reimport_replaces_credentials_for_active_server() {
@@ -237,6 +252,11 @@ mod tests {
             public_key: "server-key".into(),
             client_tunnel_address: Some("10.202.0.2/32".into()),
             client_private_key: Some("old-private".into()),
+            management: Some(ManagedServer {
+                host: "203.0.113.10".into(),
+                port: 22,
+                host_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEwCks2omLrfMrS1du13ol2Iwo4CoDhME50jxaLI7Mdq".into(),
+            }),
         };
         let config = ControllerConfig {
             vpn_enabled: true,
@@ -250,6 +270,7 @@ mod tests {
             public_key: "server-key".into(),
             client_tunnel_address: Some("10.202.0.5/32".into()),
             client_private_key: Some("new-private".into()),
+            management: None,
         };
 
         let (next, previous, reconnect, _) = replace_imported_server(&config, &new).unwrap();
@@ -265,5 +286,6 @@ mod tests {
             Some("new-private")
         );
         assert_eq!(previous.client_private_key.as_deref(), Some("old-private"));
+        assert!(next.servers[0].management.is_some());
     }
 }

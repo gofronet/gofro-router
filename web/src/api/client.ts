@@ -1,6 +1,15 @@
 import { z, type ZodType } from "zod";
 
 const errorResponseSchema = z.object({ error: z.string() });
+let csrfToken = "";
+
+export function setCsrfToken(token: string): void {
+  csrfToken = token;
+}
+
+export function clearCsrfToken(): void {
+  csrfToken = "";
+}
 
 type Options = { data?: unknown; timeout?: number };
 
@@ -18,7 +27,11 @@ async function send(
   try {
     const response = await fetch(`/api${path}`, {
       method,
-      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        ...(method === "GET" ? {} : { "X-CSRF-Token": csrfToken }),
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller?.signal,
       cache: "no-store",

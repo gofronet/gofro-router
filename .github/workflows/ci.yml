@@ -52,7 +52,9 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: |
-          bash -n deploy/server/*.sh
+          bash -n deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install
+          shellcheck -s bash deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install deploy/server/tests/*.sh
+          bash deploy/server/tests/*.sh
           sh -n deploy/openwrt/install.sh \
             deploy/openwrt/root/etc/init.d/* \
             deploy/openwrt/root/etc/hotplug.d/iface/* \
@@ -74,6 +76,7 @@ jobs:
             deploy/raspios/root/usr/sbin/* \
             deploy/raspios/tests/*.sh
           cmp deploy/openwrt/update-public.pem deploy/raspios/update-public.pem
+          cmp deploy/openwrt/update-public.pem deploy/server/update-public.pem
           sh deploy/openwrt/tests/health.sh
           sh deploy/openwrt/tests/hotplug.sh
           sh deploy/openwrt/tests/mode.sh
@@ -82,6 +85,7 @@ jobs:
           sh deploy/openwrt/tests/update.sh
           sh deploy/openwrt/tests/version.sh
           sh deploy/openwrt/tests/wifi.sh
+          sh deploy/raspios/tests/health.sh
           sh deploy/raspios/tests/mode.sh
           sh deploy/raspios/tests/network.sh
           sh deploy/raspios/tests/recover.sh

@@ -8,6 +8,23 @@ ROOT="$(CDPATH='' cd "$(dirname "$0")/../../.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+grep -Fq "for unit in \"\$CURRENT\"/etc/systemd/system/gofro-*.service; do" \
+	"$ROOT/deploy/raspios/install.sh"
+if grep -Fq 'verify_units()' "$ROOT/deploy/raspios/install.sh"; then
+	exit 1
+fi
+grep -Fq 'http://127.0.0.1:8080/healthz' "$ROOT/deploy/raspios/install.sh"
+grep -Fq -- '--listen 127.0.0.1:8080' \
+	"$ROOT/deploy/raspios/root/etc/systemd/system/gofro-agent.service"
+grep -Fq -- '--http-listen 10.203.1.1:80' \
+	"$ROOT/deploy/raspios/root/etc/systemd/system/gofro-agent.service"
+grep -Fq -- '--https-listen 10.203.1.1:443' \
+	"$ROOT/deploy/raspios/root/etc/systemd/system/gofro-agent.service"
+if grep -Fq -- '--listen 10.203.1.1:8080' \
+	"$ROOT/deploy/raspios/root/etc/systemd/system/gofro-agent.service"; then
+	exit 1
+fi
+
 APP_ROOT=$TMP/app
 RELEASES=$APP_ROOT/releases
 CURRENT=$APP_ROOT/current

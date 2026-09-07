@@ -61,7 +61,7 @@ tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL -o "$tmp" https://gith
 ```
 
 После установки подключитесь к GofroWIFI и откройте
-[wifi.gofro.net](http://wifi.gofro.net). Подробности:
+[wifi.gofro.net](https://wifi.gofro.net). Подробности:
 [OpenWrt](deploy/openwrt/README.md), [Raspberry Pi OS](deploy/raspios/README.md).
 
 ## Схема сети
@@ -83,7 +83,7 @@ flowchart LR
 ## Управление
 
 Панель Gofro доступна по адресу
-[wifi.gofro.net](http://wifi.gofro.net). LuCI доступен по адресу
+[wifi.gofro.net](https://wifi.gofro.net). LuCI доступен по адресу
 [10.203.1.1:81](http://10.203.1.1:81) или
 [10.203.1.1:444](https://10.203.1.1:444) только на OpenWrt.
 

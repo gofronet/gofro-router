@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+STATE_DIR=${GOFRO_STATE_DIR:-/etc/gofro}
+
 usage() {
 	echo "Usage: $0 list | set BAND SSID [PASSWORD]" >&2
 	exit 2
@@ -47,4 +49,9 @@ done
 [ "$found" = 1 ] || { echo "No OpenWrt $2 access point found" >&2; exit 1; }
 
 uci commit wireless
+if [ "$#" = 4 ] && [ ! -e "$STATE_DIR/admin-password" ]; then
+	printf '%s\n' "$4" > "$STATE_DIR/ap-password.new"
+	chmod 600 "$STATE_DIR/ap-password.new"
+	mv -f "$STATE_DIR/ap-password.new" "$STATE_DIR/ap-password"
+fi
 (sleep 2; wifi reload) >/dev/null 2>&1 &
