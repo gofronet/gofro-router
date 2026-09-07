@@ -13,6 +13,33 @@ case "$1" in
 	*) die 'country must be a two-letter uppercase code' ;;
 esac
 
+if [ "${GOFRO_INSTALL_QUIET:-}" != 1 ]; then
+	log=$(mktemp /tmp/gofro-install.XXXXXX)
+	chmod 600 "$log"
+	if GOFRO_INSTALL_QUIET=1 sh "$0" "$@" > "$log" 2>&1; then
+		printf '%s\n' 'GofroNET Wi-Fi Setup' 'https://wifi.gofro.net'
+		exit 0
+	fi
+	die "installation failed; see $log"
+fi
+
+if [ -e /etc/gofro/onboarding-state ]; then
+	case "$(cat /etc/gofro/onboarding-state)" in admin|wifi) ;; *) die 'Wi-Fi setup is already applying or complete';; esac
+	/etc/init.d/uhttpd stop || { ! /etc/init.d/uhttpd running || die 'failed to stop the factory web panel'; }
+	/usr/libexec/gofro/onboarding begin
+	/etc/init.d/network reload
+	/etc/init.d/firewall reload
+	/etc/init.d/dnsmasq restart
+	wifi reload
+	/etc/init.d/gofro-onboarding restart
+	/etc/init.d/uhttpd restart
+	/etc/init.d/gofro-agent restart
+	/etc/init.d/gofro-finalize boot
+	exit 0
+fi
+[ ! -e /etc/gofro/version ] && [ ! -e /etc/gofro/admin-password ] && [ ! -e /etc/gofro/ap-password ] || die 'existing installation cannot be reset by setup'
+[ "$(uci -q get network.lan.ipaddr || true)" != 10.203.1.1 ] || die '10.203.1.1 is already assigned to LAN'
+
 interface="$(uci -q get gofro.main.interface || echo gt0)"
 case "$interface" in ''|*[!a-zA-Z0-9_]*) die 'invalid WireGuard interface' ;; esac
 install_version=${GOFRO_INSTALL_VERSION:-}
@@ -30,18 +57,12 @@ if [ ! -s /etc/wireguard/client.key ]; then
 fi
 wg pubkey < /etc/wireguard/client.key > /etc/wireguard/client.pub
 
-if [ ! -s /etc/gofro/ap-password ]; then
-	umask 077
-	wg genkey | cut -c1-16 > /etc/gofro/ap-password
-fi
-password="$(cat /etc/gofro/ap-password)"
-
-uci set network.lan.ipaddr='10.203.1.1'
-uci set network.lan.netmask='255.255.255.0'
 uci -q delete "network.$interface" || true
 uci set "network.$interface=interface"
 uci set "network.$interface.proto=wireguard"
-uci set "network.$interface.private_key=$(cat /etc/wireguard/client.key)"
+uci batch <<EOF
+set network.$interface.private_key='$(cat /etc/wireguard/client.key)'
+EOF
 uci add_list "network.$interface.addresses=10.202.0.2/32"
 uci set "network.$interface.listen_port=51821"
 uci set "network.$interface.mtu=1280"
@@ -83,16 +104,7 @@ for section in $wifi_sections; do
 	[ "$(uci -q get "wireless.$section.mode")" = ap ] || continue
 	device="$(uci -q get "wireless.$section.device" || true)"
 	band="$(uci -q get "wireless.$device.band" || true)"
-	case "$band" in
-		2g) ssid='GofroWIFI 2' ;;
-		5g) ssid='GofroWIFI 5' ;;
-		*) continue ;;
-	esac
-	uci set "wireless.$section.network=lan"
-	uci set "wireless.$section.ssid=$ssid"
-	uci set "wireless.$section.encryption=sae-mixed"
-	uci set "wireless.$section.key=$password"
-	uci set "wireless.$section.disabled=0"
+	case "$band" in 2g|5g) ;; *) continue;; esac
 	[ -z "$device" ] || uci set "wireless.$device.country=$country"
 	configured_wifi=1
 done
@@ -105,19 +117,18 @@ uci commit wireless
 uci commit uhttpd
 /etc/init.d/gofro-relay enable
 /etc/init.d/gofro-agent enable
-
-fingerprint="$(/usr/bin/gofro-agent --init-security)"
-echo "Gofro Wi-Fi password: $password"
-echo "Gofro HTTPS certificate fingerprint: $fingerprint"
-echo 'After reconnecting, open https://wifi.gofro.net'
-echo 'On the VPS, replace the example IP and run: sudo gofro-router-server create-profile --endpoint 203.0.113.10:8443 --tunnel-ip 10.202.0.2/32'
-
+/etc/init.d/gofro-onboarding enable
+/usr/bin/gofro-agent --init-security >/dev/null
 if [ -n "$install_version" ]; then
 	printf '%s\n' "$install_version" > /etc/gofro/install-pending.new
 	chmod 600 /etc/gofro/install-pending.new
 	mv -f /etc/gofro/install-pending.new /etc/gofro/install-pending
 	sync
 fi
+# Do not expose the still-running factory listeners on the passwordless setup AP.
+/etc/init.d/uhttpd stop || { ! /etc/init.d/uhttpd running || die 'failed to stop the factory web panel'; }
+GOFRO_ONBOARDING_FRESH=1 /usr/libexec/gofro/onboarding begin
+/etc/init.d/gofro-onboarding start
 
 (
 	sleep 2

@@ -2,6 +2,7 @@
 set -u
 
 STATE_DIR=${GOFRO_UPDATE_STATE_DIR:-/tmp/gofro}
+ONBOARDING_STATE=${GOFRO_STATE_DIR:-/etc/gofro}/onboarding-state
 TRIGGER=$STATE_DIR/update-request
 RESULT=$STATE_DIR/update-result
 LOG=$STATE_DIR/update.log
@@ -31,6 +32,9 @@ request_update() {
 }
 
 run_update() {
+	if [ -e "${ONBOARDING_STATE:-/etc/gofro/onboarding-state}" ]; then
+		[ "$(cat "${ONBOARDING_STATE:-/etc/gofro/onboarding-state}" 2>/dev/null)" = server ] || return 0
+	fi
 	before=
 	[ ! -r "$VERSION_FILE" ] || IFS= read -r before < "$VERSION_FILE"
 	rm -f "$RESULT" "$RESULT.new"

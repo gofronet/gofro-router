@@ -19,7 +19,7 @@ use openssl::{memcmp, pkcs5, rand::rand_bytes};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
-use crate::AppState;
+use crate::{AppState, onboarding};
 
 const SESSION: &str = "__Host-gofro-session";
 const CSRF: &str = "__Host-gofro-csrf";
@@ -49,6 +49,10 @@ pub(crate) struct PasswordInput {
 struct AuthReply {
     state: &'static str,
     csrf_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setup_method: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setup_window_seconds: Option<u64>,
 }
 
 impl Auth {
@@ -68,6 +72,9 @@ impl Auth {
     }
     fn setup(&self) -> bool {
         !self.password.exists()
+    }
+    pub(crate) fn configured(&self) -> bool {
+        self.password.exists()
     }
     fn issue(&self) -> Result<(String, String)> {
         let mut inner = self
@@ -105,17 +112,30 @@ pub(crate) async fn status(
             .or_else(|_| token())
     };
     match csrf {
-        Ok(csrf) => reply(
-            if state.auth.setup() {
-                "setup"
-            } else if session(&state.auth, &headers).is_ok() {
-                "authenticated"
+        Ok(csrf) => {
+            let setup = state.auth.setup();
+            let fresh = if setup {
+                match onboarding::fresh_admin(&state) {
+                    Ok(value) => value,
+                    Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+                }
             } else {
-                "login"
-            },
-            csrf,
-            None,
-        ),
+                false
+            };
+            reply(
+                if setup {
+                    "setup"
+                } else if session(&state.auth, &headers).is_ok() {
+                    "authenticated"
+                } else {
+                    "login"
+                },
+                csrf,
+                None,
+                setup.then_some(if fresh { "local" } else { "wifi_password" }),
+                fresh.then(|| onboarding::setup_window_seconds(&state)),
+            )
+        }
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }
 }
@@ -138,21 +158,36 @@ pub(crate) async fn setup(
     if !state.auth.setup() {
         return error(StatusCode::CONFLICT, "setup_completed");
     }
-    let Ok(code) = fs::read_to_string(&state.auth.setup_code) else {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, "setup_unavailable");
+    let fresh = match onboarding::fresh_admin(&state) {
+        Ok(value) => value,
+        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     };
-    if !input
-        .setup_code
-        .as_deref()
-        .is_some_and(|input| setup_code_matches(input, &code))
-    {
-        return error(StatusCode::FORBIDDEN, "invalid_setup_code");
+    if fresh {
+        if onboarding::setup_window_seconds(&state) == 0 {
+            return error(StatusCode::FORBIDDEN, "setup_closed");
+        }
+    } else {
+        let Ok(code) = fs::read_to_string(&state.auth.setup_code) else {
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "setup_unavailable");
+        };
+        if !input
+            .setup_code
+            .as_deref()
+            .is_some_and(|input| setup_code_matches(input, &code))
+        {
+            return error(StatusCode::FORBIDDEN, "invalid_setup_code");
+        }
     }
     let auth = state.auth.clone();
+    let state_for_write = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _hashing = hashing;
         write_record(&auth.password, &input.password)?;
-        fs::remove_file(&auth.setup_code)?;
+        if fresh {
+            onboarding::write_wifi(&state_for_write)?;
+        } else {
+            fs::remove_file(&auth.setup_code)?;
+        }
         Ok::<_, anyhow::Error>(())
     })
     .await;
@@ -160,7 +195,7 @@ pub(crate) async fn setup(
         return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
     }
     match state.auth.issue() {
-        Ok((token, csrf)) => reply("authenticated", csrf, Some(token)),
+        Ok((token, csrf)) => reply("authenticated", csrf, Some(token), None, None),
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }
 }
@@ -218,7 +253,7 @@ pub(crate) async fn login(
     }
     drop(hashing);
     match state.auth.issue() {
-        Ok((token, csrf)) => reply("authenticated", csrf, Some(token)),
+        Ok((token, csrf)) => reply("authenticated", csrf, Some(token), None, None),
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }
 }
@@ -237,7 +272,7 @@ pub(crate) async fn logout(State(state): State<AppState>, headers: HeaderMap) ->
         };
         inner.sessions.retain(|item| item.token != token);
     }
-    let mut response = reply("login", token().unwrap_or_default(), None);
+    let mut response = reply("login", token().unwrap_or_default(), None, None, None);
     response.headers_mut().append(
         header::SET_COOKIE,
         HeaderValue::from_static(
@@ -269,6 +304,22 @@ pub(crate) async fn require_auth(
             .is_some_and(|token| constant_time_eq(token, &csrf)))
     {
         return error(StatusCode::FORBIDDEN, "request_rejected");
+    }
+    let Ok(step) = onboarding::step(&state) else {
+        return error(StatusCode::FORBIDDEN, "onboarding_required");
+    };
+    if matches!(
+        step,
+        onboarding::Step::Admin | onboarding::Step::Wifi | onboarding::Step::WifiApplying
+    ) && !matches!(
+        (request.method(), request.uri().path()),
+        (&Method::GET, "/api/status")
+            | (_, "/api/auth/logout")
+            | (_, "/api/onboarding")
+            | (_, "/api/onboarding/wifi")
+            | (_, "/api/onboarding/complete")
+    ) {
+        return error(StatusCode::CONFLICT, "onboarding_required");
     }
     next.run(request).await
 }
@@ -337,10 +388,18 @@ pub(crate) fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     }
     found
 }
-fn reply(state: &'static str, csrf: String, session: Option<String>) -> Response {
+fn reply(
+    state: &'static str,
+    csrf: String,
+    session: Option<String>,
+    setup_method: Option<&'static str>,
+    setup_window_seconds: Option<u64>,
+) -> Response {
     let mut response = Json(AuthReply {
         state,
         csrf_token: csrf.clone(),
+        setup_method,
+        setup_window_seconds,
     })
     .into_response();
     response.headers_mut().append(
@@ -451,6 +510,7 @@ fn write_record(path: &PathBuf, password: &str) -> Result<()> {
     file.write_all(record.as_bytes())?;
     file.sync_all()?;
     fs::rename(temporary, path)?;
+    fs::File::open(path.parent().context("missing credential parent")?)?.sync_all()?;
     Ok(())
 }
 
@@ -673,6 +733,80 @@ mod tests {
                 .status(),
             StatusCode::FORBIDDEN
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn incomplete_onboarding_cannot_fall_back_to_a_legacy_code() {
+        let dir = std::env::temp_dir().join(format!("gofro-claim-closed-{}", token().unwrap()));
+        fs::create_dir(&dir).unwrap();
+        let code = dir.join("ap-password");
+        fs::write(&code, "old-wifi-password").unwrap();
+        let password_path = dir.join("admin-password");
+        let state = test_state(&dir, password_path.clone(), code);
+        let uri = "https://wifi.gofro.net/api/auth/setup".parse().unwrap();
+        let marker = dir.join("onboarding-state");
+        for phase in ["wifi\n", "wifi_applying\n", "server\n", "invalid\n"] {
+            fs::write(&marker, phase).unwrap();
+            fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+            let response = setup_response(
+                &state,
+                &uri,
+                &preauth_headers(),
+                Some("old-wifi-password"),
+                "a valid password",
+            )
+            .await;
+            assert_ne!(response.status(), StatusCode::OK);
+            assert!(!password_path.exists());
+        }
+        fs::write(&marker, "admin\n").unwrap();
+        let response = setup_response(
+            &state,
+            &uri,
+            &preauth_headers(),
+            Some("old-wifi-password"),
+            "a valid password",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(!password_path.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn fresh_setup_claims_one_admin_and_resumes_wifi() {
+        let dir = std::env::temp_dir().join(format!("gofro-fresh-claim-{}", token().unwrap()));
+        fs::create_dir(&dir).unwrap();
+        let password_path = dir.join("admin-password");
+        let state = test_state(&dir, password_path.clone(), dir.join("no-legacy-code"));
+        let marker = dir.join("onboarding-state");
+        fs::write(&marker, "admin\n").unwrap();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+        let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+        let uptime = fs::read_to_string("/proc/uptime").unwrap();
+        let now: u64 = uptime.split('.').next().unwrap().parse().unwrap();
+        let window = dir.join("onboarding-window");
+        fs::write(&window, format!("{} {}\n", boot.trim(), now + 900)).unwrap();
+        fs::set_permissions(&window, fs::Permissions::from_mode(0o600)).unwrap();
+        let uri = "https://wifi.gofro.net/api/auth/setup".parse().unwrap();
+        let headers = preauth_headers();
+        let password = "a fresh admin password";
+        let (first, second) = tokio::join!(
+            setup_response(&state, &uri, &headers, None, password),
+            setup_response(&state, &uri, &headers, None, password),
+        );
+        assert_eq!(
+            [first.status(), second.status()]
+                .iter()
+                .filter(|status| **status == StatusCode::OK)
+                .count(),
+            1
+        );
+        assert!(verify(&read_record(&password_path).unwrap(), password).unwrap());
+        assert_eq!(onboarding::step(&state).unwrap(), onboarding::Step::Wifi);
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "wifi\n");
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

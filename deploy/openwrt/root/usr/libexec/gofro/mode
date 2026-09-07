@@ -5,6 +5,10 @@ DIRECT_MARK=0x10000
 VPN_MARK=0x20000
 MARK_MASK=0x30000
 
+if [ -e /etc/gofro/onboarding-state ]; then
+	/usr/libexec/gofro/onboarding guard
+fi
+
 clear_rules() {
 	while ip rule del pref 90 2>/dev/null; do :; done
 	while ip rule del pref 81 2>/dev/null; do :; done

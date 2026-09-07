@@ -10,6 +10,7 @@ mod geodata;
 mod managed;
 mod model;
 mod network;
+mod onboarding;
 mod routing;
 mod stats;
 mod tls;

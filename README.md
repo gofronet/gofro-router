@@ -60,8 +60,18 @@ tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && uclient-fetch -q -O "$tmp" https:
 tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && curl -fsSL -o "$tmp" https://github.com/gofronet/gofro-router/releases/latest/download/gofro-install-raspios && sudo sh "$tmp" --install RU
 ```
 
-После установки подключитесь к GofroWIFI и откройте
-[wifi.gofro.net](https://wifi.gofro.net). Подробности:
+После установки консоль выводит только имя сети `GofroNET Wi-Fi Setup` и
+`https://wifi.gofro.net`. Подключитесь к этой временной сети без пароля и откройте
+[wifi.gofro.net](https://wifi.gofro.net). Мастер предложит создать пароль панели,
+задать имя и пароль Wi-Fi для доступных диапазонов, затем добавить первый VPN
+через импорт профиля или настройку VPS. Шаг VPN можно пропустить.
+
+Setup-сеть изолирована от интернета и домашней сети и открыта на 15 минут.
+Первый подключившийся пользователь назначает администратора. После настройки
+Wi-Fi переподключитесь к своей защищённой сети и продолжите мастер по тому же
+адресу. Если окно настройки истекло или роутер перезагрузился до настройки Wi-Fi,
+повторите команду установки в консоли: уже заданный пароль панели сохранится.
+Обновление настроенного роутера не включает Setup-сеть. Подробности:
 [OpenWrt](deploy/openwrt/README.md), [Raspberry Pi OS](deploy/raspios/README.md).
 
 ## Схема сети

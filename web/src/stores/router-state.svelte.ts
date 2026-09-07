@@ -8,6 +8,8 @@ import { wifiService } from "../features/wifi/service";
 import type {
   ProfileInput,
   AuthStatus,
+  OnboardingStatus,
+  OnboardingWifiInput,
   RoutingConfig,
   RoutingTest,
   ServerInput,
@@ -23,11 +25,17 @@ export class RouterState {
   private pollInFlight = false;
   private statusVersion = 0;
   private interval: number | null = null;
+  private onboardingInterval: number | null = null;
+  private onboardingInFlight = false;
+  private onboardingVersion = 0;
 
   loading = $state(true);
   authLoading = $state(true);
   authState = $state<AuthStatus["state"]>("login");
   authError = $state("");
+  setupClosed = $state(false);
+  onboardingLoading = $state(false);
+  onboarding = $state<OnboardingStatus | null>(null);
   pollError = $state("");
   actionError = $state("");
   mutation = $state<string | null>(null);
@@ -57,6 +65,8 @@ export class RouterState {
       case "request_rejected": return "Проверка безопасности не пройдена. Обновите страницу и попробуйте снова.";
       case "auth_busy": return "Уже выполняется проверка пароля. Подождите и попробуйте снова.";
       case "setup_completed": return "Пароль уже создан. Обновите страницу и войдите.";
+      case "setup_closed": return "Время настройки истекло; запустите команду установки в консоли роутера повторно.";
+      case "onboarding_required": return "Сначала завершите мастер настройки.";
       case "setup_required": return "Сначала создайте пароль администратора. Обновите страницу.";
       case "login_throttled": return "Слишком частые попытки входа. Подождите секунду.";
       case "session_expired": return "Сессия истекла. Войдите снова.";
@@ -66,17 +76,36 @@ export class RouterState {
   }
 
   private applyAuth = (auth: AuthStatus): void => {
+    this.onboardingVersion++;
     this.authState = auth.state;
+    this.auth = auth;
+    this.setupClosed = false;
     setCsrfToken(auth.csrf_token);
   };
 
+  private auth = $state<AuthStatus | null>(null);
+
+  get setupMethod(): "local" | "wifi_password" | null {
+    return this.auth?.state === "setup" ? this.auth.setup_method : null;
+  }
+
+  get setupWindowSeconds(): number | null {
+    return this.auth?.state === "setup" && this.auth.setup_method === "local"
+      ? this.auth.setup_window_seconds
+      : null;
+  }
+
   private handleAuthError = (error: unknown): boolean => {
     if (!(error instanceof ApiError) || error.status !== 401) return false;
+    this.onboardingVersion++;
     this.statusVersion++;
     this.currentStatus = null;
     this.loading = false;
     this.authState = "login";
+    this.auth = null;
     this.stopPolling();
+    this.stopOnboardingPolling();
+    this.onboarding = null;
     return true;
   };
 
@@ -148,6 +177,55 @@ export class RouterState {
     this.interval = null;
   }
 
+  stop(): void {
+    this.onboardingVersion++;
+    this.stopPolling();
+    this.stopOnboardingPolling();
+  }
+
+  private startOnboardingPolling(): void {
+    if (this.onboardingInterval !== null) return;
+    this.onboardingInterval = window.setInterval(() => void this.loadOnboarding(), 5_000);
+  }
+
+  private stopOnboardingPolling(): void {
+    if (this.onboardingInterval === null) return;
+    window.clearInterval(this.onboardingInterval);
+    this.onboardingInterval = null;
+  }
+
+  loadOnboarding = async (): Promise<void> => {
+    if (this.authState !== "authenticated" || this.onboardingInFlight) return;
+    const version = this.onboardingVersion;
+    this.onboardingInFlight = true;
+    this.onboardingLoading = true;
+    try {
+      const onboarding = await api.onboarding.get();
+      if (version !== this.onboardingVersion || this.authState !== "authenticated") return;
+      this.onboarding = {
+        ...onboarding,
+        error: onboarding.error === "onboarding_failed"
+          ? "Не удалось применить Wi-Fi. Проверьте настройки и попробуйте снова."
+          : onboarding.error,
+      };
+      if (onboarding.step === "wifi_applying") this.startOnboardingPolling();
+      else {
+        this.stopOnboardingPolling();
+        this.reconnectSsid = null;
+      }
+      if (onboarding.step !== "complete") this.stopPolling();
+      if (onboarding.step === "server" && !this.hasStatus) await this.refresh();
+      if (onboarding.step === "complete") this.startPolling();
+    } catch (error) {
+      if (version !== this.onboardingVersion || this.authState !== "authenticated") return;
+      this.handleAuthError(error);
+      this.actionError = this.message(error);
+    } finally {
+      if (version === this.onboardingVersion) this.onboardingLoading = false;
+      this.onboardingInFlight = false;
+    }
+  };
+
   clearActionError = (): void => {
     this.actionError = "";
   };
@@ -159,10 +237,11 @@ export class RouterState {
       const auth = await api.auth.status();
       this.applyAuth(auth);
       this.loading = auth.state === "authenticated";
-      if (auth.state === "authenticated") this.startPolling();
+      if (auth.state === "authenticated") await this.loadOnboarding();
     } catch (error) {
       clearCsrfToken();
       this.authState = "login";
+      this.auth = null;
       this.authError = this.message(error);
       this.loading = false;
     } finally {
@@ -170,17 +249,18 @@ export class RouterState {
     }
   };
 
-  setupAuth = async (setupCode: string, password: string): Promise<boolean> => {
+  setupAuth = async (password: string, setupCode?: string): Promise<boolean> => {
     this.authError = "";
     try {
-      const auth = await api.auth.setup(setupCode, password);
+      const auth = await api.auth.setup(password, setupCode);
       this.applyAuth(auth);
       if (auth.state !== "authenticated") return false;
       this.loading = true;
-      this.startPolling();
+      await this.loadOnboarding();
       return true;
     } catch (error) {
       this.authError = this.message(error);
+      if (error instanceof Error && error.message === "setup_closed") this.setupClosed = true;
       this.handleAuthError(error);
       return false;
     }
@@ -193,7 +273,7 @@ export class RouterState {
       this.applyAuth(auth);
       if (auth.state !== "authenticated") return false;
       this.loading = true;
-      this.startPolling();
+      await this.loadOnboarding();
       return true;
     } catch (error) {
       this.authError = this.message(error);
@@ -211,7 +291,9 @@ export class RouterState {
     }
     this.currentStatus = null;
     this.authState = "login";
-    this.stopPolling();
+    this.auth = null;
+    this.stop();
+    this.onboarding = null;
   };
 
   setMode = async (vpnEnabled: boolean): Promise<void> => {
@@ -307,5 +389,41 @@ export class RouterState {
   resumePolling = async (): Promise<void> => {
     this.reconnectSsid = null;
     await this.refresh();
+  };
+
+  saveOnboardingWifi = async (
+    input: OnboardingWifiInput,
+  ): Promise<"saved" | "reconnect" | "error"> => {
+    if (this.busy) return "error";
+    this.stopPolling();
+    this.mutation = "onboarding-wifi";
+    this.actionError = "";
+    try {
+      this.onboarding = await api.onboarding.wifi(input);
+      this.reconnectSsid = input.networks.map((network) => network.ssid).join(", ");
+      this.startOnboardingPolling();
+      return "saved";
+    } catch (error) {
+      if (error instanceof ApiError && error.status === undefined) {
+        this.reconnectSsid = input.networks.map((network) => network.ssid).join(", ");
+        this.startOnboardingPolling();
+        return "reconnect";
+      }
+      this.handleAuthError(error);
+      this.actionError = this.message(error);
+      return "error";
+    } finally {
+      this.mutation = null;
+    }
+  };
+
+  completeOnboarding = async (): Promise<boolean> => {
+    const result = await this.mutateResult("onboarding-complete", api.onboarding.complete);
+    if (!result) return false;
+    this.onboarding = result;
+    this.reconnectSsid = null;
+    this.stopOnboardingPolling();
+    this.startPolling();
+    return true;
   };
 }

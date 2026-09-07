@@ -36,6 +36,8 @@ grep -Fq 'ln -sf /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf' \
 grep -Fq '/etc/init.d/sysntpd restart' "$ROOT/deploy/openwrt/root/usr/sbin/gofro-setup"
 grep -Fq '/etc/init.d/sysntpd restart' "$ROOT/deploy/openwrt/install.sh"
 grep -Fq '/etc/init.d/gofro-agent disable' "$ROOT/deploy/openwrt/install.sh"
+# shellcheck disable=SC2016
+grep -Fq 'ln -sf "$release/etc/init.d/gofro-recover" "$RC_D/S08gofro-recover"' "$ROOT/deploy/openwrt/install.sh"
 
 # BusyBox and GNU mv support -T; macOS mv does not.
 [ "$(uname -s)" != Darwin ] || exit 0
@@ -46,9 +48,12 @@ trap 'rm -rf "$TMP"' EXIT
 APP_ROOT=$TMP/app
 RELEASES=$APP_ROOT/releases
 CURRENT=$APP_ROOT/current
+RC_D=$TMP/rc.d
 # shellcheck disable=SC2034
 CURRENT_TMP=
-mkdir -p "$RELEASES/0.3.0" "$RELEASES/0.4.0"
+mkdir -p "$RELEASES/0.3.0/etc/init.d" "$RELEASES/0.4.0/etc/init.d" "$RC_D"
+: > "$RELEASES/0.3.0/etc/init.d/gofro-recover"
+: > "$RELEASES/0.4.0/etc/init.d/gofro-recover"
 
 sed -n '/^switch_current() {$/,/^}$/p' "$ROOT/deploy/openwrt/install.sh" > "$TMP/switch-current.sh"
 # shellcheck disable=SC1091
@@ -79,7 +84,6 @@ switch_current "$previous"
 STATE_DIR=$TMP/state
 mkdir "$STATE_DIR"
 printf '%s\n' 0.4.0 > "$STATE_DIR/version"
-printf '%s\n' "$previous" > "$STATE_DIR/update-previous"
 printf '%s\n' 'package uhttpd' > "$STATE_DIR/update-uhttpd"
 cat > "$TMP/uci" <<'EOF'
 #!/bin/sh
@@ -97,8 +101,25 @@ chmod +x "$TMP/uci" "$TMP/uhttpd"
 UCI_COMMAND=$TMP/uci
 UHTTPD_INIT=$TMP/uhttpd
 UCI_IMPORTED=$TMP/uhttpd.imported
-export UCI_COMMAND UHTTPD_INIT UCI_IMPORTED
+RECOVER_INIT=$TMP/recover-init
+cat > "$RECOVER_INIT" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >> "$RECOVER_LOG"
+case "$1" in
+	disable) rm -f "$RC_D/S08gofro-recover" "$RC_D/S89gofro-recover" ;;
+	enable) ln -s "$CURRENT/etc/init.d/gofro-recover" "$RC_D/S89gofro-recover" ;;
+	*) exit 1 ;;
+esac
+EOF
+chmod +x "$RECOVER_INIT"
+RECOVER_LOG=$TMP/recover.log
+export UCI_COMMAND UHTTPD_INIT UCI_IMPORTED RECOVER_INIT RECOVER_LOG RC_D CURRENT
+ln -s "$RELEASES/0.3.0/etc/init.d/gofro-recover" "$RC_D/S89gofro-recover"
 switch_current "$RELEASES/0.4.0"
+ln -s "$RELEASES/0.4.0/etc/init.d/gofro-recover" "$RC_D/S08gofro-recover"
+printf '%s\n' "$previous" > "$STATE_DIR/update-previous"
+[ "$(readlink "$RC_D/S08gofro-recover")" = "$RELEASES/0.4.0/etc/init.d/gofro-recover" ]
+[ -e "$STATE_DIR/update-previous" ]
 sed -n '/^recover_update() {$/,/^}$/p' \
 	"$ROOT/deploy/openwrt/root/etc/init.d/gofro-recover" > "$TMP/recover-update.sh"
 # shellcheck disable=SC1091
@@ -109,6 +130,12 @@ recover_update
 [ ! -e "$STATE_DIR/update-previous" ]
 [ ! -e "$STATE_DIR/update-uhttpd" ]
 grep -Fxq 'package uhttpd' "$UCI_IMPORTED"
+[ "$(readlink -f "$RC_D/S89gofro-recover")" = "$RELEASES/0.3.0/etc/init.d/gofro-recover" ]
+[ ! -e "$RC_D/S08gofro-recover" ]
+[ "$(cat "$RECOVER_LOG")" = "$(printf '%s\n' disable enable)" ]
+rm -rf "$RELEASES/0.4.0"
+[ "$(readlink -f "$RC_D/S89gofro-recover")" = "$RELEASES/0.3.0/etc/init.d/gofro-recover" ]
+mkdir "$RELEASES/0.4.0"
 
 # A snapshot left after the pending marker was committed is no longer rollback state.
 printf '%s\n' 'package uhttpd' > "$STATE_DIR/update-uhttpd"

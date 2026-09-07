@@ -1,0 +1,105 @@
+#!/bin/sh
+set -eu
+
+STATE_DIR=${GOFRO_STATE_DIR:-/etc/gofro}; STATE=$STATE_DIR/onboarding-state; WINDOW=$STATE_DIR/onboarding-window; PENDING=$STATE_DIR/onboarding-wifi.json
+NOT_BEFORE=$STATE_DIR/onboarding-not-before; ERROR=$STATE_DIR/onboarding-error; LOCK=${GOFRO_APPLY_LOCK:-/run/gofro-onboarding-apply.lock}
+KEYFILE_DIR=${GOFRO_NM_KEYFILE_DIR:-/etc/NetworkManager/system-connections}; KEYFILE=$KEYFILE_DIR/gofro-ap.nmconnection; SETUP_KEYFILE=$STATE_DIR/onboarding-ap.nmconnection; UUID_FILE=$STATE_DIR/onboarding-ap-uuid
+NMCLI=${GOFRO_NMCLI_COMMAND:-nmcli}; NFT=${GOFRO_NFT_COMMAND:-nft}
+mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+
+stage() { umask 077; printf '%s\n' "$1" > "$STATE.new" || return 1; chmod 600 "$STATE.new" || return 1; mv -f "$STATE.new" "$STATE" || return 1; sync; }
+state() { [ -e "$STATE" ] || return 1; IFS= read -r value < "$STATE" || return 1; printf '%s\n' "$value"; }
+boot_id() { printf '%s\n' "${GOFRO_BOOT_ID:-$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)}"; }
+uptime() { printf '%s\n' "${GOFRO_UPTIME:-$(cut -d. -f1 /proc/uptime 2>/dev/null || true)}"; }
+remove_guard() { "$NFT" delete table inet gofro_setup >/dev/null 2>&1 || true; }
+firewall() {
+	# Keep replacement in one nft transaction: an existing open AP never sees a guard-less gap.
+	if "$NFT" list table inet gofro_setup >/dev/null 2>&1; then delete='delete table inet gofro_setup'; else delete=; fi
+	{ [ -z "$delete" ] || printf '%s\n' "$delete"; cat <<'EOF'; } | "$NFT" -f -
+table inet gofro_setup {
+ chain input { type filter hook input priority -10; iifname != "wlan0" ip daddr 10.203.1.1 drop; iifname "wlan0" udp dport { 53, 67, 68 } accept; iifname "wlan0" tcp dport { 53, 80, 443 } accept; iifname "wlan0" drop; }
+ chain forward { type filter hook forward priority -10; iifname "wlan0" drop; oifname "wlan0" drop; }
+}
+EOF
+}
+closed() {
+	if ! firewall; then "$NMCLI" connection down gofro-ap >/dev/null 2>&1 || true; return 1; fi
+	"$NMCLI" connection down gofro-ap >/dev/null 2>&1 || true
+}
+valid_window() {
+	[ -s "$WINDOW" ] || return 1; IFS=' ' read -r boot deadline extra < "$WINDOW" || return 1; [ -z "${extra:-}" ] || return 1
+	case "$boot:$deadline" in ????????-????-????-????-????????????:[0-9]*) ;; *) return 1;; esac
+	case "$deadline" in *[!0-9]*|'') return 1;; esac; [ "${#deadline}" -le 9 ] || return 1
+	now=$(uptime); case "$now" in ''|*[!0-9]*) return 1;; esac
+	[ "$(boot_id)" = "$boot" ] && [ "$now" -lt "$deadline" ] && [ "$((deadline - now))" -le 900 ]
+}
+escape_keyfile() { sed 's/\\/\\\\/g; s/^ /\\s/; s/ $/\\s/'; }
+profile_uuid() {
+	if [ -s "$UUID_FILE" ]; then IFS= read -r uuid < "$UUID_FILE"; else uuid=$(sed -n 's/^uuid=//p' "$KEYFILE" 2>/dev/null | sed -n '1p'); [ -n "$uuid" ] || uuid=$("$NMCLI" --terse --escape no --get-values connection.uuid connection show gofro-ap 2>/dev/null || true); fi
+	case "$uuid" in ????????-????-????-????-????????????) printf '%s\n' "$uuid";; *) uuid=${GOFRO_PROFILE_UUID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)}; case "$uuid" in ????????-????-????-????-????????????) ;; *) return 1;; esac; umask 077; printf '%s\n' "$uuid" > "$UUID_FILE.new" || return 1; chmod 600 "$UUID_FILE.new" || return 1; mv -f "$UUID_FILE.new" "$UUID_FILE" || return 1; printf '%s\n' "$uuid";; esac
+}
+write_profile() {
+	ssid=$1 password=$2 secure=$3; uuid=$(profile_uuid) || return 1; mkdir -p "$KEYFILE_DIR" || return 1; umask 077
+	ssid_escaped=$(printf '%s' "$ssid" | escape_keyfile) || return 1
+	{
+		printf '%s\n' '[connection]' 'id=gofro-ap' "uuid=$uuid" 'type=wifi' 'interface-name=wlan0' 'autoconnect=false'
+		printf '%s\n' '[wifi]' "ssid=$ssid_escaped" 'mode=ap' 'band=a' 'channel=36' 'ap-isolation=1'
+		printf '%s\n' '[ipv4]' 'method=manual' 'address1=10.203.1.1/24' 'never-default=true' '[ipv6]' 'method=disabled'
+		[ "$secure" != 1 ] || printf '%s\n' '[wifi-security]' 'key-mgmt=wpa-psk' "psk=$(printf '%s' "$password" | escape_keyfile)"
+	} > "$KEYFILE.new" || return 1
+	chmod 600 "$KEYFILE.new" || return 1; mv -f "$KEYFILE.new" "$KEYFILE" || return 1; "$NMCLI" connection load "$KEYFILE" >/dev/null || return 1
+}
+open_profile() { write_profile 'GofroNET Wi-Fi Setup' '' 0 || return 1; cp "$KEYFILE" "$SETUP_KEYFILE" || return 1; chmod 600 "$SETUP_KEYFILE"; }
+restore_setup() { [ -s "$SETUP_KEYFILE" ] || return 1; cp "$SETUP_KEYFILE" "$KEYFILE" || return 1; chmod 600 "$KEYFILE" || return 1; "$NMCLI" connection load "$KEYFILE" >/dev/null || return 1; "$NMCLI" connection up gofro-ap >/dev/null; }
+fail_wifi() { firewall || return 1; if valid_window; then restore_setup >/dev/null 2>&1 || closed || true; else closed; fi; stage wifi || return 1; printf '%s\n' 'wifi-apply-failed' > "$ERROR" || return 1; chmod 600 "$ERROR"; }
+profile_secure() {
+	[ "$("$NMCLI" --terse --escape no --get-values 802-11-wireless-security.key-mgmt connection show gofro-ap)" = wpa-psk ] || return 1
+	[ -n "$("$NMCLI" --show-secrets --terse --escape no --get-values 802-11-wireless-security.psk connection show gofro-ap)" ]
+}
+profile_secure_active() {
+	"$NMCLI" --terse --fields NAME connection show --active | grep -Fxq gofro-ap || return 1
+	profile_secure
+}
+begin() {
+	if [ -e "$STATE" ]; then current=$(state 2>/dev/null) || { closed; return 1; }; else current=; fi
+	[ ! -e "$STATE" ] || { case "$current" in admin|wifi) ;; *) closed; return 1;; esac; }
+	case "$current" in
+		admin) [ ! -e "$STATE_DIR/admin-password" ] || stage wifi || return 1 ;;
+		wifi) ;;
+		'') [ "${GOFRO_ONBOARDING_FRESH:-}" = 1 ] || return 0; [ ! -e "$STATE_DIR/admin-password" ] && [ ! -e "$STATE_DIR/version" ] && [ ! -e "$STATE_DIR/ap-password" ] || { closed; return 1; }; stage admin || return 1 ;;
+		*) closed; return 1 ;;
+	esac
+	if valid_window; then firewall || return 1; "$NMCLI" connection up gofro-ap >/dev/null; return; fi
+	[ ! -e "$WINDOW" ] || { closed; return 1; }
+	boot=$(boot_id); now=$(uptime); case "$boot:$now" in ????????-????-????-????-????????????:[0-9]*) ;; *) return 1;; esac; [ "${#now}" -le 9 ] || return 1
+	firewall || return 1
+	umask 077; printf '%s %s\n' "$boot" "$((now + 900))" > "$WINDOW.new" || return 1; chmod 600 "$WINDOW.new" || return 1; mv -f "$WINDOW.new" "$WINDOW" || return 1
+	open_profile || return 1; "$NMCLI" connection up gofro-ap >/dev/null
+}
+validate() { jq -e 'type=="object" and (.networks|type=="array" and length==1 and .[0].band=="5g") and (.networks[0]|keys|sort)==["band","password","ssid"] and (.networks[0].ssid|type=="string" and utf8bytelength>=1 and utf8bytelength<=32 and test("^[^[:cntrl:]]+$")) and (.networks[0].password|type=="string" and test("^[ -~]{8,63}$"))' "$1" >/dev/null; }
+valid_ssid() { printf '%s' "$1" | jq -eRs 'utf8bytelength>=1 and utf8bytelength<=32 and test("^[^[:cntrl:]]+$")' >/dev/null; }
+wifi() { case "$(state 2>/dev/null || true)" in admin|wifi) ;; *) return 1;; esac; [ -s "$STATE_DIR/admin-password" ] && valid_window || return 1; umask 077; cat > "$PENDING.new"; validate "$PENDING.new" || { rm -f "$PENDING.new"; return 1; }; mv -f "$PENDING.new" "$PENDING" || return 1; now=$(uptime); case "$now" in *[!0-9]*|'') return 1;; esac; printf '%s\n' "$((now + 3))" > "$NOT_BEFORE.new" || return 1; chmod 600 "$NOT_BEFORE.new" || return 1; mv -f "$NOT_BEFORE.new" "$NOT_BEFORE" || return 1; rm -f "$ERROR"; stage wifi_applying; }
+apply() {
+	[ "$(state 2>/dev/null || true)" = wifi_applying ] || return 0; valid_window || { closed; stage wifi; rm -f "$WINDOW"; return 1; }
+	[ -s "$NOT_BEFORE" ] || { fail_wifi; return 1; }; IFS= read -r due < "$NOT_BEFORE"; now=$(uptime); case "$due:$now" in *[!0-9:]*|:) fail_wifi; return 1;; esac; [ "$now" -ge "$due" ] || return 0
+	mkdir -p "$(dirname "$LOCK")" || return 1
+	umask 077
+	exec 9>"$LOCK" || return 1
+	flock -n 9 || return 0
+	trap 'exit 1' HUP INT TERM
+	validate "$PENDING" || { fail_wifi; return 1; }; ssid=$(jq -r '.networks[0].ssid' "$PENDING") password=$(jq -r '.networks[0].password' "$PENDING")
+	if ! write_profile "$ssid" "$password" 1 || ! "$NMCLI" connection up gofro-ap >/dev/null || ! profile_secure_active; then fail_wifi; return 1; fi
+	stage server || return 1
+	remove_guard; rm -f "$PENDING" "$SETUP_KEYFILE" "$NOT_BEFORE" "$ERROR" "$WINDOW" || return 1
+}
+set_wifi() {
+	[ "$#" = 2 ] && [ "$1" = 5g ] || return 2; IFS= read -r password || password=; valid_ssid "$2" || return 1
+	if [ -z "$password" ]; then password=$("$NMCLI" --show-secrets --terse --escape no --get-values 802-11-wireless-security.psk connection show gofro-ap) || return 1; else printf '%s' "$password" | jq -eRs 'test("^[ -~]{8,63}$")' >/dev/null || return 1; fi
+	[ -n "$password" ] || return 1; cp "$KEYFILE" "$KEYFILE.rollback" || return 1
+	if ! write_profile "$2" "$password" 1; then mv -f "$KEYFILE.rollback" "$KEYFILE" || return 1; "$NMCLI" connection load "$KEYFILE" >/dev/null || return 1; return 1; fi
+	rm -f "$KEYFILE.rollback"
+}
+complete() { [ -e "$STATE" ] || return 0; [ "$(state 2>/dev/null || true)" = server ] || return 1; profile_secure_active || return 1; rm -f "$STATE" "$WINDOW" "$PENDING" "$NOT_BEFORE" "$ERROR" "$SETUP_KEYFILE"; sync; }
+watch() { current=$(state 2>/dev/null || true); case "$current" in admin|wifi) valid_window || closed;; wifi_applying) apply || true;; server|'') profile_secure || closed;; *) closed;; esac; }
+network() { case "$(state 2>/dev/null || true)" in admin|wifi) valid_window || { closed; return 0; }; firewall || return 1; "$NMCLI" connection up gofro-ap >/dev/null;; wifi_applying) firewall; valid_window || closed;; server|'') if profile_secure; then "$NMCLI" connection up gofro-ap >/dev/null; remove_guard; else closed; fi;; *) closed;; esac; }
+case "${1:-}" in begin|wifi|apply|complete|watch|network) [ "$#" = 1 ] || exit 2; "$1";; set) shift; set_wifi "$@";; close) closed;; *) exit 2;; esac

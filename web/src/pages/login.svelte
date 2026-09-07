@@ -1,10 +1,26 @@
 <script lang="ts">
   import { getAppContext } from "../app-context";
+  import { onMount } from "svelte";
   import PasswordInput from "../components/password-input.svelte";
 
   const app = getAppContext();
   const authState = $derived(app.authState);
   const authError = $derived(app.authError);
+  const setupMethod = $derived(app.setupMethod);
+  const setupWindowSeconds = $derived(app.setupWindowSeconds);
+  let now = $state(Date.now());
+  let deadline = $state<number | null>(null);
+  $effect(() => {
+    deadline = setupMethod === "local" && setupWindowSeconds !== null
+      ? Date.now() + setupWindowSeconds * 1_000
+      : null;
+  });
+  onMount(() => {
+    const interval = window.setInterval(() => now = Date.now(), 1_000);
+    return () => window.clearInterval(interval);
+  });
+  const setupSecondsLeft = $derived(deadline === null ? null : Math.max(0, Math.ceil((deadline - now) / 1_000)));
+  const setupExpired = $derived(app.setupClosed || (authState === "setup" && setupMethod === "local" && (setupWindowSeconds === 0 || setupSecondsLeft === 0)));
   let setupCode = $state("");
   let password = $state("");
   let confirmation = $state("");
@@ -14,9 +30,9 @@
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (submitting) return;
-    if (!password || (authState === "setup" && (!setupCode || password !== confirmation))) {
+    if (!password || (authState === "setup" && ((setupMethod === "wifi_password" && !setupCode) || password !== confirmation))) {
       validationError = authState === "setup"
-        ? "Введите пароль Wi-Fi и два одинаковых пароля администратора."
+        ? setupMethod === "wifi_password" ? "Введите пароль Wi-Fi и два одинаковых пароля администратора." : "Введите два одинаковых пароля администратора."
         : "Введите пароль администратора.";
       return;
     }
@@ -32,7 +48,7 @@
     submitting = true;
     try {
       const success = authState === "setup"
-        ? await app.setupAuth(setupCode, password)
+        ? await app.setupAuth(password, setupMethod === "wifi_password" ? setupCode : undefined)
         : await app.loginAuth(password);
       if (success) {
         setupCode = "";
@@ -55,10 +71,12 @@
   <section class="mx-auto flex w-full min-w-0 max-w-md flex-col justify-center py-3 lg:px-4">
     <span class="mb-5 flex size-10 shrink-0 items-end justify-center gap-1 rounded-xl bg-[#09090b] p-2.5 lg:hidden"><i class="h-1.5 w-1 rounded-sm bg-white"></i><i class="h-3 w-1 rounded-sm bg-white"></i><i class="h-5 w-1 rounded-sm bg-white"></i></span>
     <span class="text-xs font-bold tracking-[0.18em] text-[#74747d] uppercase">Безопасный доступ</span>
-    <h1 class="mt-2 text-3xl leading-tight font-extrabold tracking-[-0.06em] sm:text-4xl">{authState === "setup" ? "Создайте пароль" : "Войдите"}</h1>
-    <p class="mt-3 text-sm leading-relaxed text-[#74747d]">{authState === "setup" ? "Подтвердите текущий пароль Wi-Fi роутера и задайте отдельный пароль администратора." : "Введите пароль администратора для управления роутером."}</p>
+     {#if authState === "setup" && setupMethod === "local"}<ol class="mt-4 grid grid-cols-3 gap-1 text-[0.62rem] font-bold text-[#74747d]"><li class="border-b-2 border-[#09090b] pb-2 text-[#09090b]">1. Администратор</li><li class="border-b-2 border-[#dedee1] pb-2">2. Wi-Fi</li><li class="border-b-2 border-[#dedee1] pb-2">3. VPN</li></ol>{/if}
+     <h1 class="mt-2 text-3xl leading-tight font-extrabold tracking-[-0.06em] sm:text-4xl">{authState === "setup" ? "Создайте пароль" : "Войдите"}</h1>
+     <p class="mt-3 text-sm leading-relaxed text-[#74747d]">{authState === "setup" ? setupMethod === "wifi_password" ? "Подтвердите текущий пароль Wi-Fi роутера и задайте отдельный пароль администратора." : "Задайте отдельный пароль администратора для этого роутера." : "Введите пароль администратора для управления роутером."}</p>
+     {#if authState === "setup" && setupMethod === "local" && setupSecondsLeft !== null}<p class="mt-2 text-xs text-[#74747d]">Окно настройки: {Math.floor(setupSecondsLeft / 60)}:{String(setupSecondsLeft % 60).padStart(2, "0")}</p>{/if}
     <form class="mt-5 grid gap-3" onsubmit={submit}>
-      {#if authState === "setup"}
+       {#if authState === "setup" && setupMethod === "wifi_password"}
         <PasswordInput label="Пароль Wi-Fi" bind:value={setupCode} required autocomplete="off" disabled={submitting} />
       {/if}
       <div>
@@ -67,7 +85,8 @@
       </div>
       {#if authState === "setup"}<PasswordInput label="Повторите пароль" bind:value={confirmation} required minlength={12} maxlength={128} autocomplete="new-password" disabled={submitting} />{/if}
       {#if validationError || authError}<p class="m-0 rounded-2xl border border-red-200 bg-red-50 p-3 text-xs leading-relaxed text-red-700" role="alert">{validationError || authError}</p>{/if}
-      <button class="mt-1 min-h-12 rounded-2xl border border-[#09090b] bg-[#09090b] px-5 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60" type="submit" disabled={submitting}>{submitting ? "Проверяем…" : authState === "setup" ? "Создать пароль" : "Войти"}</button>
+       {#if setupExpired}<p class="m-0 rounded-2xl border border-red-200 bg-red-50 p-3 text-xs leading-relaxed text-red-700" role="alert">Время настройки истекло; запустите команду установки в консоли роутера повторно.</p>{/if}
+       <button class="mt-1 min-h-12 rounded-2xl border border-[#09090b] bg-[#09090b] px-5 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60" type="submit" disabled={submitting || setupExpired}>{submitting ? "Проверяем…" : authState === "setup" ? "Создать пароль" : "Войти"}</button>
     </form>
     {#if authError}<button class="mt-2 min-h-11 text-sm font-bold text-[#74747d]" type="button" disabled={submitting} onclick={app.initializeAuth}>Повторить проверку</button>{/if}
     <details class="mt-4 text-xs leading-relaxed text-[#74747d]"><summary class="cursor-pointer py-2">О предупреждении HTTPS</summary><p class="mt-1">У роутера собственный сертификат. Подтверждайте исключение только для вашего устройства. Пароли передаются по HTTPS.</p></details>

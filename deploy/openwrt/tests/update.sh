@@ -6,6 +6,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 sed -n \
+	-e '/^setup_pending() {$/,/^}$/p' \
 	-e '/^write_result() {$/,/^}$/p' \
 	-e '/^request_update() {$/,/^}$/p' \
 	-e '/^run_update() {$/,/^}$/p' \
@@ -28,6 +29,8 @@ SERVICE=$TMP/service
 # Referenced by the sourced request helper.
 # shellcheck disable=SC2034
 LOCK=$TMP/lock
+# shellcheck disable=SC2034
+ONBOARDING=$TMP/onboarding-state
 mkdir "$STATE_DIR"
 printf '%s\n' 0.4.2 > "$VERSION_FILE"
 

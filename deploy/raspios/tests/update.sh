@@ -54,3 +54,9 @@ EOF
 chmod +x "$UPDATE"
 run_update
 [ "$(cat "$RESULT")" = updated ]
+
+ONBOARDING_STATE=$TMP/onboarding-state
+printf '%s\n' wifi > "$ONBOARDING_STATE"
+rm -f "$RESULT"
+run_update
+[ ! -e "$RESULT" ]

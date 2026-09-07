@@ -13,7 +13,9 @@ pub(crate) fn update_access_point(state: &AppState, input: ApInput) -> Result<()
         .password
         .as_deref()
         .filter(|password| !password.is_empty());
-    if password.is_some_and(|password| !(8..=63).contains(&password.len())) {
+    if password.is_some_and(|password| {
+        !(8..=63).contains(&password.len()) || password.chars().any(char::is_control)
+    }) {
         bail!("пароль Wi-Fi должен содержать от 8 до 63 символов");
     }
     let _guard = state
