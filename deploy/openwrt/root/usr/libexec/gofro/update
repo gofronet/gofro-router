@@ -13,12 +13,19 @@ LOCK=${GOFRO_UPDATE_LOCK:-/tmp/gofro-update.lock}
 CHECK_INTERVAL=${GOFRO_UPDATE_CHECK_INTERVAL:-21600}
 START_DELAY=${GOFRO_UPDATE_START_DELAY:-300}
 POLL_INTERVAL=${GOFRO_UPDATE_POLL_INTERVAL:-5}
+ONBOARDING=${GOFRO_ONBOARDING_STATE:-/etc/gofro/onboarding-state}
+
+setup_pending() {
+	[ -e "$ONBOARDING" ] || return 1
+	[ "$(cat "$ONBOARDING" 2>/dev/null)" != server ]
+}
 
 write_result() {
 	printf '%s\n' "$1" > "$RESULT.new" && mv -f "$RESULT.new" "$RESULT"
 }
 
 request_update() {
+	! setup_pending || return 1
 	mkdir -p "$STATE_DIR"
 	[ ! -e "$LOCK" ] || return 0
 	[ ! -e "$TRIGGER" ] || return 0
@@ -59,8 +66,10 @@ mkdir -p "$STATE_DIR"
 delay=$START_DELAY
 while :; do
 	if [ -e "$TRIGGER" ] || [ "$delay" -le 0 ]; then
-		run_update
-		delay=$CHECK_INTERVAL
+		if ! setup_pending; then
+			run_update
+			delay=$CHECK_INTERVAL
+		fi
 	fi
 	sleep "$POLL_INTERVAL"
 	delay=$((delay - POLL_INTERVAL))

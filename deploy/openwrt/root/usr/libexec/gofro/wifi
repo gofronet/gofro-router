@@ -2,9 +2,11 @@
 set -eu
 
 STATE_DIR=${GOFRO_STATE_DIR:-/etc/gofro}
+UCI=${GOFRO_UCI_COMMAND:-uci}
+WIFI=${GOFRO_WIFI_COMMAND:-wifi}
 
 usage() {
-	echo "Usage: $0 list | set BAND SSID [PASSWORD]" >&2
+	echo "Usage: $0 list | set BAND SSID (password on stdin; empty retains)" >&2
 	exit 2
 }
 
@@ -12,12 +14,13 @@ case "${1:-}" in
 	list)
 		[ "$#" = 1 ] || usage
 		found=0
-		for section in $(uci show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
-			[ "$(uci -q get "wireless.$section.mode" || true)" = ap ] || continue
-			device="$(uci -q get "wireless.$section.device" || true)"
-			band="$(uci -q get "wireless.$device.band" || true)"
+		for section in $("$UCI" show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+			[ "$section" != gofro_setup ] || continue
+			[ "$("$UCI" -q get "wireless.$section.mode" || true)" = ap ] || continue
+			device="$("$UCI" -q get "wireless.$section.device" || true)"
+			band="$("$UCI" -q get "wireless.$device.band" || true)"
 			case "$band" in 2g|5g) ;; *) continue ;; esac
-			ssid="$(uci -q get "wireless.$section.ssid" || true)"
+			ssid="$("$UCI" -q get "wireless.$section.ssid" || true)"
 			[ -n "$ssid" ] || continue
 			printf '%s\t%s\n' "$band" "$ssid"
 			found=1
@@ -25,33 +28,48 @@ case "${1:-}" in
 		[ "$found" = 1 ] || { echo 'No supported OpenWrt access point found' >&2; exit 1; }
 		exit 0
 		;;
-	set)
-		{ [ "$#" = 3 ] || [ "$#" = 4 ]; } || usage
+	set|stage)
+		[ "$#" = 3 ] || usage
 		case "$2" in 2g|5g|all) ;; *) usage ;; esac
+		IFS= read -r password || password=
 		;;
 	*) usage ;;
 esac
 
 found=0
-for section in $(uci show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
-	[ "$(uci -q get "wireless.$section.mode" || true)" = ap ] || continue
-	device="$(uci -q get "wireless.$section.device" || true)"
-	band="$(uci -q get "wireless.$device.band" || true)"
+if [ -n "$password" ]; then
+	[ "${#password}" -ge 8 ] && [ "${#password}" -le 63 ] || exit 1
+	if printf %s "$password" | LC_ALL=C grep -q '[[:cntrl:]]'; then exit 1; fi
+fi
+[ -n "$3" ] && [ "$(printf %s "$3" | wc -c)" -le 32 ] || exit 1
+if printf %s "$3" | LC_ALL=C grep -q '[[:cntrl:]]'; then exit 1; fi
+ssid_quoted=$(printf %s "$3" | sed 's/\\/\\\\/g; s/"/\\"/g')
+password_quoted=$(printf %s "$password" | sed 's/\\/\\\\/g; s/"/\\"/g')
+for section in $("$UCI" show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+	[ "$section" != gofro_setup ] || continue
+	[ "$("$UCI" -q get "wireless.$section.mode" || true)" = ap ] || continue
+	device="$("$UCI" -q get "wireless.$section.device" || true)"
+	band="$("$UCI" -q get "wireless.$device.band" || true)"
 	case "$band" in 2g|5g) ;; *) continue ;; esac
 	[ "$2" = all ] || [ "$band" = "$2" ] || continue
-	uci set "wireless.$section.ssid=$3"
-	if [ "$#" = 4 ]; then
-		uci set "wireless.$section.encryption=sae-mixed"
-		uci set "wireless.$section.key=$4"
+	"$UCI" batch <<EOF
+set wireless.$section.ssid="$ssid_quoted"
+EOF
+	if [ -n "$password" ]; then
+		"$UCI" batch <<EOF
+set wireless.$section.encryption=sae-mixed
+set wireless.$section.key="$password_quoted"
+EOF
 	fi
 	found=1
 done
 [ "$found" = 1 ] || { echo "No OpenWrt $2 access point found" >&2; exit 1; }
 
-uci commit wireless
-if [ "$#" = 4 ] && [ ! -e "$STATE_DIR/admin-password" ]; then
-	printf '%s\n' "$4" > "$STATE_DIR/ap-password.new"
+[ "$1" != stage ] || exit 0
+"$UCI" commit wireless
+if [ -n "$password" ] && [ ! -e "$STATE_DIR/admin-password" ] && [ ! -e "$STATE_DIR/onboarding-state" ]; then
+	printf '%s\n' "$password" > "$STATE_DIR/ap-password.new"
 	chmod 600 "$STATE_DIR/ap-password.new"
 	mv -f "$STATE_DIR/ap-password.new" "$STATE_DIR/ap-password"
 fi
-(sleep 2; wifi reload) >/dev/null 2>&1 &
+(sleep 2; "$WIFI" reload) >/dev/null 2>&1 &

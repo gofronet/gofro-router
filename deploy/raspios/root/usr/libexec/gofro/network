@@ -10,6 +10,7 @@ MODE=${GOFRO_MODE_COMMAND:-/usr/libexec/gofro/mode}
 NMCLI=${GOFRO_NMCLI_COMMAND:-nmcli}
 IW=${GOFRO_IW_COMMAND:-iw}
 COUNTRY_FILE=${GOFRO_WIFI_COUNTRY_FILE:-/etc/gofro/wifi-country}
+ONBOARDING=${GOFRO_ONBOARDING_COMMAND:-/usr/libexec/gofro/onboarding}
 
 IFS= read -r country < "$COUNTRY_FILE"
 case "$country" in [A-Z][A-Z]) ;; *) echo 'Invalid Wi-Fi country' >&2; exit 1 ;; esac
@@ -18,4 +19,8 @@ case "$country" in [A-Z][A-Z]) ;; *) echo 'Invalid Wi-Fi country' >&2; exit 1 ;;
 ip route replace 10.203.1.0/24 dev wlan0 table 100
 ip route replace unreachable default table 100 metric 32767
 "$MODE" vpn
-"$NMCLI" connection up gofro-ap >/dev/null
+if [ -x "$ONBOARDING" ]; then
+	"$ONBOARDING" network
+else
+	"$NMCLI" connection up gofro-ap >/dev/null
+fi

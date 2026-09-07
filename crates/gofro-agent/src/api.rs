@@ -22,7 +22,7 @@ use crate::{
         ServerStatus, ServerUpdate, UpdateInput, UpdateResult, UpdateStatus,
     },
     network::service_active,
-    stats, wifi,
+    onboarding, stats, wifi,
 };
 
 const UI: &str = include_str!("../../../assets/index.html");
@@ -79,6 +79,9 @@ pub(crate) fn secure_router(state: AppState) -> Router {
 fn private_router() -> Router<AppState> {
     Router::new()
         .route("/api/auth/logout", post(auth::logout))
+        .route("/api/onboarding", get(onboarding_status))
+        .route("/api/onboarding/wifi", post(onboarding_wifi))
+        .route("/api/onboarding/complete", post(onboarding_complete))
         .route("/api/status", get(status))
         .route("/api/update", post(start_update))
         .route("/api/mode", post(set_mode))
@@ -281,6 +284,43 @@ fn parse_quality(value: &str) -> Option<u16> {
 
 async fn status(State(state): State<AppState>) -> Result<Json<AgentStatus>, ApiError> {
     run_blocking(state, |_| Ok(())).await
+}
+
+async fn onboarding_status(
+    State(state): State<AppState>,
+) -> Result<Json<onboarding::Status>, ApiError> {
+    tokio::task::spawn_blocking(move || onboarding::status(&state).map(Json))
+        .await
+        .context("onboarding status task failed")
+        .map_err(ApiError)?
+        .map_err(|_| ApiError(anyhow!("onboarding unavailable")))
+}
+async fn onboarding_wifi(
+    State(state): State<AppState>,
+    Json(input): Json<onboarding::WifiInput>,
+) -> Response {
+    match tokio::task::spawn_blocking(move || onboarding::submit_wifi(&state, input)).await {
+        Ok(Ok(status)) => Json(status).into_response(),
+        Ok(Err(error)) if error.to_string() == "setup_closed" => onboarding_error("setup_closed"),
+        _ => onboarding_error("onboarding_rejected"),
+    }
+}
+async fn onboarding_complete(
+    State(state): State<AppState>,
+) -> Result<Json<onboarding::Status>, ApiError> {
+    tokio::task::spawn_blocking(move || onboarding::complete(&state).map(Json))
+        .await
+        .context("onboarding completion task failed")
+        .map_err(ApiError)?
+        .map_err(|_| ApiError(anyhow!("onboarding completion rejected")))
+}
+fn onboarding_error(code: &'static str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({"error": code})),
+    )
+        .into_response()
 }
 
 async fn start_update(

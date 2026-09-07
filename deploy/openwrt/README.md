@@ -30,14 +30,34 @@ country and run:
 tmp="$(mktemp)" && trap 'rm -f "$tmp"' EXIT && uclient-fetch -q -O "$tmp" https://github.com/gofronet/gofro-router/releases/latest/download/gofro-install && sh "$tmp" --install DE
 ```
 
-The bootstrap downloads the signed release manifest, verifies the archive, adds
-the required OpenWrt packages, changes the LAN address to `10.203.1.1`, and
-prints the generated Wi-Fi password. Reconnect to `GofroWIFI 2` or, when the
-router has a 5 GHz radio, `GofroWIFI 5`, then open `https://wifi.gofro.net`.
-Confirm the router's HTTPS certificate, then use the current Wi-Fi password to
-create an administrator password of at least 12 characters.
+The bootstrap verifies a signed bundle and installs the required packages.
+Successful installation prints only:
+
+```text
+GofroNET Wi-Fi Setup
+https://wifi.gofro.net
+```
+
+Connect to this passwordless setup network and open the URL. It is isolated from
+the internet, the home LAN, and the router's SSH/LuCI services. The setup window
+lasts 15 minutes; the first nearby user to create an administrator password owns
+the device. Confirm the router's self-signed HTTPS certificate before proceeding.
+
+1. Create an administrator password of at least 12 characters.
+2. Choose separate SSIDs and passwords for the available 2.4/5 GHz access points.
+3. Reconnect to a new secured SSID, reopen the URL, and import a VPN profile or
+   configure your VPS. You can skip this step and add a server later.
+
+All bands are saved together, so changing the first band cannot interrupt the
+second. Setup progress survives reloads; after a lost session, sign in again.
+The open setup AP closes on expiry or reboot. Repeat the same installation
+command to re-arm an incomplete setup without resetting the admin password.
+Installer details are retained in a root-only `/tmp/gofro-install.*` log, never
+printed credentials. Updates preserve existing Wi-Fi and do not start this wizard;
+older installations without an admin password retain Wi-Fi-password verification.
+
 LuCI remains available at `http://10.203.1.1:81` or
-`https://10.203.1.1:444` with its self-signed certificate.
+`https://10.203.1.1:444` after Wi-Fi setup, with its self-signed certificate.
 
 The bundle contains the complete GeoSite and GeoIP databases.
 

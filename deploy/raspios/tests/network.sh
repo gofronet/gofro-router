@@ -26,16 +26,20 @@ cat > "$TMP/iw" <<'EOF'
 #!/bin/sh
 echo "iw $*" >> "$GOFRO_TEST_LOG"
 EOF
-chmod +x "$TMP/ip" "$TMP/mode" "$TMP/nmcli" "$TMP/iw"
+cat > "$TMP/onboarding" <<'EOF'
+#!/bin/sh
+echo "onboarding $*" >> "$GOFRO_TEST_LOG"
+EOF
+chmod +x "$TMP/ip" "$TMP/mode" "$TMP/nmcli" "$TMP/iw" "$TMP/onboarding"
 printf '%s\n' DE > "$TMP/wifi-country"
 
 export GOFRO_TEST_LOG="$TMP/log"
 GOFRO_MODE_COMMAND=$TMP/mode GOFRO_NMCLI_COMMAND=$TMP/nmcli \
-GOFRO_IW_COMMAND=$TMP/iw GOFRO_WIFI_COUNTRY_FILE=$TMP/wifi-country PATH="$TMP:$PATH" \
+GOFRO_IW_COMMAND=$TMP/iw GOFRO_WIFI_COUNTRY_FILE=$TMP/wifi-country GOFRO_ONBOARDING_COMMAND=$TMP/onboarding PATH="$TMP:$PATH" \
 	sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/network" start
 
 [ "$(sed -n '1p' "$TMP/log")" = 'iw reg set DE' ]
 [ "$(sed -n '2p' "$TMP/log")" = 'ip route replace 10.203.1.0/24 dev wlan0 table 100' ]
 [ "$(sed -n '3p' "$TMP/log")" = 'ip route replace unreachable default table 100 metric 32767' ]
 [ "$(sed -n '4p' "$TMP/log")" = 'mode vpn' ]
-[ "$(sed -n '5p' "$TMP/log")" = 'nmcli connection up gofro-ap' ]
+[ "$(sed -n '5p' "$TMP/log")" = 'onboarding network' ]

@@ -1,0 +1,14 @@
+[Unit]
+Description=Gofro onboarding expiry guard
+Before=gofro-network.service gofro-agent.service
+Requires=gofro-recover.service
+After=NetworkManager.service gofro-recover.service
+ConditionPathExists=/etc/gofro/onboarding-state
+
+[Service]
+ExecStartPre=/usr/libexec/gofro/onboarding watch
+ExecStart=/bin/sh -c 'while [ -e /etc/gofro/onboarding-state ]; do /usr/libexec/gofro/onboarding watch; if grep -qx server /etc/gofro/onboarding-state; then exit 0; fi; sleep 1; done'
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

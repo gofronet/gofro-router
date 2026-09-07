@@ -10,21 +10,24 @@ cat > "$TMP/nmcli" <<'EOF'
 echo "$*" >> "$GOFRO_TEST_LOG"
 case "$*" in *--get-values*) printf 'GofroWIFI 5\n' ;; esac
 EOF
-cat > "$TMP/sleep" <<'EOF'
+cat > "$TMP/onboarding" <<'EOF'
 #!/bin/sh
-exit 0
+printf '%s\n' "$*" >> "$GOFRO_TEST_LOG"
+cat >> "$GOFRO_TEST_STDIN"
 EOF
-chmod +x "$TMP/nmcli" "$TMP/sleep"
+chmod +x "$TMP/nmcli" "$TMP/onboarding"
 
 export GOFRO_TEST_LOG="$TMP/log"
 export GOFRO_STATE_DIR="$TMP/state"
+export GOFRO_ONBOARDING_COMMAND="$TMP/onboarding"
+export GOFRO_TEST_STDIN="$TMP/stdin"
 mkdir "$GOFRO_STATE_DIR"
 output="$(PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/wifi" list)"
 [ "$output" = "$(printf '5g\tGofroWIFI 5')" ]
-PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/wifi" set 5g Gaming password123
-grep -q 'connection modify gofro-ap 802-11-wireless.ssid Gaming' "$TMP/log"
-grep -q 'connection modify gofro-ap wifi-sec.psk password123' "$TMP/log"
-[ "$(cat "$GOFRO_STATE_DIR/ap-password")" = password123 ]
+printf '%s\n' password123 | PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/wifi" set 5g Gaming
+grep -q 'set 5g Gaming' "$TMP/log"
+[ "$(cat "$TMP/stdin")" = password123 ]
+grep -q password123 "$TMP/log" && exit 1
 if PATH="$TMP:$PATH" sh "$ROOT/deploy/raspios/root/usr/libexec/gofro/wifi" set 2g Unsupported 2>/dev/null; then
 	exit 1
 fi

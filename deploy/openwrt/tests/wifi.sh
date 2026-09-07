@@ -21,6 +21,7 @@ case "$*" in
 	'-q get wireless.radio1.band') echo 5g ;;
 	'-q get wireless.ap2.ssid') echo 'Old 2' ;;
 	'-q get wireless.ap5.ssid') echo 'Old 5' ;;
+	batch) cat >> "$GOFRO_TEST_LOG" ;;
 	set*|'commit wireless') printf '%s\n' "$*" >> "$GOFRO_TEST_LOG" ;;
 esac
 EOF
@@ -42,17 +43,17 @@ output="$(PATH="$TMP:$PATH" sh "$ROOT/deploy/openwrt/root/usr/libexec/gofro/wifi
 output="$(GOFRO_TEST_SINGLE_BAND=1 PATH="$TMP:$PATH" sh "$ROOT/deploy/openwrt/root/usr/libexec/gofro/wifi" list)"
 [ "$output" = "$(printf '2g\tOld 2')" ]
 
-PATH="$TMP:$PATH" sh "$ROOT/deploy/openwrt/root/usr/libexec/gofro/wifi" \
-	set 5g 'GofroWIFI 5' 'secret123'
-grep -q '^set wireless\.ap5\.ssid=GofroWIFI 5$' "$TMP/log"
-grep -q '^set wireless\.ap5\.key=secret123$' "$TMP/log"
+printf '%s\n' secret123 | PATH="$TMP:$PATH" sh "$ROOT/deploy/openwrt/root/usr/libexec/gofro/wifi" \
+	set 5g 'GofroWIFI 5'
+grep -q '^set wireless\.ap5\.ssid="GofroWIFI 5"$' "$TMP/log"
+grep -q '^set wireless\.ap5\.key="secret123"$' "$TMP/log"
 [ "$(cat "$GOFRO_STATE_DIR/ap-password")" = secret123 ]
 if grep -q 'wireless\.ap2' "$TMP/log"; then exit 1; fi
 
 : > "$TMP/log"
 PATH="$TMP:$PATH" sh "$ROOT/deploy/openwrt/root/usr/libexec/gofro/wifi" \
 	set 2g 'GofroWIFI 2'
-grep -q '^set wireless\.ap2\.ssid=GofroWIFI 2$' "$TMP/log"
+grep -q '^set wireless\.ap2\.ssid="GofroWIFI 2"$' "$TMP/log"
 if grep -q '\.key=' "$TMP/log"; then exit 1; fi
 if grep -q 'wireless\.ap5' "$TMP/log"; then exit 1; fi
 
@@ -65,5 +66,5 @@ fi
 
 PATH="$TMP:$PATH" sh "$ROOT/deploy/openwrt/root/usr/libexec/gofro/wifi" \
 	set all 'Legacy name'
-grep -q '^set wireless\.ap2\.ssid=Legacy name$' "$TMP/log"
-grep -q '^set wireless\.ap5\.ssid=Legacy name$' "$TMP/log"
+grep -q '^set wireless\.ap2\.ssid="Legacy name"$' "$TMP/log"
+grep -q '^set wireless\.ap5\.ssid="Legacy name"$' "$TMP/log"

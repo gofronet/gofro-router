@@ -16,6 +16,8 @@ PENDING=/etc/gofro/update-previous
 PANEL_BACKUP=/etc/gofro/update-uhttpd
 ROLLBACK=
 PLATFORM=
+RECOVER_INIT=${RECOVER_INIT:-/etc/init.d/gofro-recover}
+RC_D=${RC_D:-/etc/rc.d}
 
 die() {
 	echo "error: $*" >&2
@@ -48,8 +50,10 @@ cleanup() {
 	set +e
 	if [ -n "$ROLLBACK" ] && restore_panel && switch_current "$ROLLBACK"; then
 		if restart_services && write_version "${ROLLBACK##*/}"; then
-			clear_pending
-			[ -z "${release:-}" ] || [ "$release" = "$ROLLBACK" ] || rm -rf "$release"
+			if clear_pending && rm -f "$RC_D/S08gofro-recover" &&
+				"$RECOVER_INIT" disable && "$RECOVER_INIT" enable && sync; then
+				[ -z "${release:-}" ] || [ "$release" = "$ROLLBACK" ] || rm -rf "$release"
+			fi
 		fi
 	fi
 	[ -z "$STAGING" ] || rm -rf "$STAGING"
@@ -99,6 +103,7 @@ link_runtime() {
 		usr/bin/gofro-agent \
 		usr/bin/gofro-relay \
 		usr/libexec/gofro/mode \
+		usr/libexec/gofro/onboarding \
 		usr/libexec/gofro/service \
 		usr/libexec/gofro/tunnel \
 		usr/libexec/gofro/update \
@@ -109,6 +114,7 @@ link_runtime() {
 		usr/share/gofro/geoip.dat \
 		usr/share/gofro/GEODATA-LICENSES.md \
 		etc/init.d/gofro-recover \
+		etc/init.d/gofro-onboarding \
 		etc/init.d/gofro-agent \
 		etc/init.d/gofro-relay \
 		etc/init.d/gofro-updater \
@@ -210,6 +216,7 @@ restart_services() {
 }
 
 sync_setup_code() {
+	[ ! -e /etc/gofro/onboarding-state ] || return 0
 	[ ! -e /etc/gofro/admin-password ] || return 0
 	: > /etc/gofro/ap-password.new || return 1
 	chmod 600 /etc/gofro/ap-password.new || return 1
@@ -296,6 +303,28 @@ case "${1:-}" in
 	*) die 'usage: install.sh COUNTRY | install.sh --update' ;;
 esac
 
+if [ "$mode" = install ] && [ "${GOFRO_INSTALL_QUIET:-}" != 1 ]; then
+	log=$(mktemp /tmp/gofro-install.XXXXXX)
+	chmod 600 "$log"
+	if GOFRO_INSTALL_QUIET=1 sh "$0" "$@" > "$log" 2>&1; then
+		printf '%s\n' 'GofroNET Wi-Fi Setup' 'https://wifi.gofro.net'
+		exit 0
+	fi
+	die "installation failed; see $log"
+fi
+if [ -e /etc/gofro/onboarding-state ]; then
+	onboarding_state="$(cat /etc/gofro/onboarding-state)"
+	case "$onboarding_state" in
+		admin|wifi)
+			[ "$mode" = install ] || die 'finish onboarding before updating'
+			/usr/sbin/gofro-setup "$country"
+			exit 0;;
+		server) ;;
+		*) die 'finish onboarding before updating';;
+	esac
+fi
+[ "$mode" != install ] || [ ! -e /etc/gofro/version ] || die 'Gofro is already installed; run gofro-update'
+
 IFS= read -r VERSION < "$BUNDLE/VERSION" || die 'bundle has no VERSION'
 valid_version "$VERSION" || die 'bundle version is invalid'
 IFS= read -r TARGET < "$BUNDLE/TARGET" || die 'bundle has no TARGET'
@@ -305,9 +334,11 @@ IFS= read -r TARGET < "$BUNDLE/TARGET" || die 'bundle has no TARGET'
 for path in \
 	usr/sbin/gofro-update \
 	usr/libexec/gofro/update \
+	usr/libexec/gofro/onboarding \
 	usr/share/gofro/geosite.dat \
 	usr/share/gofro/geoip.dat \
 	etc/init.d/gofro-recover \
+	etc/init.d/gofro-onboarding \
 	etc/init.d/gofro-agent \
 	etc/init.d/gofro-relay \
 	etc/init.d/gofro-updater \
@@ -366,13 +397,26 @@ if [ "$previous" = "$release" ]; then
 	fi
 	if [ "$mode" = install ] && [ ! -e /etc/gofro/version ]; then
 		link_runtime
-		/etc/init.d/gofro-recover enable
+		"$RECOVER_INIT" enable
+		/etc/init.d/gofro-onboarding enable
 		/etc/init.d/gofro-relay enable
 		/etc/init.d/gofro-agent enable
 		/etc/init.d/gofro-updater enable
 		/etc/init.d/gofro-finalize enable
 		/etc/init.d/gofro-updater start
-		GOFRO_INSTALL_VERSION=$VERSION /usr/sbin/gofro-setup "$country"
+		if [ "${onboarding_state:-}" = server ] || [ -e /etc/gofro/admin-password ]; then
+			if [ ! -s /etc/gofro/install-pending ]; then
+				printf '%s\n' "$VERSION" > /etc/gofro/install-pending.new
+				chmod 600 /etc/gofro/install-pending.new
+				mv -f /etc/gofro/install-pending.new /etc/gofro/install-pending
+				sync
+			fi
+			if ! restart_services || ! healthy || ! /etc/init.d/gofro-finalize boot; then
+				die "Gofro $VERSION failed its health check"
+			fi
+		else
+			GOFRO_INSTALL_VERSION=$VERSION /usr/sbin/gofro-setup "$country"
+		fi
 		echo "Gofro $VERSION installation resumed"
 		exit 0
 	fi
@@ -407,7 +451,8 @@ fi
 if [ "$mode" = install ]; then
 	switch_current "$release"
 	link_runtime
-	/etc/init.d/gofro-recover enable
+	"$RECOVER_INIT" enable
+	/etc/init.d/gofro-onboarding enable
 	/etc/init.d/gofro-relay enable
 	/etc/init.d/gofro-agent enable
 	/etc/init.d/gofro-updater enable
@@ -418,6 +463,9 @@ if [ "$mode" = install ]; then
 fi
 
 ROLLBACK=$previous
+ln -sf "$release/etc/init.d/gofro-recover" "$RC_D/S08gofro-recover"
+sync
+rm -f "$RC_D/S89gofro-recover"
 write_pending "$previous"
 backup_panel || die 'failed to back up panel configuration'
 configure_panel || die 'failed to configure panel address'

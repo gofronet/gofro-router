@@ -86,6 +86,28 @@ case "${1:-}" in
 	*) die 'usage: gofro-update [--install COUNTRY]' ;;
 esac
 
+if [ "$mode" = install ] && [ "${GOFRO_INSTALL_QUIET:-}" != 1 ]; then
+	log=$(mktemp /tmp/gofro-install.XXXXXX)
+	chmod 600 "$log"
+	if GOFRO_INSTALL_QUIET=1 sh "$0" "$@" > "$log" 2>&1; then
+		printf '%s\n' 'GofroNET Wi-Fi Setup' 'https://wifi.gofro.net'
+		exit 0
+	fi
+	die "installation failed; see $log"
+fi
+if [ -e /etc/gofro/onboarding-state ]; then
+	case "$(cat /etc/gofro/onboarding-state)" in
+		admin|wifi)
+			[ "$mode" = install ] || die 'finish onboarding before updating'
+			if [ -e /etc/gofro/version ]; then
+				/usr/sbin/gofro-setup "$country"
+				exit 0
+			fi;;
+		server) ;;
+		*) die 'finish onboarding before updating';;
+	esac
+fi
+
 detect_platform
 if [ "$mode" = install ]; then
 	[ ! -e /etc/gofro/version ] || die 'Gofro is already installed'

@@ -93,6 +93,8 @@ jobs:
           sh deploy/openwrt/tests/update.sh
           sh deploy/openwrt/tests/version.sh
           sh deploy/openwrt/tests/wifi.sh
+          sh deploy/openwrt/tests/onboarding.sh
+          sh deploy/openwrt/tests/install-output.sh
           sh deploy/raspios/tests/health.sh
           sh deploy/raspios/tests/mode.sh
           sh deploy/raspios/tests/network.sh
@@ -102,6 +104,7 @@ jobs:
           sh deploy/raspios/tests/update.sh
           sh deploy/raspios/tests/version.sh
           sh deploy/raspios/tests/wifi.sh
+          sh deploy/raspios/tests/onboarding.sh
           bash -n deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install
           shellcheck -s bash deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install deploy/server/tests/*.sh
           bash deploy/server/tests/*.sh

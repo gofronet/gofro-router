@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 # shellcheck disable=SC2034
 
-START=89
+START=8
 
 recover_update() {
 	app_root=${APP_ROOT:-/usr/lib/gofro}
@@ -12,6 +12,8 @@ recover_update() {
 	panel_backup=$state_dir/update-uhttpd
 	uci_command=${UCI_COMMAND:-uci}
 	uhttpd_init=${UHTTPD_INIT:-/etc/init.d/uhttpd}
+	recover_init=${RECOVER_INIT:-/etc/init.d/gofro-recover}
+	rc_d=${RC_D:-/etc/rc.d}
 	if [ ! -s "$pending" ]; then
 		rm -f "$panel_backup" || return 1
 		return 0
@@ -41,9 +43,14 @@ recover_update() {
 	mv -f "$version_tmp" "$state_dir/version" || return 1
 	sync || return 1
 	rm -f "$pending" || return 1
+	sync || return 1
+	rm -f "$rc_d/S08gofro-recover" || return 1
+	"$recover_init" disable || return 1
+	"$recover_init" enable || return 1
 	sync
 }
 
 boot() {
-	recover_update
+	# Restore the release before networking; uhttpd starts later with the restored config.
+	UHTTPD_INIT=: recover_update
 }

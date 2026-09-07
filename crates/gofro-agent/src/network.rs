@@ -306,11 +306,22 @@ fn parse_access_points(output: &str) -> Result<Vec<ApNetwork>> {
 
 pub(crate) fn update_ap(band: Option<WifiBand>, ssid: &str, password: Option<&str>) -> Result<()> {
     let mut command = Command::new(WIFI_COMMAND);
-    command.args(["set", band.map_or("all", WifiBand::as_str), ssid]);
-    if let Some(password) = password {
-        command.arg(password);
+    command
+        .args(["set", band.map_or("all", WifiBand::as_str), ssid])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().context("failed to start Wi-Fi helper")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("failed to open Wi-Fi helper input")?;
+    stdin.write_all(password.unwrap_or("").as_bytes())?;
+    stdin.write_all(b"\n")?;
+    drop(stdin);
+    if !child.wait()?.success() {
+        bail!("Wi-Fi helper rejected update");
     }
-    run(&mut command)?;
     Ok(())
 }
 

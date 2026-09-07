@@ -16,4 +16,6 @@ export type {
   Status,
   WifiBand,
   WifiInput,
+  OnboardingStatus,
+  OnboardingWifiInput,
 } from "../api/schemas";

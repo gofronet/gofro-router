@@ -85,6 +85,7 @@ link_runtime() {
 		usr/bin/gofro-agent \
 		usr/bin/gofro-relay \
 		usr/libexec/gofro/mode \
+		usr/libexec/gofro/onboarding \
 		usr/libexec/gofro/network \
 		usr/libexec/gofro/recover \
 		usr/libexec/gofro/service \
@@ -125,6 +126,7 @@ install_units() {
 
 sync_setup_code() {
 	[ ! -e /etc/gofro/admin-password ] || return 0
+	[ ! -e /etc/gofro/onboarding-state ] || return 0
 	password="$(nmcli --show-secrets --terse --escape no --get-values 802-11-wireless-security.psk connection show gofro-ap)" || return 1
 	[ -n "$password" ] || return 1
 	printf '%s\n' "$password" > /etc/gofro/ap-password.new || return 1
@@ -173,6 +175,15 @@ restart_services() {
 	systemctl restart dnsmasq.service || return 1
 	systemctl restart gofro-relay.service || return 1
 	systemctl restart gofro-agent.service
+}
+
+setup_or_resume() {
+	phase=$(cat /etc/gofro/onboarding-state 2>/dev/null || true)
+	if [ "$phase" = server ] || { [ ! -e /etc/gofro/onboarding-state ] && [ -e /etc/gofro/admin-password ]; }; then
+		restart_services
+	else
+		GOFRO_ONBOARDING_REARM=1 /usr/sbin/gofro-setup "$country"
+	fi
 }
 
 status_healthy() {
@@ -235,6 +246,29 @@ case "${1:-}" in
 	*) die 'usage: install.sh COUNTRY | install.sh --update' ;;
 esac
 
+if [ "$mode" = install ] && [ "${GOFRO_INSTALL_QUIET:-}" != 1 ]; then
+	log=$(mktemp /tmp/gofro-install.XXXXXX)
+	chmod 600 "$log"
+	if GOFRO_INSTALL_QUIET=1 sh "$0" "$@" > "$log" 2>&1; then
+		printf '%s\n' 'GofroNET Wi-Fi Setup' 'https://wifi.gofro.net'
+		exit 0
+	fi
+	die "installation failed; see $log"
+fi
+if [ -e /etc/gofro/onboarding-state ]; then
+	case "$(cat /etc/gofro/onboarding-state)" in
+		admin|wifi)
+			[ "$mode" = install ] || die 'finish onboarding before updating'
+			if [ -e /etc/gofro/version ]; then
+				/usr/sbin/gofro-setup "$country"
+				exit 0
+			fi;;
+		server) ;;
+		*) die 'finish onboarding before updating';;
+	esac
+fi
+[ "$mode" != install ] || [ ! -e /etc/gofro/version ] || die 'Gofro is already installed; run gofro-update'
+
 IFS= read -r VERSION < "$BUNDLE/VERSION" || die 'bundle has no VERSION'
 valid_version "$VERSION" || die 'bundle version is invalid'
 IFS= read -r bundle_target < "$BUNDLE/TARGET" || die 'bundle has no TARGET'
@@ -245,6 +279,7 @@ for path in \
 	usr/sbin/gofro-setup \
 	usr/sbin/gofro-update \
 	usr/libexec/gofro/mode \
+	usr/libexec/gofro/onboarding \
 	usr/libexec/gofro/network \
 	usr/libexec/gofro/recover \
 	usr/libexec/gofro/service \
@@ -253,7 +288,8 @@ for path in \
 	usr/libexec/gofro/wifi \
 	usr/share/gofro/geosite.dat \
 	usr/share/gofro/geoip.dat \
-	etc/systemd/system/gofro-agent.service \
+		etc/systemd/system/gofro-agent.service \
+		etc/systemd/system/gofro-onboarding.service \
 	etc/systemd/system/gofro-network.service \
 	etc/systemd/system/gofro-recover.service \
 	etc/systemd/system/gofro-relay.service \
@@ -317,7 +353,8 @@ if [ "$previous" = "$release" ]; then
 	if [ "$mode" = install ] && [ ! -e /etc/gofro/version ]; then
 		link_runtime
 		install_units
-		/usr/sbin/gofro-setup "$country"
+		systemctl enable gofro-onboarding.service
+		setup_or_resume
 		healthy || die "Gofro $VERSION failed its health check"
 		write_version "$VERSION"
 		echo "Gofro $VERSION installation resumed"
@@ -352,7 +389,8 @@ if [ "$mode" = install ]; then
 	switch_current "$release"
 	link_runtime
 	install_units
-	/usr/sbin/gofro-setup "$country"
+	systemctl enable gofro-onboarding.service
+	setup_or_resume
 	healthy || die "Gofro $VERSION failed its health check"
 	write_version "$VERSION"
 	echo "Gofro $VERSION installed"

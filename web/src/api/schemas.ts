@@ -21,13 +21,38 @@ export const serverVersionSchema = z.object({
 
 export const profileSchema = z.object({ profile: z.string() });
 
-export const authStatusSchema = z.discriminatedUnion("state", [
-  z.object({ state: z.literal("setup"), csrf_token: z.string() }),
+export const authStatusSchema = z.union([
+  z.object({
+    state: z.literal("setup"),
+    csrf_token: z.string(),
+    setup_method: z.literal("local"),
+    setup_window_seconds: z.number().int().nonnegative(),
+  }),
+  z.object({
+    state: z.literal("setup"),
+    csrf_token: z.string(),
+    setup_method: z.literal("wifi_password"),
+  }),
   z.object({ state: z.literal("login"), csrf_token: z.string() }),
   z.object({ state: z.literal("authenticated"), csrf_token: z.string() }),
 ]);
 
 export const wifiBandSchema = z.enum(["2g", "5g"]);
+
+export const onboardingStatusSchema = z.object({
+  step: z.enum(["admin", "wifi", "wifi_applying", "server", "complete"]),
+  networks: z.array(z.object({ band: wifiBandSchema, ssid: z.string() })),
+  setup_window_seconds: z.number().int().nonnegative().nullable(),
+  error: z.string().nullable(),
+});
+
+export const onboardingWifiInputSchema = z.object({
+  networks: z.array(z.object({
+    band: wifiBandSchema,
+    ssid: z.string(),
+    password: z.string(),
+  })),
+});
 
 export const historyPointSchema = z.object({
   timestamp: z.number(),
@@ -162,6 +187,8 @@ export type ServerProbe = z.infer<typeof serverProbeSchema>;
 export type ServerVersion = z.infer<typeof serverVersionSchema>;
 export type Profile = z.infer<typeof profileSchema>;
 export type AuthStatus = z.infer<typeof authStatusSchema>;
+export type OnboardingStatus = z.infer<typeof onboardingStatusSchema>;
+export type OnboardingWifiInput = z.infer<typeof onboardingWifiInputSchema>;
 export type HistoryPoint = z.infer<typeof historyPointSchema>;
 export type Device = z.infer<typeof deviceSchema>;
 export type Status = z.infer<typeof statusSchema>;

@@ -18,6 +18,8 @@
 
   type Dialog = "import" | "new" | "edit" | "profile" | null;
 
+  let { onboarding = false }: { onboarding?: boolean } = $props();
+
   const app = getAppContext();
   const status = $derived(app.status);
   const busy = $derived(app.busy);
@@ -83,7 +85,9 @@
       return;
     }
     validationError = "";
-    if (await app.importServer(values)) closeDialog();
+    if (await app.importServer(values)) {
+      closeDialog();
+    }
   }
 
   async function saveEdit(event: SubmitEvent) {
@@ -124,8 +128,9 @@
       return;
     }
     try {
-      if (await app.bootstrapServer(name.trim(), probe.host, probe.port, password, probe.host_key)) closeDialog();
-      else probe = null;
+      if (await app.bootstrapServer(name.trim(), probe.host, probe.port, password, probe.host_key)) {
+        closeDialog();
+      } else probe = null;
     } finally {
       password = "";
     }
@@ -188,7 +193,7 @@
     </div>
   </header>
 
-  <article class="grid min-h-48 min-w-0 grid-cols-[3.125rem_minmax(0,1fr)] items-center gap-4 overflow-hidden rounded-[28px] bg-[linear-gradient(145deg,#202024,#09090b_72%)] p-6 text-white shadow-xl shadow-black/10 lg:grid-cols-[3.125rem_minmax(0,1fr)_auto] lg:p-7">
+  {#if !onboarding}<article class="grid min-h-48 min-w-0 grid-cols-[3.125rem_minmax(0,1fr)] items-center gap-4 overflow-hidden rounded-[28px] bg-[linear-gradient(145deg,#202024,#09090b_72%)] p-6 text-white shadow-xl shadow-black/10 lg:grid-cols-[3.125rem_minmax(0,1fr)_auto] lg:p-7">
     <div class="grid size-12.5 place-items-center rounded-2xl bg-white text-[#09090b]"><ServerIcon size={22} /></div>
     <div class="min-w-0"><span class="text-xs text-[#aaaab1]">Активный профиль</span><h2 class="my-1.5 text-2xl font-bold tracking-[-0.045em]">{activeServer?.name || "Сервер не выбран"}</h2><p class="m-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.7rem] text-[#aaaab1]">{activeServer?.endpoint || "Выберите профиль из списка ниже."}</p></div>
     <span class={`col-span-2 flex min-h-12 items-center gap-2 border-t border-[#343438] pt-3 text-xs font-bold lg:col-span-1 lg:min-w-40 lg:border-0 lg:pt-0 ${status.tunnel_active ? "text-white" : "text-red-300"}`}><i class="size-2 bg-current"></i>{status.tunnel_active ? "Туннель активен" : "Нет соединения"}</span>
@@ -225,7 +230,7 @@
         {/each}
       </div>
     {/if}
-  </section>
+  </section>{/if}
 </section>
 
 {#if dialog}

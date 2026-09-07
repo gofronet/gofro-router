@@ -21,6 +21,10 @@ import {
   type Status,
   type WifiBand,
   type WifiInput,
+  type OnboardingStatus,
+  type OnboardingWifiInput,
+  onboardingStatusSchema,
+  onboardingWifiInputSchema,
 } from "./schemas";
 
 const statusRequest = (factory: () => Promise<{ data: unknown }>) =>
@@ -30,8 +34,8 @@ const mutation = { timeout: 0 };
 export const api = {
   auth: {
     status: (): Promise<AuthStatus> => request(authStatusSchema, () => http.get("/auth/status")),
-    setup: (setupCode: string, password: string): Promise<AuthStatus> =>
-      request(authStatusSchema, () => http.post("/auth/setup", { setup_code: setupCode, password }, mutation)),
+    setup: (password: string, setupCode?: string): Promise<AuthStatus> =>
+      request(authStatusSchema, () => http.post("/auth/setup", { password, ...(setupCode ? { setup_code: setupCode } : {}) }, mutation)),
     login: (password: string): Promise<AuthStatus> =>
       request(authStatusSchema, () => http.post("/auth/login", { password }, mutation)),
     logout: (): Promise<AuthStatus> =>
@@ -113,6 +117,16 @@ export const api = {
       return statusRequest(() => http.post("/ap", body, mutation));
     },
   },
+  onboarding: {
+    get: (): Promise<OnboardingStatus> =>
+      request(onboardingStatusSchema, () => http.get("/onboarding")),
+    wifi: (input: OnboardingWifiInput): Promise<OnboardingStatus> =>
+      request(onboardingStatusSchema, () =>
+        http.post("/onboarding/wifi", onboardingWifiInputSchema.parse(input), mutation),
+      ),
+    complete: (): Promise<OnboardingStatus> =>
+      request(onboardingStatusSchema, () => http.post("/onboarding/complete", {}, mutation)),
+  },
   routing: {
     save: (input: RoutingConfig): Promise<Status> => {
       const body = routingConfigSchema.parse(input);
@@ -142,4 +156,6 @@ export type {
   Status,
   WifiBand,
   WifiInput,
+  OnboardingStatus,
+  OnboardingWifiInput,
 } from "./schemas";
