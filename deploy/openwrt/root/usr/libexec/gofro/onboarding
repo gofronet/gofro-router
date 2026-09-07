@@ -249,7 +249,7 @@ apply() (
 	case "$due" in ''|*[!0-9]*) exit 1;; esac
 	now=$(uptime_seconds); [ "$now" -ge "$due" ] || exit 0
 	mkdir "$LOCK" 2>/dev/null || exit 0
-	# shellcheck disable=SC2329
+	# shellcheck disable=SC2317,SC2329
 	cleanup_apply() {
 		local code=$?
 		trap - EXIT HUP INT TERM

@@ -37,7 +37,9 @@ if [ -e /etc/gofro/onboarding-state ]; then
 	/etc/init.d/gofro-finalize boot
 	exit 0
 fi
-[ ! -e /etc/gofro/version ] && [ ! -e /etc/gofro/admin-password ] && [ ! -e /etc/gofro/ap-password ] || die 'existing installation cannot be reset by setup'
+if [ -e /etc/gofro/version ] || [ -e /etc/gofro/admin-password ] || [ -e /etc/gofro/ap-password ]; then
+	die 'existing installation cannot be reset by setup'
+fi
 [ "$(uci -q get network.lan.ipaddr || true)" != 10.203.1.1 ] || die '10.203.1.1 is already assigned to LAN'
 
 interface="$(uci -q get gofro.main.interface || echo gt0)"
