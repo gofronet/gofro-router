@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     io::{Read, Write},
     net::{SocketAddr, TcpStream, UdpSocket},
@@ -120,16 +121,10 @@ impl FakeDns {
         }
 
         let domain_target = policy.domain_target(&domain).map(|(target, _)| target);
-        if domain_target == Some(RouteTarget::Block) {
-            return empty_response(&request, ResponseCode::Refused);
-        }
-        let resolver_target = domain_target.unwrap_or_else(|| {
-            if policy.config().default_target == RouteTarget::Block {
-                RouteTarget::Vpn
-            } else {
-                policy.config().default_target
-            }
-        });
+        let resolver_target = match policy.resolver_target(&domain) {
+            RouteTarget::Block => RouteTarget::Vpn,
+            target => target,
+        };
         let response = query_upstream(packet, resolver_target, upstream)?;
         let mut message = Message::from_vec(&response).context("invalid upstream DNS response")?;
         if message.message_type() != MessageType::Response
@@ -138,10 +133,11 @@ impl FakeDns {
         {
             bail!("upstream DNS response does not match the request");
         }
-        let rewritten = match domain_target {
-            Some(target) => self.rewrite_records(&mut message, &domain, target)?,
-            None => false,
-        };
+        let rewritten = domain_target
+            .is_some()
+            .then(|| self.rewrite_records(&mut message, &domain, policy))
+            .transpose()?
+            .unwrap_or(false);
         message.answers_mut().retain(|record| {
             !matches!(
                 record.record_type(),
@@ -167,25 +163,28 @@ impl FakeDns {
         &self,
         message: &mut Message,
         domain: &str,
-        target: RouteTarget,
+        policy: &RoutingPolicy,
     ) -> Result<bool> {
         let mut store = self
             .store
             .lock()
             .map_err(|_| anyhow!("FakeDNS store lock poisoned"))?;
         let mut added = Vec::new();
+        let names = relevant_names(message.answers(), domain);
         let result = (|| {
             let mut rewritten = rewrite_records(
                 message.answers_mut(),
                 domain,
-                target,
+                policy,
+                &names,
                 &mut store,
                 &mut added,
             )?;
             rewritten |= rewrite_records(
                 message.additionals_mut(),
                 domain,
-                target,
+                policy,
+                &names,
                 &mut store,
                 &mut added,
             )?;
@@ -208,16 +207,19 @@ impl FakeDns {
 fn rewrite_records(
     records: &mut [Record],
     domain: &str,
-    target: RouteTarget,
+    policy: &RoutingPolicy,
+    names: &HashSet<String>,
     store: &mut Store,
     added: &mut Vec<FakeMapping>,
 ) -> Result<bool> {
     let mut rewritten = false;
     for record in records {
-        if let RData::A(address) = record.data() {
+        if names.contains(&query_domain(&record.name().to_utf8()))
+            && let RData::A(address) = record.data()
+        {
             let real = address.0;
             let ttl = record.ttl().clamp(30, 3600);
-            let (mapping, new) = store.allocate(domain, real, target, ttl)?;
+            let (mapping, new) = store.allocate(domain, real, policy.target(domain, real), ttl)?;
             if new {
                 added.push(mapping);
             }
@@ -227,6 +229,22 @@ fn rewrite_records(
         }
     }
     Ok(rewritten)
+}
+
+fn relevant_names(records: &[Record], domain: &str) -> HashSet<String> {
+    let mut names = HashSet::from([domain.to_owned()]);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for record in records {
+            if names.contains(&query_domain(&record.name().to_utf8()))
+                && let RData::CNAME(name) = record.data()
+            {
+                changed |= names.insert(query_domain(&name.0.to_utf8()));
+            }
+        }
+    }
+    names
 }
 
 fn query_upstream(packet: &[u8], target: RouteTarget, upstream: SocketAddr) -> Result<Vec<u8>> {
@@ -302,6 +320,15 @@ fn query_domain(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use hickory_proto::rr::Name;
+
+    use crate::{
+        fake_dns::store::Store,
+        geodata::GeoData,
+        model::{DomainMatch, DomainRule, IpMatch, IpRule, RoutingConfig, RoutingMode},
+    };
 
     #[test]
     fn overload_returns_servfail() {
@@ -320,5 +347,114 @@ mod tests {
             query_domain("_Minecraft._TCP.Example.com."),
             "_minecraft._tcp.example.com"
         );
+    }
+
+    #[test]
+    fn rewrites_mixed_answers_with_independent_targets() {
+        let policy = RoutingPolicy::compile(
+            RoutingConfig {
+                domain_rules: vec![DomainRule {
+                    name: "Context".into(),
+                    enabled: true,
+                    matcher: DomainMatch::Exact {
+                        value: "example.com".into(),
+                    },
+                    target: RouteTarget::Vpn,
+                }],
+                ip_rules: vec![IpRule {
+                    name: "Direct IP".into(),
+                    enabled: true,
+                    matcher: IpMatch::Cidr {
+                        value: "1.1.1.0/24".into(),
+                    },
+                    target: RouteTarget::Direct,
+                }],
+                default_target: RouteTarget::Vpn,
+                mode: RoutingMode::Rules,
+                rule_order: Some(vec![
+                    crate::model::RuleRef::Ip { index: 0 },
+                    crate::model::RuleRef::Domain { index: 0 },
+                ]),
+            },
+            Arc::new(GeoData::default()),
+        )
+        .unwrap();
+        let name = Name::from_ascii("example.com.").unwrap();
+        let mut records = vec![
+            Record::from_rdata(name.clone(), 60, RData::A(A("1.1.1.1".parse().unwrap()))),
+            Record::from_rdata(name, 60, RData::A(A("8.8.8.8".parse().unwrap()))),
+        ];
+        let mut store =
+            Store::from_connection(rusqlite::Connection::open_in_memory().unwrap()).unwrap();
+        let mut added = vec![];
+        let names = relevant_names(&records, "example.com");
+        rewrite_records(
+            &mut records,
+            "example.com",
+            &policy,
+            &names,
+            &mut store,
+            &mut added,
+        )
+        .unwrap();
+        assert_eq!(
+            added
+                .iter()
+                .map(|mapping| mapping.target)
+                .collect::<Vec<_>>(),
+            vec![RouteTarget::Direct, RouteTarget::Vpn]
+        );
+    }
+
+    #[test]
+    fn block_domains_keep_lan_answers_direct_with_legacy_and_explicit_order() {
+        let mut config = RoutingConfig {
+            domain_rules: vec![DomainRule {
+                name: "Block domain".into(),
+                enabled: true,
+                matcher: DomainMatch::Exact {
+                    value: "example.com".into(),
+                },
+                target: RouteTarget::Block,
+            }],
+            ip_rules: vec![],
+            default_target: RouteTarget::Vpn,
+            mode: RoutingMode::Rules,
+            rule_order: None,
+        };
+        for order in [None, Some(vec![crate::model::RuleRef::Domain { index: 0 }])] {
+            config.rule_order = order;
+            let policy =
+                RoutingPolicy::compile(config.clone(), Arc::new(GeoData::default())).unwrap();
+            let name = Name::from_ascii("example.com.").unwrap();
+            let mut records = vec![
+                Record::from_rdata(
+                    name.clone(),
+                    60,
+                    RData::A(A("192.168.1.1".parse().unwrap())),
+                ),
+                Record::from_rdata(name, 60, RData::A(A("8.8.8.8".parse().unwrap()))),
+            ];
+            let mut store =
+                Store::from_connection(rusqlite::Connection::open_in_memory().unwrap()).unwrap();
+            let mut added = vec![];
+            let names = relevant_names(&records, "example.com");
+            rewrite_records(
+                &mut records,
+                "example.com",
+                &policy,
+                &names,
+                &mut store,
+                &mut added,
+            )
+            .unwrap();
+            assert_eq!(
+                added
+                    .iter()
+                    .map(|mapping| mapping.target)
+                    .collect::<Vec<_>>(),
+                vec![RouteTarget::Direct, RouteTarget::Block]
+            );
+        }
     }
 }

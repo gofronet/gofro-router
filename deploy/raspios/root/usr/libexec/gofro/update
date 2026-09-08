@@ -21,10 +21,14 @@ write_result() {
 
 request_update() {
 	mkdir -p "$STATE_DIR"
-	[ ! -e "$LOCK" ] || return 0
+	[ ! -e "$LOCK" ] || return 1
 	[ ! -e "$TRIGGER" ] || return 0
 	rm -f "$RESULT" "$RESULT.new"
 	: > "$TRIGGER"
+	if [ -e "$LOCK" ]; then
+		rm -f "$TRIGGER"
+		return 1
+	fi
 	if ! "$SERVICE" start gofro-updater.service; then
 		rm -f "$TRIGGER"
 		return 1
@@ -32,6 +36,7 @@ request_update() {
 }
 
 run_update() {
+	[ ! -e "$LOCK" ] || return 0
 	if [ -e "${ONBOARDING_STATE:-/etc/gofro/onboarding-state}" ]; then
 		[ "$(cat "${ONBOARDING_STATE:-/etc/gofro/onboarding-state}" 2>/dev/null)" = server ] || return 0
 	fi

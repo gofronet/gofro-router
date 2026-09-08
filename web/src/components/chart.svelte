@@ -1,26 +1,26 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import type {
-    Chart,
+    Chart as ChartInstance,
     ChartConfiguration,
     ChartDataset,
     ScriptableContext,
   } from "chart.js";
   import { formatRate } from "../format";
   import type { HistoryPoint } from "../domain/models";
+  import { appearance } from "../stores/theme.svelte";
 
   let {
     history,
-    kind,
     label,
   }: {
     history: HistoryPoint[];
-    kind: "traffic" | "system";
     label: string;
   } = $props();
 
   let canvas: HTMLCanvasElement;
-  let chart: Chart<"line"> | null = null;
+  let chart: ChartInstance<"line"> | null = null;
+  let ChartConstructor: typeof import("chart.js").Chart | null = null;
   let loadFailed = $state(false);
   const time = new Intl.DateTimeFormat("ru-RU", {
     hour: "2-digit",
@@ -31,79 +31,58 @@
     return new Date(timestamp < 1e12 ? timestamp * 1000 : timestamp);
   }
 
-  function fill(top: string, bottom: string) {
+  function colors() {
+    const style = getComputedStyle(document.documentElement);
+    return {
+      foreground: style.getPropertyValue("--fg").trim(),
+      muted: style.getPropertyValue("--muted").trim(),
+      border: style.getPropertyValue("--border").trim(),
+      surface: style.getPropertyValue("--surface").trim(),
+    };
+  }
+
+  function fill(color: string) {
     return (context: ScriptableContext<"line">) => {
       const { ctx, chartArea } = context.chart;
-      if (!chartArea) return bottom;
-      const gradient = ctx.createLinearGradient(
-        0,
-        chartArea.top,
-        0,
-        chartArea.bottom,
-      );
-      gradient.addColorStop(0, top);
-      gradient.addColorStop(1, bottom);
+      if (!chartArea) return "transparent";
+      const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+      gradient.addColorStop(0, `color-mix(in srgb, ${color} 8%, transparent)`);
+      gradient.addColorStop(1, "transparent");
       return gradient;
     };
   }
 
-  function datasets(
-    points: HistoryPoint[],
-  ): ChartDataset<"line", (number | null)[]>[] {
+  function datasets(points: HistoryPoint[]): ChartDataset<"line", (number | null)[]>[] {
+    const theme = colors();
     const common = {
-      borderWidth: 2,
+      borderWidth: 1.8,
       pointRadius: 0,
-      pointHoverRadius: 4,
-      pointHitRadius: 14,
-      tension: 0.34,
+      pointHoverRadius: 3,
+      pointHitRadius: 12,
+      tension: 0.3,
     };
-    if (kind === "traffic") {
-      return [
-        {
-          ...common,
-          label: "Скачивание",
-          data: points.map((point) => point.rx_bps),
-          borderColor: "#09090b",
-          backgroundColor: fill("rgba(9, 9, 11, .13)", "rgba(9, 9, 11, 0)"),
-          fill: true,
-        },
-        {
-          ...common,
-          label: "Отдача",
-          data: points.map((point) => point.tx_bps),
-          borderColor: "#8a8a92",
-          backgroundColor: fill(
-            "rgba(138, 138, 146, .08)",
-            "rgba(138, 138, 146, 0)",
-          ),
-          fill: true,
-        },
-      ];
-    }
     return [
       {
         ...common,
-        label: "CPU",
-        data: points.map((point) => point.load_percent),
-        borderColor: "#09090b",
+        label: "↓ Скачивание (RX)",
+        data: points.map((point) => point.rx_bps),
+        borderColor: theme.foreground,
+        backgroundColor: fill(theme.foreground),
+        fill: true,
       },
       {
         ...common,
-        label: "RAM",
-        data: points.map((point) => point.memory_percent),
-        borderColor: "#73737b",
-      },
-      {
-        ...common,
-        label: "Температура",
-        data: points.map((point) => point.temperature_c),
-        borderColor: "#b6b6bc",
-        spanGaps: true,
+        label: "↑ Отдача (TX)",
+        data: points.map((point) => point.tx_bps),
+        borderColor: theme.muted,
+        backgroundColor: fill(theme.muted),
+        fill: true,
       },
     ];
   }
 
   function config(points: HistoryPoint[]): ChartConfiguration<"line"> {
+    const theme = colors();
     return {
       type: "line",
       data: {
@@ -116,32 +95,20 @@
         animation: false,
         normalized: true,
         interaction: { mode: "index", intersect: false },
-        layout: { padding: { top: 6 } },
+        layout: { padding: { top: 2, right: 2 } },
         plugins: {
-          legend: {
-            align: "start",
-            labels: {
-              color: "#74747d",
-              boxWidth: 18,
-              boxHeight: 2,
-              padding: 18,
-              font: { size: 11 },
-            },
-          },
+          legend: { display: false },
           tooltip: {
-            backgroundColor: "rgba(9, 9, 11, .96)",
-            borderColor: "#343438",
+            backgroundColor: theme.foreground,
+            borderColor: theme.border,
             borderWidth: 1,
-            titleColor: "#f4f2e9",
-            bodyColor: "#d7d7da",
-            padding: 12,
+            titleColor: theme.surface,
+            bodyColor: theme.surface,
+            padding: 9,
             callbacks: {
               label: (item) => {
                 const value = item.parsed.y;
-                if (value === null) return `${item.dataset.label}: нет данных`;
-                if (kind === "traffic")
-                  return `${item.dataset.label}: ${formatRate(value)}`;
-                return `${item.dataset.label}: ${value.toLocaleString("ru-RU", { maximumFractionDigits: 1 })}${item.dataset.label === "Температура" ? " °C" : " %"}`;
+                return `${item.dataset.label}: ${value === null ? "нет данных" : formatRate(value)}`;
               },
             },
           },
@@ -149,27 +116,23 @@
         scales: {
           x: {
             grid: { display: false },
-            border: { color: "#dedee1" },
+            border: { color: theme.border },
             ticks: {
-              color: "#8a8a92",
-              maxTicksLimit: 5,
+              color: theme.muted,
+              maxTicksLimit: 3,
               maxRotation: 0,
-              font: { size: 10 },
+              font: { family: "SFMono-Regular, Consolas, monospace", size: 10 },
             },
           },
           y: {
             beginAtZero: true,
-            suggestedMax: kind === "system" ? 100 : undefined,
-            grid: { color: "rgba(9, 9, 11, .08)" },
+            grid: { color: theme.border },
             border: { display: false },
             ticks: {
-              color: "#8a8a92",
-              maxTicksLimit: 5,
-              callback: (value) =>
-                kind === "traffic"
-                  ? formatRate(Number(value)).replace("/с", "")
-                  : `${value}%`,
-              font: { size: 10 },
+              color: theme.muted,
+              maxTicksLimit: 3,
+              callback: (value) => formatRate(Number(value)).replace("/с", ""),
+              font: { family: "SFMono-Regular, Consolas, monospace", size: 10 },
             },
           },
         },
@@ -177,63 +140,75 @@
     };
   }
 
+  function createChart() {
+    if (!ChartConstructor) return;
+    chart?.destroy();
+    chart = new ChartConstructor(canvas, config(history));
+  }
+
   onMount(() => {
     let mounted = true;
+    const media = matchMedia("(prefers-color-scheme: dark)");
+    const onMediaChange = () => {
+      if (appearance.theme === "system") createChart();
+    };
+    media.addEventListener("change", onMediaChange);
+
     void import("chart.js")
-      .then(
-        ({
+      .then((module) => {
+        if (!mounted) return;
+        const {
           CategoryScale,
           Chart,
           Filler,
-          Legend,
           LinearScale,
           LineController,
           LineElement,
           PointElement,
           Tooltip,
-        }) => {
-          if (!mounted) return;
-          Chart.register(
-            CategoryScale,
-            LinearScale,
-            LineController,
-            LineElement,
-            PointElement,
-            Filler,
-            Tooltip,
-            Legend,
-          );
-          chart = new Chart(canvas, config(history));
-        },
-      )
+        } = module;
+        Chart.register(
+          CategoryScale,
+          LinearScale,
+          LineController,
+          LineElement,
+          PointElement,
+          Filler,
+          Tooltip,
+        );
+        ChartConstructor = Chart;
+        createChart();
+      })
       .catch(() => {
         if (mounted) loadFailed = true;
       });
+
     return () => {
       mounted = false;
+      media.removeEventListener("change", onMediaChange);
       chart?.destroy();
+      chart = null;
     };
+  });
+
+  $effect(() => {
+    appearance.theme;
+    untrack(createChart);
   });
 
   $effect(() => {
     const points = history;
     if (!chart) return;
-    chart.data.labels = points.map((point) =>
-      time.format(date(point.timestamp)),
-    );
+    chart.data.labels = points.map((point) => time.format(date(point.timestamp)));
     chart.data.datasets = datasets(points);
     chart.update("none");
   });
 </script>
 
-<div
-  class={`relative w-full ${kind === "system" ? "h-57.5 lg:h-65" : "h-65 lg:h-82.5"}`}
->
-  <canvas bind:this={canvas} aria-label={label}>{label}</canvas>
+<div class="relative h-[152px] w-full">
+  <canvas bind:this={canvas} aria-label={`${label}. RX: скачивание; TX: отдача.`}>{label}</canvas>
   {#if loadFailed || history.length === 0}
-    <div
-      class="absolute inset-x-1 bottom-6 top-14 grid place-items-center rounded-2xl border border-dashed border-[#dedee1] text-center text-xs text-[#74747d]"
-    >
+    <div class="absolute inset-x-1 bottom-6 top-3 grid place-items-center rounded-lg border border-dashed border-[var(--border)] px-4 text-center text-xs text-[var(--muted)]">
       {loadFailed ? "Обновите страницу для загрузки графика" : "График появится после первых замеров"}
     </div>
   {/if}

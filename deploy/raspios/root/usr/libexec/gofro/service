@@ -2,6 +2,27 @@
 set -eu
 
 [ "$#" = 2 ] || { echo "Usage: $0 ACTION SERVICE" >&2; exit 2; }
+
+if [ "$1" = reboot ] && [ "$2" = router ]; then
+	LOCK=${GOFRO_UPDATE_LOCK:-/tmp/gofro-update.lock}
+	TRIGGER=${GOFRO_UPDATE_TRIGGER:-/tmp/gofro/update-request}
+	REBOOT=${GOFRO_REBOOT_COMMAND:-systemctl}
+	DELAY=${GOFRO_REBOOT_DELAY:-1}
+	mkdir "$LOCK" 2>/dev/null || exit 1
+	if [ -e "$TRIGGER" ]; then
+		rmdir "$LOCK"
+		exit 1
+	fi
+	(
+		# SIGKILL cannot run traps; a successful reboot clears /tmp.
+		trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+		trap 'rmdir "$LOCK" 2>/dev/null || true; exit 1' HUP INT TERM
+		sleep "$DELAY"
+		"$REBOOT" reboot && trap - EXIT HUP INT TERM
+	) >/dev/null 2>&1 &
+	exit 0
+fi
+
 [ "$2" = gofro-relay ] || { echo "Unknown service: $2" >&2; exit 2; }
 
 case "$1" in

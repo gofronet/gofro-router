@@ -54,6 +54,11 @@ export class RouterState {
     return this.mutation !== null;
   }
 
+  get connected(): boolean {
+    const status = this.currentStatus;
+    return Boolean(status?.vpn_enabled && status.tunnel_active && status.peer?.handshake_age_seconds != null && status.peer.handshake_age_seconds <= 180);
+  }
+
   private message(error: unknown): string {
     if (!(error instanceof Error)) return "Неизвестная ошибка";
     switch (error.message) {
@@ -296,18 +301,25 @@ export class RouterState {
     this.onboarding = null;
   };
 
-  setMode = async (vpnEnabled: boolean): Promise<void> => {
+  setMode = async (vpnEnabled: boolean): Promise<boolean> => {
     if (
       this.currentStatus?.vpn_enabled === vpnEnabled &&
       (!vpnEnabled || this.currentStatus.tunnel_active)
     ) {
-      return;
+      return true;
     }
-    await this.mutate("mode", () => modeService.set(vpnEnabled));
+    return this.mutate("mode", () => modeService.set(vpnEnabled));
   };
 
   startUpdate = async (): Promise<void> => {
     await this.mutate("update", api.update.start);
+  };
+
+  rebootRouter = async (): Promise<boolean> => {
+    const result = await this.mutateResult("reboot", api.reboot.start);
+    if (!result) return false;
+    this.stop();
+    return true;
   };
 
   importServer = (input: ProfileInput): Promise<boolean> =>

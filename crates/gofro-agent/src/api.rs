@@ -1,4 +1,4 @@
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path, process::Command, sync::atomic::Ordering};
 
 use anyhow::{Context, Result, anyhow};
 use axum::{
@@ -11,7 +11,7 @@ use axum::{
     routing::{any, get, post},
 };
 use serde::Serialize;
-use tracing::error;
+use tracing::{error, warn};
 use wireguard_status::wireguard_peers;
 
 use crate::{
@@ -39,6 +39,7 @@ const UPDATE_LOCK: &str = "/tmp/gofro-update.lock";
 const UPDATE_RESULT: &str = "/tmp/gofro/update-result";
 const UPDATE_TRIGGER: &str = "/tmp/gofro/update-request";
 const UPDATE_COMMAND: &str = "/usr/libexec/gofro/update";
+const SERVICE_COMMAND: &str = "/usr/libexec/gofro/service";
 
 #[derive(Debug, Serialize)]
 struct ErrorBody {
@@ -84,6 +85,7 @@ fn private_router() -> Router<AppState> {
         .route("/api/onboarding/complete", post(onboarding_complete))
         .route("/api/status", get(status))
         .route("/api/update", post(start_update))
+        .route("/api/reboot", post(start_reboot))
         .route("/api/mode", post(set_mode))
         .route(
             "/api/servers",
@@ -328,6 +330,46 @@ async fn start_update(
     Json(_): Json<UpdateInput>,
 ) -> Result<Json<AgentStatus>, ApiError> {
     run_blocking(state, |_| queue_update()).await
+}
+
+async fn start_reboot() -> Response {
+    if Path::new(UPDATE_LOCK).exists() || Path::new(UPDATE_TRIGGER).exists() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error":"update_running"})),
+        )
+            .into_response();
+    }
+    match tokio::task::spawn_blocking(|| {
+        Command::new(SERVICE_COMMAND)
+            .args(["reboot", "router"])
+            .status()
+    })
+    .await
+    {
+        Ok(Ok(status)) if status.success() => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"rebooting":true})),
+        )
+            .into_response(),
+        Ok(Ok(_status)) if Path::new(UPDATE_LOCK).exists() => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error":"update_running"})),
+        )
+            .into_response(),
+        Ok(Ok(status)) => {
+            warn!(?status, "reboot helper rejected request");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Ok(Err(error)) => {
+            warn!(%error, "failed to start reboot helper");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(error) => {
+            warn!(%error, "reboot task failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 async fn set_mode(
@@ -602,13 +644,17 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
             geosite_loaded: state.geodata.has_site("category-ru"),
             geoip_loaded: state.geodata.has_ip("ru"),
             dataplane_active: dataplane::is_installed(),
+            degraded: state.routing_degraded.load(Ordering::Relaxed),
         },
     })
 }
 
 fn queue_update() -> Result<()> {
-    if Path::new(UPDATE_LOCK).exists() || Path::new(UPDATE_TRIGGER).exists() {
+    if Path::new(UPDATE_TRIGGER).exists() {
         return Ok(());
+    }
+    if Path::new(UPDATE_LOCK).exists() {
+        return Err(anyhow!("update unavailable while rebooting"));
     }
 
     let started = Command::new(UPDATE_COMMAND)

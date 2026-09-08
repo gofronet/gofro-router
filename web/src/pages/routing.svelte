@@ -1,146 +1,208 @@
 <script lang="ts">
-  import GitFork from "lucide-svelte/icons/git-fork";
+  import GripVertical from "lucide-svelte/icons/grip-vertical";
+  import MoreHorizontal from "lucide-svelte/icons/more-horizontal";
   import Plus from "lucide-svelte/icons/plus";
   import Search from "lucide-svelte/icons/search";
-  import ShieldCheck from "lucide-svelte/icons/shield-check";
-
-  import RoutingRule from "../components/routing-rule.svelte";
+  import Dialog from "../components/dialog.svelte";
+  import type { RouteTarget, RoutingConfig, RoutingTest } from "../domain/models";
   import { getAppContext } from "../app-context";
-  import type {
-    DomainRule,
-    IpRule,
-    RouteTarget,
-    RoutingConfig,
-    RoutingTest,
-  } from "../domain/models";
+  import { cloneRules, packRules, reorderRules, type DraftRule } from "./routing-rules";
+
+  type Editor = { rule: DraftRule; index: number } | null;
 
   const app = getAppContext();
   const status = $derived(app.status);
-  const busy = $derived(app.busy);
-  let draft = $state<RoutingConfig>($state.snapshot(app.status.routing.config));
+  const routing = $derived(status.routing.config);
+  const targets: { value: RouteTarget; label: string }[] = [{ value: "vpn", label: "Через VPN" }, { value: "direct", label: "Без VPN" }, { value: "block", label: "Блокировать" }];
+  const matcherOptions = {
+    domain: [{ value: "suffix", label: "Сайт целиком", help: "Домен и все его поддомены. Например, example.com." }, { value: "exact", label: "Только этот адрес", help: "Только указанный домен, без поддоменов." }, { value: "geo_site", label: "Список сайтов", help: "Например, category-ru для российского списка." }],
+    ip: [{ value: "cidr", label: "IP-адрес или сеть", help: "Один IP или сеть CIDR, например 192.0.2.0/24." }, { value: "geo_ip", label: "Страна или список адресов", help: "Например, ru для России." }],
+  };
+
+  // Keep an editing draft independent from polling updates.
+  let draft = $state<DraftRule[]>([]);
+  let mode = $state<RoutingConfig["mode"]>("rules");
+  let defaultTarget = $state<RouteTarget>("vpn");
+  let initialized = $state(false);
+  let query = $state("");
+  let filter = $state<RouteTarget | "all">("all");
+  let editor = $state<Editor>(null);
+  let deleting = $state<DraftRule | null>(null);
+  let saving = $state(false);
+  let saved = $state("");
+  let announcement = $state("");
   let testValue = $state("");
   let testResult = $state<RoutingTest | null>(null);
   let testError = $state("");
   let testing = $state(false);
+  let dragging = $state<{ key: string; target: number | null; after: boolean } | null>(null);
 
-  const targets: { value: RouteTarget; label: string }[] = [
-    { value: "direct", label: "Напрямую" },
-    { value: "vpn", label: "VPN" },
-    { value: "block", label: "Блокировать" },
-  ];
+  $effect(() => {
+    if (!initialized) { draft = cloneRules(routing, key); mode = routing.mode; defaultTarget = routing.default_target; initialized = true; }
+  });
 
-  function addDomain() {
-    draft.domain_rules.push({
-      name: "Новое доменное правило",
-      enabled: true,
-      matcher: { type: "suffix", value: "" },
-      target: "direct",
-    });
+  const filtered = $derived(draft.filter((rule) => (filter === "all" || rule.target === filter) && `${rule.name} ${rule.value}`.toLowerCase().includes(query.trim().toLowerCase())));
+  const reorderDisabled = $derived(Boolean(query.trim() || filter !== "all"));
+
+  function key() { return crypto.randomUUID(); }
+  function config(): RoutingConfig {
+    return packRules(mode, defaultTarget, draft);
   }
-
-  function addIp() {
-    draft.ip_rules.push({
-      name: "Новое IP-правило",
-      enabled: true,
-      matcher: { type: "cidr", value: "" },
-      target: "direct",
-    });
+  async function persist(previous: DraftRule[] = draft) {
+    if (saving || app.busy) return false;
+    saving = true; saved = "";
+    const ok = await app.saveRouting($state.snapshot(config()));
+    saving = false;
+    if (ok) { saved = "Сохранено"; return true; }
+    draft = previous;
+    return false;
   }
-
-  function setDomainType(index: number, type: DomainRule["matcher"]["type"]) {
-    draft.domain_rules[index].matcher = { type, value: "" } as DomainRule["matcher"];
+  async function setMode(next: RoutingConfig["mode"]) {
+    if (next === mode || saving || app.busy) return;
+    const previous = mode; mode = next;
+    if (!(await persist())) mode = previous;
   }
-
-  function setIpType(index: number, type: IpRule["matcher"]["type"]) {
-    draft.ip_rules[index].matcher = { type, value: "" } as IpRule["matcher"];
+  async function setDefaultTarget(next: string) {
+    if (next !== "vpn" && next !== "direct" && next !== "block") return;
+    if (next === defaultTarget || saving || app.busy) return;
+    const previous = defaultTarget; defaultTarget = next;
+    if (!(await persist())) defaultTarget = previous;
   }
-
-  function move<T>(items: T[], index: number, offset: number) {
-    const target = index + offset;
-    if (target < 0 || target >= items.length) return;
-    [items[index], items[target]] = [items[target], items[index]];
-  }
-
-  async function save() {
-    if (await app.saveRouting($state.snapshot(draft))) {
-      draft = $state.snapshot(app.status.routing.config);
+  function openNew() { editor = { index: draft.length, rule: { key: key(), kind: "domain", name: "", value: "", matcher: "suffix", target: "vpn", enabled: true } }; }
+  function normalize(rule: DraftRule) {
+    if (rule.matcher === "exact" || rule.matcher === "suffix") {
+      try { const url = new URL(rule.value.includes("://") ? rule.value : `https://${rule.value}`); rule.value = url.hostname.toLowerCase().replace(/\.$/, ""); } catch { /* Backend returns authoritative validation errors. */ }
     }
   }
-
-  async function testRoute(event: SubmitEvent) {
+  function setMatcher(value: string) {
+    if (!editor) return;
+    if (value === "cidr" || value === "geo_ip") editor.rule = { ...editor.rule, kind: "ip", matcher: value, value: "" };
+    else if (value === "exact" || value === "suffix" || value === "geo_site") editor.rule = { ...editor.rule, kind: "domain", matcher: value, value: "" };
+  }
+  async function saveEditor(event: SubmitEvent) {
     event.preventDefault();
-    if (!testValue.trim()) return;
-    testing = true;
-    testError = "";
-    testResult = null;
-    try {
-      testResult = await app.testRouting(testValue.trim());
-    } catch (error) {
-      testError = error instanceof Error ? error.message : "Не удалось проверить маршрут";
-    } finally {
-      testing = false;
-    }
+    if (!editor || saving) return;
+    const previous = $state.snapshot(draft);
+    const rule = $state.snapshot(editor.rule); normalize(rule);
+    const next = [...draft];
+    const oldIndex = next.findIndex((item) => item.key === rule.key);
+    if (oldIndex >= 0) next.splice(oldIndex, 1);
+    next.splice(Math.max(0, Math.min(editor.index, next.length)), 0, rule);
+    draft = next;
+    if (await persist(previous)) editor = null;
   }
+  async function toggle(rule: DraftRule) {
+    const previous = $state.snapshot(draft); rule.enabled = !rule.enabled; draft = [...draft]; await persist(previous);
+  }
+  async function remove() {
+    if (!deleting || saving) return;
+    const previous = $state.snapshot(draft); draft = draft.filter((rule) => rule.key !== deleting?.key);
+    if (await persist(previous)) { deleting = null; editor = null; }
+  }
+  async function move(from: number, to: number, focusKey = draft[from]?.key) {
+    if (saving || reorderDisabled || from === to || to < 0 || to >= draft.length) return;
+    const previous = $state.snapshot(draft); const rule = draft[from]; draft = reorderRules(draft, from, to);
+    if (await persist(previous)) { announcement = `«${rule.name || "Правило"}» перемещено на позицию ${to + 1}.`; requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`[data-rule-key="${focusKey}"]`)?.focus()); }
+  }
+  function pointerDown(event: PointerEvent & { currentTarget: HTMLButtonElement }, rule: DraftRule) {
+    if (reorderDisabled || saving || event.button !== 0) return;
+    dragging = { key: rule.key, target: null, after: false }; event.currentTarget.setPointerCapture(event.pointerId);
+  }
+  function pointerMove(event: PointerEvent) {
+    if (!dragging) return;
+    const row = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-rule-row]");
+    if (!row || row.dataset.ruleRow === dragging.key) return;
+    dragging.target = draft.findIndex((rule) => rule.key === row.dataset.ruleRow);
+    dragging.after = event.clientY > row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2;
+  }
+  function pointerUp() {
+    if (!dragging) return;
+    const { key, target, after } = dragging; dragging = null;
+    const from = draft.findIndex((rule) => rule.key === key); if (target !== null) move(from, target + (after ? 1 : 0) - (from < target ? 1 : 0), key);
+  }
+  function cancelDrag() {
+    if (!dragging) return;
+    dragging = null; announcement = "Перемещение отменено.";
+  }
+  function handleReorderKey(event: KeyboardEvent, rule: DraftRule) {
+    if (event.key === "Escape") { dragging = null; announcement = "Перемещение отменено."; return; }
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault(); move(draft.indexOf(rule), draft.indexOf(rule) + (event.key === "ArrowUp" ? -1 : 1), rule.key);
+  }
+  async function testRoute(event: SubmitEvent) {
+    event.preventDefault(); if (!testValue.trim() || testing) return;
+    testing = true; testError = ""; testResult = null;
+    try { testResult = await app.testRouting(testValue.trim()); } catch (error) { testError = error instanceof Error ? error.message : "Не удалось проверить маршрут"; } finally { testing = false; }
+  }
+  function closeEditor() { if (!saving) editor = null; }
 </script>
 
-<svelte:head><title>Маршруты · Gofro Router</title></svelte:head>
+<svelte:head><title>Правила VPN · Gofro Router</title></svelte:head>
 
-<section class="grid min-w-0 gap-5 lg:gap-6" aria-labelledby="routing-title">
-  <header class="min-w-0 px-0.5 py-2 sm:flex sm:items-end sm:justify-between sm:gap-6">
-    <div class="min-w-0">
-      <span class="text-xs font-bold tracking-[0.18em] text-[#74747d] uppercase">Split routing</span>
-      <h1 class="mt-2 text-[clamp(2.25rem,11vw,3.25rem)] leading-[0.98] font-extrabold tracking-[-0.06em] lg:text-[clamp(3rem,5vw,4.2rem)]" id="routing-title">Маршруты</h1>
-      <p class="mt-3.5 max-w-2xl text-base leading-relaxed text-[#74747d]">Российские ресурсы идут напрямую, остальной трафик через выбранный VPN.</p>
+<section aria-labelledby="routing-rules-title">
+  <section class="panel mode-panel">
+    <h2>Как использовать VPN</h2>
+    <div class="segmented" aria-label="Режим VPN">
+      <button type="button" aria-pressed={mode === "rules"} disabled={saving || app.busy} onclick={() => setMode("rules")}>По правилам</button>
+      <button type="button" aria-pressed={mode === "all"} disabled={saving || app.busy} onclick={() => setMode("all")}>Весь интернет</button>
     </div>
-    <button class="mt-4 min-h-13 shrink-0 rounded-2xl border border-[#09090b] bg-[#09090b] px-6 text-sm font-bold text-white sm:mb-1 sm:mt-0" type="button" disabled={busy} onclick={save}>{app.mutation === "routing" ? "Применяем…" : "Применить"}</button>
-  </header>
+    <p>{mode === "all" ? "Правила сохранены, но сейчас не применяются." : defaultTarget === "block" ? "Остальные сайты блокируются." : defaultTarget === "vpn" ? "Остальные сайты открываются через VPN." : "Остальные сайты открываются без VPN."}</p>
+    {#if !status.vpn_enabled}<p>VPN отключён. Правила блокировки могут оставаться активными.</p>{/if}
+  </section>
 
-  <div class="grid gap-3 md:grid-cols-[1.3fr_0.7fr]">
-    <article class="rounded-[28px] bg-[linear-gradient(145deg,#202024,#09090b_72%)] p-6 text-white shadow-xl shadow-black/10">
-      <div class="flex items-start justify-between gap-4">
-        <div><span class="text-xs text-[#aaaab1]">Маршрут по умолчанию</span><h2 class="mt-1.5 text-2xl font-bold tracking-[-0.045em]">Весь остальной трафик</h2></div>
-        <div class="grid size-12 shrink-0 place-items-center rounded-2xl bg-white text-[#09090b]"><GitFork size={22} /></div>
-      </div>
-      <select class="mt-6 h-14 w-full rounded-2xl border border-[#3b3b40] bg-[#252529] px-4 text-sm font-bold text-white" bind:value={draft.default_target}>
-        {#each targets as target}<option value={target.value}>{target.label}</option>{/each}
-      </select>
-    </article>
-    <article class="rounded-[28px] border border-[#dedee1] bg-white p-6 shadow-sm">
-      <div class="flex items-center gap-3"><div class="grid size-11 place-items-center rounded-2xl bg-[#eef4ec] text-[#365a31]"><ShieldCheck size={21} /></div><div><span class="text-xs text-[#74747d]">Состояние</span><strong class="block text-sm">{status.routing.dns_active ? "FakeDNS активен" : "FakeDNS недоступен"}</strong></div></div>
-      <dl class="mt-5 grid grid-cols-2 gap-3 text-xs"><div class="rounded-2xl bg-[#f5f5f5] p-3"><dt class="text-[#74747d]">FakeIP</dt><dd class="mt-1 text-lg font-bold">{status.routing.fake_ips}</dd></div><div class="rounded-2xl bg-[#f5f5f5] p-3"><dt class="text-[#74747d]">Dataplane</dt><dd class="mt-1 text-lg font-bold">{status.routing.dataplane_active && status.routing.geosite_loaded && status.routing.geoip_loaded ? "OK" : "Ошибка"}</dd></div></dl>
-      <div class="mt-4 flex items-center justify-between gap-3 border-t border-[#ececef] pt-4">
-        <div><span class="text-xs text-[#74747d]">VPN-туннель</span><strong class="block text-sm">{status.vpn_enabled ? "Включён" : "Выключен"}</strong></div>
-        <button class="min-h-10 rounded-xl border border-[#dedee1] bg-white px-4 text-xs font-bold" type="button" disabled={busy} aria-pressed={status.vpn_enabled} onclick={() => app.setMode(!status.vpn_enabled)}>{app.mutation === "mode" ? "Переключаем…" : status.vpn_enabled ? "Отключить" : "Включить"}</button>
-      </div>
-    </article>
+  <div class="section-caption">
+    <div><h2 id="routing-rules-title">Правила <span class="count">{draft.length}</span></h2><p>Если сайту подходят несколько правил, сработает верхнее.</p></div>
+    <button class="btn" type="button" disabled={saving || app.busy} onclick={openNew}><Plus class="icon" />Добавить</button>
   </div>
-
-  <section class="grid gap-3" aria-labelledby="domain-rules-title">
-    <header class="flex items-end justify-between gap-3 px-1"><div><span class="text-xs font-bold tracking-[0.18em] text-[#74747d] uppercase">Exact, suffix и V2Ray GeoSite</span><h2 class="mt-1.5 text-xl font-bold tracking-[-0.035em]" id="domain-rules-title">Доменные правила</h2></div><button class="flex min-h-11 items-center gap-2 rounded-xl border border-[#dedee1] bg-white px-4 text-xs font-bold" type="button" onclick={addDomain}><Plus size={17} />Добавить</button></header>
-    {#if draft.domain_rules.length === 0}<div class="rounded-[24px] border border-dashed border-[#c8c8ce] p-7 text-center text-sm text-[#74747d]">Правил нет</div>{/if}
-    {#each draft.domain_rules as rule, index}
-      <RoutingRule bind:name={rule.name} bind:enabled={rule.enabled} bind:target={rule.target} {index} last={draft.domain_rules.length - 1} onup={() => move(draft.domain_rules, index, -1)} ondown={() => move(draft.domain_rules, index, 1)} onremove={() => draft.domain_rules.splice(index, 1)}>
-        <select class="h-12 rounded-xl border border-[#dedee1] bg-white px-3 text-xs font-semibold" value={rule.matcher.type} onchange={(event) => setDomainType(index, event.currentTarget.value as DomainRule["matcher"]["type"])}><option value="exact">Точный домен</option><option value="suffix">Домен и поддомены</option><option value="geo_site">GeoSite</option></select>
-        <input class="h-12 min-w-0 rounded-xl border border-[#dedee1] bg-white px-3 text-sm" bind:value={rule.matcher.value} required placeholder={rule.matcher.type === "geo_site" ? "category-ru" : "example.ru"} />
-      </RoutingRule>
-    {/each}
+  <div class="form-line mb-[15px]">
+    <label class="search-input"><Search class="icon" /><input type="search" bind:value={query} placeholder="Найти сайт или правило" aria-label="Поиск правил" /></label>
+    <select class="w-[126px] shrink-0 text-[13px] min-[921px]:w-[145px]" bind:value={filter} aria-label="Фильтр правил"><option value="all">Все правила</option>{#each targets as target (target.value)}<option value={target.value}>{target.label}</option>{/each}</select>
+  </div>
+  {#if reorderDisabled}<p class="notice">Очистите поиск и фильтр, чтобы изменить порядок.</p>{/if}
+  <section class="panel">
+    {#each filtered as rule (rule.key)}
+      {@const ruleIndex = draft.indexOf(rule)}
+      <article class="rule-row" class:disabled={!rule.enabled} class:dragging={dragging?.key === rule.key} class:drop-before={dragging?.target === ruleIndex && !dragging.after} class:drop-after={dragging?.target === ruleIndex && dragging.after} data-rule-row={rule.key}>
+        <span class="rule-index">{String(ruleIndex + 1).padStart(2, "0")}</span>
+        <button class="drag-handle" data-rule-key={rule.key} type="button" aria-keyshortcuts="ArrowUp ArrowDown" aria-label={`Изменить порядок: ${rule.name}. Стрелки вверх и вниз перемещают правило.`} aria-pressed={dragging?.key === rule.key} disabled={reorderDisabled || saving || app.busy} onpointerdown={(event) => pointerDown(event, rule)} onpointermove={pointerMove} onpointerup={pointerUp} onpointercancel={cancelDrag} onkeydown={(event) => handleReorderKey(event, rule)}><GripVertical class="icon" /></button>
+        <button class="switch" type="button" role="switch" aria-checked={rule.enabled} aria-label={`Включить правило ${rule.name}`} disabled={saving || app.busy} onclick={() => toggle(rule)}><span class="switch-track"></span></button>
+        <div class="row-main"><h3>{rule.name || "Без названия"}</h3><p>{rule.value || "Значение не указано"}</p></div>
+        <span class="tag">{targets.find((target) => target.value === rule.target)?.label}</span>
+        <button class="icon-btn" type="button" aria-label={`Изменить ${rule.name}`} disabled={saving || app.busy} onclick={() => editor = { rule: $state.snapshot(rule), index: ruleIndex }}><MoreHorizontal class="icon" /></button>
+      </article>
+    {:else}<div class="empty"><h3>{draft.length ? "Правила не найдены" : "Правил пока нет"}</h3><p>{draft.length ? "Измените запрос или фильтр." : "Добавьте первое правило."}</p></div>{/each}
   </section>
+  {#if saved}<p class="notice" role="status">{saved}</p>{/if}
+  <p class="sr-only" aria-live="polite">{announcement}</p>
 
-  <section class="grid gap-3" aria-labelledby="ip-rules-title">
-    <header class="flex items-end justify-between gap-3 px-1"><div><span class="text-xs font-bold tracking-[0.18em] text-[#74747d] uppercase">CIDR и V2Ray GeoIP</span><h2 class="mt-1.5 text-xl font-bold tracking-[-0.035em]" id="ip-rules-title">IP-правила</h2></div><button class="flex min-h-11 items-center gap-2 rounded-xl border border-[#dedee1] bg-white px-4 text-xs font-bold" type="button" onclick={addIp}><Plus size={17} />Добавить</button></header>
-    {#if draft.ip_rules.length === 0}<div class="rounded-[24px] border border-dashed border-[#c8c8ce] p-7 text-center text-sm text-[#74747d]">Правил нет</div>{/if}
-    {#each draft.ip_rules as rule, index}
-      <RoutingRule bind:name={rule.name} bind:enabled={rule.enabled} bind:target={rule.target} {index} last={draft.ip_rules.length - 1} onup={() => move(draft.ip_rules, index, -1)} ondown={() => move(draft.ip_rules, index, 1)} onremove={() => draft.ip_rules.splice(index, 1)}>
-        <select class="h-12 rounded-xl border border-[#dedee1] bg-white px-3 text-xs font-semibold" value={rule.matcher.type} onchange={(event) => setIpType(index, event.currentTarget.value as IpRule["matcher"]["type"])}><option value="cidr">CIDR</option><option value="geo_ip">GeoIP</option></select>
-        <input class="h-12 min-w-0 rounded-xl border border-[#dedee1] bg-white px-3 text-sm" bind:value={rule.matcher.value} required placeholder={rule.matcher.type === "geo_ip" ? "ru" : "203.0.113.0/24"} />
-      </RoutingRule>
-    {/each}
+  <section class="panel mt-5" aria-labelledby="route-test-title">
+    <div class="panel-head"><h2 id="route-test-title">Как откроется сайт?</h2></div>
+    <div class="panel-body">
+      <form onsubmit={testRoute}>
+        <label class="field">Адрес сайта или IP<input bind:value={testValue} placeholder="Например, youtube.com" autocapitalize="off" spellcheck="false" required /></label>
+        <button class="btn" disabled={testing}>{testing ? "Проверяем…" : "Проверить"}</button>
+      </form>
+      {#if testResult}{@const result = testResult}<div class="notice" role="status"><strong>{result.value} → {targets.find((target) => target.value === result.target)?.label}</strong><span class="small block mt-1">{result.matched_rule ? `Правило: ${result.matched_rule}` : "Маршрут по умолчанию"}</span>{#if result.scope === "domain_preview"}<span class="small block mt-2">Предварительный результат для домена. IP и LAN-зависимые правила зависят от DNS.</span>{/if}{#if !status.vpn_enabled}<span class="small block mt-2">VPN выключен; правила блокировки всё равно могут применяться.</span>{/if}</div>{/if}
+      {#if testError}<p class="error" role="alert">{testError}</p>{/if}
+    </div>
   </section>
-
-  <article class="rounded-[28px] border border-[#dedee1] bg-white p-5 shadow-sm sm:p-6">
-    <header><span class="text-xs font-bold tracking-[0.18em] text-[#74747d] uppercase">Route test</span><h2 class="mt-1.5 text-xl font-bold tracking-[-0.035em]">Проверить правило</h2></header>
-    <form class="mt-5 grid gap-3 sm:grid-cols-[1fr_auto]" onsubmit={testRoute}><label class="relative"><Search class="absolute left-4 top-1/2 -translate-y-1/2 text-[#74747d]" size={18} /><input class="h-14 w-full rounded-2xl border border-[#dedee1] bg-white pl-11 pr-4 text-sm" bind:value={testValue} placeholder="vk.com или 5.136.1.1" /></label><button class="min-h-13 rounded-2xl border border-[#09090b] bg-[#09090b] px-6 text-sm font-bold text-white" disabled={testing}>{testing ? "Проверяем…" : "Проверить"}</button></form>
-    {#if testResult}<p class="mt-3 rounded-2xl bg-[#f5f5f5] p-4 text-sm"><strong>{testResult.value} → {testResult.target.toUpperCase()}</strong><span class="mt-1 block text-xs text-[#74747d]">{testResult.matched_rule || "Маршрут по умолчанию"}</span></p>{/if}
-    {#if testError}<p class="mt-3 rounded-2xl border border-red-200 bg-red-50 p-4 text-xs text-red-700">{testError}</p>{/if}
-  </article>
+  <section class="panel">
+    <details class="disclosure">
+      <summary>Остальные сайты</summary>
+      <div class="details-content">
+        <label class="field">Как открывать сайты без правила<select value={defaultTarget} disabled={saving || app.busy} onchange={(event) => setDefaultTarget(event.currentTarget.value)}>{#each targets as target (target.value)}<option value={target.value}>{target.label}</option>{/each}</select></label>
+      </div>
+    </details>
+  </section>
 </section>
+
+{#if editor}
+  {@const activeEditor = editor}
+  <Dialog title={draft.some((rule) => rule.key === activeEditor.rule.key) ? "Изменить правило" : "Новое правило"} onclose={closeEditor} busy={saving}>
+    <form onsubmit={saveEditor}><label class="field">Название<input bind:value={activeEditor.rule.name} required maxlength="64" placeholder="Например, рабочий сайт" /></label><label class="field">Для чего<select value={activeEditor.rule.matcher} onchange={(event) => setMatcher(event.currentTarget.value)}><option value="suffix">Сайт целиком</option><option value="exact">Только этот адрес</option><option value="geo_site">Список сайтов</option><option value="cidr">IP-адрес или сеть</option><option value="geo_ip">Страна или список адресов</option></select></label><label class="field">Значение<input bind:value={activeEditor.rule.value} required autocapitalize="off" spellcheck="false" placeholder={activeEditor.rule.matcher === "cidr" ? "192.0.2.0/24" : activeEditor.rule.matcher === "geo_ip" ? "ru" : activeEditor.rule.matcher === "geo_site" ? "category-ru" : "example.com"} /><span class="field-help">{matcherOptions[activeEditor.rule.kind].find((item) => item.value === activeEditor.rule.matcher)?.help}</span></label><label class="field">Как открывать<select bind:value={activeEditor.rule.target}>{#each targets as target (target.value)}<option value={target.value}>{target.label}</option>{/each}</select></label><details class="disclosure" style="padding: 0"><summary>Порядок применения</summary><div class="details-content"><label class="field">Позиция в списке<input type="number" min="1" max={draft.length + (draft.some((rule) => rule.key === activeEditor.rule.key) ? 0 : 1)} value={activeEditor.index + 1} onchange={(event) => activeEditor.index = Number(event.currentTarget.value) - 1} /></label></div></details>{#if app.actionError}<p class="error" role="alert">{app.actionError}</p>{/if}<div class="form-actions">{#if draft.some((rule) => rule.key === activeEditor.rule.key)}<button class="btn ghost danger" type="button" disabled={saving} onclick={() => deleting = activeEditor.rule}>Удалить</button>{:else}<span></span>{/if}<button class="btn primary" type="submit" disabled={saving}>{saving ? "Сохраняем…" : "Сохранить"}</button></div></form>
+  </Dialog>
+{/if}
+
+{#if deleting}
+  <Dialog title="Удалить правило?" onclose={() => deleting = null} busy={saving}><p class="dialog-intro">«{deleting.name || "Без названия"}» будет удалено.</p>{#if app.actionError}<p class="error" role="alert">{app.actionError}</p>{/if}<div class="form-actions"><button class="btn ghost" type="button" disabled={saving} onclick={() => deleting = null}>Отмена</button><button class="btn primary danger" type="button" disabled={saving} onclick={remove}>Удалить</button></div></Dialog>
+{/if}

@@ -38,6 +38,10 @@ chmod +x "$SERVICE"
 request_update
 [ -e "$TRIGGER" ]
 rm -f "$TRIGGER"
+mkdir "$LOCK"
+if request_update; then exit 1; fi
+[ ! -e "$TRIGGER" ]
+rmdir "$LOCK"
 
 cat > "$UPDATE" <<'EOF'
 #!/bin/sh

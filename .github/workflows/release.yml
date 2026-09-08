@@ -86,6 +86,7 @@ jobs:
           cmp deploy/openwrt/update-public.pem deploy/raspios/update-public.pem
           cmp deploy/openwrt/update-public.pem deploy/server/update-public.pem
           sh deploy/openwrt/tests/mode.sh
+          sh deploy/openwrt/tests/service.sh
           sh deploy/openwrt/tests/health.sh
           sh deploy/openwrt/tests/hotplug.sh
           sh deploy/openwrt/tests/transaction.sh
@@ -97,6 +98,7 @@ jobs:
           sh deploy/openwrt/tests/install-output.sh
           sh deploy/raspios/tests/health.sh
           sh deploy/raspios/tests/mode.sh
+          sh deploy/raspios/tests/service.sh
           sh deploy/raspios/tests/network.sh
           sh deploy/raspios/tests/recover.sh
           sh deploy/raspios/tests/transaction.sh
@@ -114,6 +116,7 @@ jobs:
         run: |
           bun install --frozen-lockfile
           bun run check
+          bun test
           bun run build
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5

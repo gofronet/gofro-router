@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     model::{IpMatch, RouteTarget},
-    routing::RoutingPolicy,
+    routing::{LAN_RANGES, RoutingPolicy},
 };
 
 pub(crate) const DIRECT_MARK: u32 = 0x10000;
@@ -113,7 +113,8 @@ fn render(lan_interface: &str, policy: &RoutingPolicy, mappings: &[FakeMapping])
         .unwrap();
     }
 
-    for (index, rule) in policy.config().ip_rules.iter().enumerate() {
+    for index in policy.ip_rule_indices() {
+        let rule = &policy.config().ip_rules[index];
         if !rule.enabled {
             continue;
         }
@@ -156,10 +157,12 @@ fn render(lan_interface: &str, policy: &RoutingPolicy, mappings: &[FakeMapping])
     .unwrap();
     writeln!(
         script,
-        "add rule inet {TABLE} gofro_mark iifname \"{lan_interface}\" meta mark 0 ip daddr {{ 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 }} meta mark set {DIRECT_MARK}"
+        "add rule inet {TABLE} gofro_mark iifname \"{lan_interface}\" meta mark 0 ip daddr {{ {} }} meta mark set {DIRECT_MARK}",
+        LAN_RANGES.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
     )
     .unwrap();
-    for (index, rule) in policy.config().ip_rules.iter().enumerate() {
+    for index in policy.ip_rule_indices() {
+        let rule = &policy.config().ip_rules[index];
         if !rule.enabled {
             continue;
         }
@@ -174,7 +177,7 @@ fn render(lan_interface: &str, policy: &RoutingPolicy, mappings: &[FakeMapping])
         )
         .unwrap();
     }
-    let default_mark = target_mark(policy.config().default_target);
+    let default_mark = target_mark(policy.effective_fallback());
     writeln!(
         script,
         "add rule inet {TABLE} gofro_mark iifname \"{lan_interface}\" meta mark 0 meta mark set {default_mark}"
@@ -242,7 +245,7 @@ mod tests {
     use super::*;
     use crate::{
         geodata::GeoData,
-        model::{IpMatch, IpRule, RoutingConfig},
+        model::{IpMatch, IpRule, RoutingConfig, RoutingMode, RuleRef},
     };
 
     #[test]
@@ -259,6 +262,8 @@ mod tests {
                     target: RouteTarget::Block,
                 }],
                 default_target: RouteTarget::Vpn,
+                mode: RoutingMode::Rules,
+                rule_order: None,
             },
             Arc::new(GeoData::default()),
         )
@@ -278,6 +283,8 @@ mod tests {
         assert!(script.contains("meta mark set 0"));
         assert!(script.contains("meta mark 0 meta mark set 131072"));
         assert!(script.contains("meta mark 196608 drop"));
+        assert!(script.contains("224.0.0.0/4"));
+        assert!(script.contains("255.255.255.255/32"));
         let local = script.find("127.0.0.0/8").unwrap();
         let custom = script
             .find("ip daddr 10.0.0.0/8 meta mark set 196608")
@@ -287,5 +294,42 @@ mod tests {
         assert!(script.contains("add chain inet gofro_routing gofro_dnat"));
         assert!(!script.contains("gofro_routing mark"));
         assert!(script.contains("dnat ip to ip daddr map @fake_to_real"));
+    }
+
+    #[test]
+    fn renders_ip_rules_in_effective_order_and_none_in_all_mode() {
+        let config = RoutingConfig {
+            domain_rules: vec![],
+            ip_rules: vec![
+                IpRule {
+                    name: "First".into(),
+                    enabled: true,
+                    matcher: IpMatch::Cidr {
+                        value: "1.0.0.0/8".into(),
+                    },
+                    target: RouteTarget::Direct,
+                },
+                IpRule {
+                    name: "Second".into(),
+                    enabled: true,
+                    matcher: IpMatch::Cidr {
+                        value: "1.1.0.0/16".into(),
+                    },
+                    target: RouteTarget::Block,
+                },
+            ],
+            default_target: RouteTarget::Direct,
+            mode: RoutingMode::Rules,
+            rule_order: Some(vec![RuleRef::Ip { index: 1 }, RuleRef::Ip { index: 0 }]),
+        };
+        let policy = RoutingPolicy::compile(config.clone(), Arc::new(GeoData::default())).unwrap();
+        let script = render("wlan0", &policy, &[]);
+        assert!(script.find("1.1.0.0/16").unwrap() < script.find("1.0.0.0/8").unwrap());
+        let mut all = config;
+        all.mode = RoutingMode::All;
+        let policy = RoutingPolicy::compile(all, Arc::new(GeoData::default())).unwrap();
+        let script = render("wlan0", &policy, &[]);
+        assert!(!script.contains("1.1.0.0/16"));
+        assert!(script.contains("meta mark 0 meta mark set 131072"));
     }
 }
