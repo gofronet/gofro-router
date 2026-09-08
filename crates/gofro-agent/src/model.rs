@@ -18,6 +18,8 @@ pub(crate) struct ControllerConfig {
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct ServerProfile {
     pub(crate) name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) emoji: String,
     pub(crate) endpoint: String,
     pub(crate) public_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -38,6 +40,7 @@ pub(crate) struct ManagedServer {
 #[derive(Debug, Serialize)]
 pub(crate) struct ServerStatus {
     pub(crate) name: String,
+    pub(crate) emoji: String,
     pub(crate) endpoint: String,
     pub(crate) public_key: String,
     pub(crate) managed: bool,
@@ -47,6 +50,7 @@ impl From<&ServerProfile> for ServerStatus {
     fn from(server: &ServerProfile) -> Self {
         Self {
             name: server.name.clone(),
+            emoji: server.emoji.clone(),
             endpoint: server.endpoint.clone(),
             public_key: server.public_key.clone(),
             managed: server.management.is_some(),
@@ -73,6 +77,8 @@ pub(crate) struct ServerUpdate {
     pub(crate) name: String,
     pub(crate) endpoint: String,
     pub(crate) public_key: String,
+    #[serde(default)]
+    pub(crate) emoji: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -242,6 +248,14 @@ pub(crate) struct AgentStatus {
     pub(crate) history: Vec<HistoryPoint>,
     pub(crate) devices: Vec<DeviceStatus>,
     pub(crate) routing: RoutingStatus,
+    pub(crate) router_info: RouterInfo,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RouterInfo {
+    pub(crate) model: Option<String>,
+    pub(crate) os_name: Option<String>,
+    pub(crate) os_version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -290,10 +304,12 @@ mod tests {
             serde_json::from_str(r#"{"name":"Old","endpoint":"vpn:8443","public_key":"key"}"#)
                 .unwrap();
         assert!(server.management.is_none());
+        assert!(server.emoji.is_empty());
         let json = serde_json::to_string(&ServerStatus::from(&server)).unwrap();
         assert!(json.contains("\"managed\":false"));
         assert!(!json.contains("management"));
         assert!(!json.contains("private"));
+        assert!(json.contains("\"emoji\":\"\""));
     }
 
     #[test]
@@ -303,5 +319,14 @@ mod tests {
                 .unwrap();
         assert_eq!(routing.mode, RoutingMode::Rules);
         assert_eq!(routing.rule_order, None);
+    }
+
+    #[test]
+    fn old_server_updates_keep_the_stored_emoji() {
+        let update: ServerUpdate = serde_json::from_str(
+            r#"{"previous_public_key":"old","name":"New","endpoint":"vpn:8443","public_key":"new"}"#,
+        )
+        .unwrap();
+        assert_eq!(update.emoji, None);
     }
 }

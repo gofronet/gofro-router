@@ -98,7 +98,6 @@
         <h1 id="onboarding-title">Настройка сети</h1><p class="access-note">Получаем состояние настройки…</p>
       {:else if onboarding.step === "wifi" && !reconnecting}
         <h1 id="onboarding-title">Настройте Wi-Fi</h1>
-        <p class="access-note">Задайте имя сети и пароль.</p>
         <form onsubmit={saveWifi}>
           <div class="setup-fields">
             {#each drafts as network (network.band)}
@@ -119,11 +118,10 @@
         <button class="btn primary access-submit" type="button" onclick={app.loadOnboarding} disabled={app.onboardingLoading}>Проверить подключение</button>
       {:else if onboarding.step === "server"}
         <h1 id="onboarding-title">Подключите VPN</h1>
-        <p class="access-note">Можно добавить сейчас или сделать это позже.</p>
         {#if app.hasStatus}
           <div class="setup-choices">
             <button class="choice-button" type="button" disabled={busy} onclick={() => flow = { kind: "import" }}><Upload size={20} /><span><strong>Импортировать настройки</strong><small>Файл WireGuard (.conf)</small></span><ChevronRight size={20} /></button>
-            <button class="choice-button" type="button" disabled={busy} onclick={() => flow = { kind: "vps" }}><Server size={20} /><span><strong>Подключить свой сервер</strong><small>Вход по логину и паролю</small></span><ChevronRight size={20} /></button>
+            <button class="choice-button" type="button" disabled={busy} onclick={() => flow = { kind: "vps" }}><Server size={20} /><span><strong>Подключить свой сервер</strong></span><ChevronRight size={20} /></button>
           </div>
         {:else}
           <p class="notice">Не удалось загрузить данные VPN. Подключитесь к новой сети и повторите попытку.</p>

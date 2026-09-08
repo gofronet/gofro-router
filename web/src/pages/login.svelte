@@ -75,7 +75,6 @@
     {/if}
     <div class="access-copy">
       <h1 id="access-title">{authState === "setup" ? "Придумайте пароль" : "Вход в панель"}</h1>
-      {#if authState === "setup"}<p class="access-note">Он нужен для входа в панель.</p>{/if}
       {#if authState === "setup" && setupMethod === "local" && setupSecondsLeft !== null}<p class="access-note">Окно настройки: {Math.floor(setupSecondsLeft / 60)}:{String(setupSecondsLeft % 60).padStart(2, "0")}</p>{/if}
       <form class:mt-0={authState === "login"} onsubmit={submit}>
         {#if authState === "setup" && setupMethod === "wifi_password"}

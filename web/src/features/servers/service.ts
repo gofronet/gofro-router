@@ -17,4 +17,10 @@ export const serverService = {
   check: (publicKey: string) => api.servers.check(publicKey),
   updateManaged: (publicKey: string) => api.servers.updateManaged(publicKey),
   createProfile: (publicKey: string) => api.servers.createProfile(publicKey),
+  inspect: (publicKey: string) => api.servers.inspect(publicKey),
+  restart: (publicKey: string) => api.servers.restart(publicKey),
+  createFriend: (publicKey: string, name: string) => api.servers.createFriend(publicKey, name),
+  renameFriend: (publicKey: string, peerKey: string, name: string) => api.servers.renameFriend(publicKey, peerKey, name),
+  revokeFriend: (publicKey: string, peerKey: string) => api.servers.revokeFriend(publicKey, peerKey),
+  friendProfile: (publicKey: string, peerKey: string) => api.servers.friendProfile(publicKey, peerKey),
 };

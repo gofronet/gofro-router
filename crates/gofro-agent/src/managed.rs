@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::{self, OpenOptions},
     io::{Read, Write},
     net::IpAddr,
@@ -15,7 +16,16 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::{AppState, config::parse_server_profile, controller, model::ManagedServer};
+use wireguard_status::managed::{
+    FRIEND_NAME_INPUT_LIMIT, FriendNameInput, ManagedServerStatus, validate_name, validate_peer_key,
+};
+
+use crate::{
+    AppState,
+    config::{normalize_server_name, parse_server_profile},
+    controller,
+    model::{ControllerConfig, ManagedServer},
+};
 
 static TEMPORARY: AtomicUsize = AtomicUsize::new(0);
 const SERVER_INSTALLER: &str = include_str!("../../../deploy/server/gofro-server-install");
@@ -54,7 +64,7 @@ pub(crate) fn probe(host: String, port: u16) -> Result<Probe> {
 
 pub(crate) fn bootstrap(
     state: &AppState,
-    name: String,
+    mut name: String,
     host: String,
     port: u16,
     password: String,
@@ -65,9 +75,7 @@ pub(crate) fn bootstrap(
         .managed_operations
         .lock()
         .map_err(|_| anyhow!("managed operation lock poisoned"))?;
-    if name.trim().is_empty() || name.chars().count() > 40 || name.chars().any(char::is_control) {
-        bail!("некорректное имя сервера");
-    }
+    normalize_server_name(&mut name)?;
     validate_target(&host, port)?;
     parse_host_key(&host_key)?;
     if state
@@ -120,6 +128,7 @@ pub(crate) fn bootstrap(
         &state.management_dir,
         &host_key,
         &format!("create-router-profile {}", endpoint(&host)),
+        None,
     )?;
     let client_public_key = profile_client_public_key(&profile)?;
     let result = (|| {
@@ -139,6 +148,7 @@ pub(crate) fn bootstrap(
             &state.management_dir,
             &host_key,
             &format!("remove-router-peer {client_public_key}"),
+            None,
         );
         return match rollback {
             Ok(_) => Err(error),
@@ -166,6 +176,7 @@ fn check_unlocked(state: &AppState, public_key: &str) -> Result<Version> {
         &state.management_dir,
         &managed.host_key,
         "version",
+        None,
     )?;
     let version = parse_version(&output)?;
     Ok(Version {
@@ -187,6 +198,7 @@ pub(crate) fn update(state: &AppState, public_key: &str) -> Result<Version> {
         &state.management_dir,
         &managed.host_key,
         "update",
+        None,
     )?;
     check_unlocked(state, public_key)
 }
@@ -204,26 +216,176 @@ pub(crate) fn create_profile(state: &AppState, public_key: &str) -> Result<Strin
         &state.management_dir,
         &managed.host_key,
         &format!("create-profile {}", endpoint(&managed.host)),
+        None,
     )
 }
 
+pub(crate) fn status(state: &AppState, public_key: &str) -> Result<ManagedServerStatus> {
+    let _operation = managed_lock(state)?;
+    status_unlocked(state, public_key)
+}
+
+pub(crate) fn restart(state: &AppState, public_key: &str) -> Result<ManagedServerStatus> {
+    let _operation = managed_lock(state)?;
+    let (managed, private_key) = managed_server(state, public_key)?;
+    key_ssh(
+        &managed.host,
+        managed.port,
+        &private_key,
+        &state.management_dir,
+        &managed.host_key,
+        "restart-vpn",
+        None,
+    )?;
+    status_unlocked(state, public_key)
+}
+
+pub(crate) fn create_friend(
+    state: &AppState,
+    public_key: &str,
+    name: &str,
+) -> Result<ManagedServerStatus> {
+    let _operation = managed_lock(state)?;
+    let name = validate_name(name)?;
+    let (managed, private_key) = managed_server(state, public_key)?;
+    let input = serde_json::to_string(&FriendNameInput { name })?;
+    // The raw profile contains a private key and must not enter status or configuration.
+    key_ssh(
+        &managed.host,
+        managed.port,
+        &private_key,
+        &state.management_dir,
+        &managed.host_key,
+        &format!("create-friend {}", endpoint(&managed.host)),
+        Some(&input),
+    )?;
+    status_unlocked(state, public_key)
+}
+
+pub(crate) fn rename_friend(
+    state: &AppState,
+    public_key: &str,
+    peer_key: &str,
+    name: &str,
+) -> Result<ManagedServerStatus> {
+    let _operation = managed_lock(state)?;
+    validate_peer_key(peer_key)?;
+    let name = validate_name(name)?;
+    let (managed, private_key) = managed_server(state, public_key)?;
+    let input = serde_json::to_string(&FriendNameInput { name })?;
+    key_ssh(
+        &managed.host,
+        managed.port,
+        &private_key,
+        &state.management_dir,
+        &managed.host_key,
+        &format!("rename-friend {peer_key}"),
+        Some(&input),
+    )?;
+    status_unlocked(state, public_key)
+}
+
+pub(crate) fn revoke_friend(
+    state: &AppState,
+    public_key: &str,
+    peer_key: &str,
+) -> Result<ManagedServerStatus> {
+    let _operation = managed_lock(state)?;
+    validate_peer_key(peer_key)?;
+    let (managed, private_key) = managed_server(state, public_key)?;
+    key_ssh(
+        &managed.host,
+        managed.port,
+        &private_key,
+        &state.management_dir,
+        &managed.host_key,
+        &format!("revoke-friend {peer_key}"),
+        None,
+    )?;
+    status_unlocked(state, public_key)
+}
+
+pub(crate) fn friend_profile(state: &AppState, public_key: &str, peer_key: &str) -> Result<String> {
+    let _operation = managed_lock(state)?;
+    validate_peer_key(peer_key)?;
+    let (managed, private_key) = managed_server(state, public_key)?;
+    key_ssh(
+        &managed.host,
+        managed.port,
+        &private_key,
+        &state.management_dir,
+        &managed.host_key,
+        &format!("friend-profile {peer_key} {}", endpoint(&managed.host)),
+        None,
+    )
+}
+
+fn managed_lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, ()>> {
+    state
+        .managed_operations
+        .lock()
+        .map_err(|_| anyhow!("managed operation lock poisoned"))
+}
+
+fn status_unlocked(state: &AppState, public_key: &str) -> Result<ManagedServerStatus> {
+    let (managed, private_key) = managed_server(state, public_key)?;
+    let output = key_ssh(
+        &managed.host,
+        managed.port,
+        &private_key,
+        &state.management_dir,
+        &managed.host_key,
+        "managed-status",
+        None,
+    )?;
+    let status: ManagedServerStatus =
+        serde_json::from_str(&output).context("invalid managed server status")?;
+    validate_managed_status(&status)?;
+    Ok(status)
+}
+
+fn validate_managed_status(status: &ManagedServerStatus) -> Result<()> {
+    semver(&status.version)?;
+    let mut peers = HashSet::new();
+    for peer in &status.peers {
+        validate_peer_key(&peer.public_key)?;
+        if !peers.insert(&peer.public_key) {
+            bail!("managed server returned duplicate peer key");
+        }
+        if peer.can_share && peer.revoked {
+            bail!("managed server returned an invalid friend state");
+        }
+        if validate_name(&peer.name)? != peer.name {
+            bail!("managed server returned an unnormalized friend name");
+        }
+    }
+    Ok(())
+}
+
 fn managed_server(state: &AppState, public_key: &str) -> Result<(ManagedServer, PathBuf)> {
-    let management = state
+    let config = state
         .config
         .lock()
-        .map_err(|_| anyhow!("configuration lock poisoned"))?
+        .map_err(|_| anyhow!("configuration lock poisoned"))?;
+    let management = managed_server_config(&config, public_key)?;
+    drop(config);
+    let private_key = state.management_dir.join("id_ed25519");
+    if !private_key.is_file() {
+        bail!("management SSH key is missing");
+    }
+    Ok((management, private_key))
+}
+
+fn managed_server_config(config: &ControllerConfig, public_key: &str) -> Result<ManagedServer> {
+    validate_peer_key(public_key)?;
+    config
         .servers
         .iter()
         .find(|server| server.public_key == public_key)
         .context("сервер не найден")?
         .management
         .clone()
-        .context("сервер не управляется Gofro")?;
-    let private_key = state.management_dir.join("id_ed25519");
-    if !private_key.is_file() {
-        bail!("management SSH key is missing");
-    }
-    Ok((management, private_key))
+        .context("сервер не управляется Gofro")
 }
 
 fn validate_target(host: &str, port: u16) -> Result<()> {
@@ -496,12 +658,50 @@ fn key_ssh(
     dir: &Path,
     host_key: &str,
     remote: &str,
+    input: Option<&str>,
 ) -> Result<String> {
-    let known_hosts = known_hosts(dir, host, port, host_key)?;
-    let child = Command::new("ssh")
+    key_ssh_with_command(SshInvocation {
+        host,
+        port,
+        private_key,
+        dir,
+        host_key,
+        remote,
+        input,
+        executable: Path::new("ssh"),
+        timeout: if remote == "update" {
+            SSH_UPDATE_TIMEOUT
+        } else {
+            SSH_COMMAND_TIMEOUT
+        },
+    })
+}
+
+struct SshInvocation<'a> {
+    host: &'a str,
+    port: u16,
+    private_key: &'a Path,
+    dir: &'a Path,
+    host_key: &'a str,
+    remote: &'a str,
+    input: Option<&'a str>,
+    executable: &'a Path,
+    timeout: Duration,
+}
+
+fn key_ssh_with_command(command: SshInvocation<'_>) -> Result<String> {
+    if command
+        .input
+        .is_some_and(|value| value.len() > FRIEND_NAME_INPUT_LIMIT)
+    {
+        bail!("managed server command input is too large");
+    }
+    let known_hosts = known_hosts(command.dir, command.host, command.port, command.host_key)?;
+    let child = Command::new(command.executable)
         .args([
             "-i",
-            private_key
+            command
+                .private_key
                 .to_str()
                 .context("invalid management key path")?,
             "-o",
@@ -521,12 +721,19 @@ fn key_ssh(
             "-o",
             "ServerAliveCountMax=2",
             "-p",
-            &port.to_string(),
-            &format!("root@{host}"),
-            remote,
+            &command.port.to_string(),
+            &format!("root@{}", command.host),
+            command.remote,
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .stdin(
+            command
+                .input
+                .is_some()
+                .then(Stdio::piped)
+                .unwrap_or_else(Stdio::null),
+        )
         .spawn()
         .context("failed to run SSH");
     let mut child = match child {
@@ -536,7 +743,15 @@ fn key_ssh(
             return Err(error);
         }
     };
+    let input_error = command.input.and_then(|input| {
+        child
+            .stdin
+            .take()
+            .and_then(|mut stdin| stdin.write_all(input.as_bytes()).err())
+    });
     let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
         let _ = fs::remove_file(&known_hosts);
         bail!("failed to read SSH output");
     };
@@ -549,12 +764,7 @@ fn key_ssh(
             .map(|_| output);
         let _ = sender.send(result);
     });
-    let deadline = Instant::now()
-        + if remote == "update" {
-            SSH_UPDATE_TIMEOUT
-        } else {
-            SSH_COMMAND_TIMEOUT
-        };
+    let deadline = Instant::now() + command.timeout;
     let mut output = None;
     let result = loop {
         if output.is_none() {
@@ -565,14 +775,28 @@ fn key_ssh(
                     break Err(anyhow!("managed server SSH output is too large"));
                 }
                 Ok(Ok(value)) => output = Some(value),
-                Ok(Err(error)) => break Err(error.into()),
+                Ok(Err(error)) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(error.into());
+                }
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
                     break Err(anyhow!("failed to read SSH output"));
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
-        if let Some(status) = child.try_wait()? {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(error.into());
+            }
+        };
+        if let Some(status) = status {
             let value = match output.take() {
                 Some(value) => value,
                 None => receiver.recv().context("failed to read SSH output")??,
@@ -581,7 +805,10 @@ fn key_ssh(
                 break Err(anyhow!("managed server SSH output is too large"));
             }
             if !status.success() {
-                break Err(anyhow!("managed server SSH command failed"));
+                break Err(ssh_command_error(status));
+            }
+            if input_error.is_some() {
+                break Err(anyhow!("managed server SSH command input failed"));
             }
             break String::from_utf8(value).context("managed server returned invalid text");
         }
@@ -594,6 +821,20 @@ fn key_ssh(
     };
     let _ = fs::remove_file(&known_hosts);
     result
+}
+
+fn ssh_command_error(status: ExitStatus) -> anyhow::Error {
+    if status.code() == Some(126) {
+        anyhow!(
+            "Этот VPS использует устаревшую версию Gofro. Обновите Gofro на VPS и повторите действие."
+        )
+    } else if status.code() == Some(255) {
+        anyhow!(
+            "Не удалось подключиться к VPS по SSH. Проверьте сеть, IP-адрес, порт и SSH-ключ; это не обязательно означает, что VPS выключен."
+        )
+    } else {
+        anyhow!("managed server SSH command failed ({status})")
+    }
 }
 
 fn ssh_keygen(args: &[&str]) -> Result<String> {
@@ -714,5 +955,135 @@ mod tests {
             assert!(!error.contains("secret"));
         }
         assert!(bootstrap_result(ExitStatus::from_raw(0), "").is_ok());
+    }
+
+    #[test]
+    fn validates_typed_managed_status_and_upgrade_guidance() {
+        let key = "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=";
+        let status = ManagedServerStatus {
+            version: "0.5.14".into(),
+            peers: vec![wireguard_status::managed::FriendPeer {
+                public_key: key.into(),
+                name: "Friend".into(),
+                revoked: false,
+                can_share: true,
+            }],
+        };
+        assert!(validate_managed_status(&status).is_ok());
+        let mut invalid = status.clone();
+        invalid.peers[0].revoked = true;
+        assert!(validate_managed_status(&invalid).is_err());
+        assert!(
+            ssh_command_error(ExitStatus::from_raw(126 << 8))
+                .to_string()
+                .contains("устаревшую")
+        );
+    }
+
+    #[test]
+    fn unmanaged_servers_are_rejected_before_ssh() {
+        let key = "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=";
+        let config = ControllerConfig {
+            vpn_enabled: false,
+            active_server_key: None,
+            servers: vec![crate::model::ServerProfile {
+                name: "Unmanaged".into(),
+                emoji: String::new(),
+                endpoint: "vpn.example.com:8443".into(),
+                public_key: key.into(),
+                client_tunnel_address: None,
+                client_private_key: None,
+                management: None,
+            }],
+            routing: crate::model::RoutingConfig::default(),
+        };
+        assert!(managed_server_config(&config, key).is_err());
+    }
+
+    fn fake_ssh(dir: &Path, name: &str, script: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+
+    fn fake_key_ssh(
+        dir: &Path,
+        executable: &Path,
+        input: Option<&str>,
+        timeout: Duration,
+    ) -> Result<String> {
+        key_ssh_with_command(SshInvocation {
+            host: "1.1.1.1",
+            port: 22,
+            private_key: Path::new("unused-key"),
+            dir,
+            host_key: KEY,
+            remote: "managed-status",
+            input,
+            executable,
+            timeout,
+        })
+    }
+
+    fn fake_ssh_dir() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "gofro-ssh-{}-{}",
+            std::process::id(),
+            TEMPORARY.fetch_add(1, Ordering::Relaxed),
+        ))
+    }
+
+    #[test]
+    fn stdin_failures_still_reap_and_classify_old_vps() {
+        let dir = fake_ssh_dir();
+        fs::create_dir(&dir).unwrap();
+        let script = fake_ssh(&dir, "exit-126", "#!/bin/sh\nexit 126\n");
+        let error = fake_key_ssh(
+            &dir,
+            &script,
+            Some(r#"{"name":"Friend"}"#),
+            Duration::from_secs(1),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("устаревшую"), "{error}");
+        assert!(fs::read_dir(&dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("known_hosts")
+        }));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stdin_is_closed_and_commands_honor_the_test_timeout() {
+        let dir = fake_ssh_dir();
+        fs::create_dir(&dir).unwrap();
+        let eof = fake_ssh(&dir, "wait-eof", "#!/bin/sh\ncat >/dev/null\n");
+        assert_eq!(
+            fake_key_ssh(
+                &dir,
+                &eof,
+                Some(r#"{"name":"Friend"}"#),
+                Duration::from_secs(1)
+            )
+            .unwrap(),
+            ""
+        );
+        let busy = fake_ssh(&dir, "busy", "#!/bin/sh\nwhile :; do :; done\n");
+        let started = Instant::now();
+        assert!(fake_key_ssh(&dir, &busy, None, Duration::from_millis(1)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(fs::read_dir(&dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("known_hosts")
+        }));
+        fs::remove_dir_all(dir).unwrap();
     }
 }

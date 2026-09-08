@@ -29,7 +29,7 @@
   const loading = $derived(app.loading);
   const pollError = $derived(app.pollError);
   const actionError = $derived(app.actionError);
-  const current = $derived(navigation.find((item) => isActive(item.path)) ?? navigation.find((item) => sections.some((section) => section.title === item.title && section.items.some((tab) => isActive(tab.path)))) ?? navigation[0]);
+  const current = $derived(isActive("/server-management") ? navigation[1] : navigation.find((item) => isActive(item.path)) ?? navigation.find((item) => sections.some((section) => section.title === item.title && section.items.some((tab) => isActive(tab.path)))) ?? navigation[0]);
   const tabs = $derived(sections.find((section) => section.title === current.title)?.items ?? []);
 </script>
 
@@ -54,7 +54,7 @@
   </header>
   <main class="app-main" id="content" tabindex="-1">
     <div class="page-heading"><h1>{current.title}</h1></div>
-    {#if tabs.length}<nav class="tabs" aria-label={`Разделы ${current.title}`}>{#each tabs as tab (tab.path)}<a href={p(tab.path)} aria-current={isActive(tab.path) ? "page" : undefined}>{tab.label}</a>{/each}</nav>{/if}
+    {#if tabs.length}<nav class="tabs" aria-label={`Разделы ${current.title}`}>{#each tabs as tab (tab.path)}<a href={p(tab.path)} aria-current={isActive(tab.path) || (tab.path === "/servers" && isActive("/server-management")) ? "page" : undefined}>{tab.label}</a>{/each}</nav>{/if}
     {#if pollError && status}<div class="notice" role="status">Нет свежих данных. Показано последнее состояние: {pollError}</div>{/if}
     {#if actionError}<div class="notice error" role="alert"><strong>Операция не выполнена.</strong> {actionError} <button class="btn ghost" type="button" onclick={app.clearActionError}>Закрыть</button></div>{/if}
     {#if status?.routing.degraded}<div class="notice error" role="alert">Не удалось восстановить маршрутизацию. Сохранённые правила могут не соответствовать действующим. Перезагрузите роутер или повторно сохраните правила.</div>{/if}

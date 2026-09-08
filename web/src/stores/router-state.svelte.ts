@@ -15,6 +15,7 @@ import type {
   ServerInput,
   ServerProbe,
   ServerVersion,
+  ManagedServerStatus,
   Profile,
   Status,
   WifiBand,
@@ -373,6 +374,24 @@ export class RouterState {
     this.mutateResult(`profile:${publicKey}`, () =>
       serverService.createProfile(publicKey),
     );
+
+  inspectServer = (publicKey: string): Promise<ManagedServerStatus | null> =>
+    this.mutateResult(`inspect:${publicKey}`, () => serverService.inspect(publicKey));
+
+  restartServer = (publicKey: string): Promise<ManagedServerStatus | null> =>
+    this.mutateResult(`restart:${publicKey}`, () => serverService.restart(publicKey));
+
+  createFriend = (publicKey: string, name: string): Promise<ManagedServerStatus | null> =>
+    this.mutateResult(`friend-create:${publicKey}`, () => serverService.createFriend(publicKey, name));
+
+  renameFriend = (publicKey: string, peerKey: string, name: string): Promise<ManagedServerStatus | null> =>
+    this.mutateResult(`friend-rename:${publicKey}`, () => serverService.renameFriend(publicKey, peerKey, name));
+
+  revokeFriend = (publicKey: string, peerKey: string): Promise<ManagedServerStatus | null> =>
+    this.mutateResult(`friend-revoke:${publicKey}`, () => serverService.revokeFriend(publicKey, peerKey));
+
+  friendProfile = (publicKey: string, peerKey: string): Promise<Profile | null> =>
+    this.mutateResult(`friend-profile:${publicKey}`, () => serverService.friendProfile(publicKey, peerKey));
 
   saveAp = async (
     band: WifiBand | undefined,
