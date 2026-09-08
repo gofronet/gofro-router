@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use anyhow::{Context, Result, anyhow};
 
 use crate::{
@@ -60,7 +62,9 @@ pub(crate) fn reconcile(state: &AppState) -> Result<()> {
         .map_err(|_| anyhow!("routing lock poisoned"))?;
     let mappings = state.fake_dns.reclassified(&policy)?;
     dataplane::apply(&state.lan_interface, &policy, &mappings)?;
-    state.fake_dns.commit_targets(&policy)
+    state.fake_dns.commit_targets(&policy)?;
+    state.routing_degraded.store(false, Ordering::Relaxed);
+    Ok(())
 }
 
 pub(super) fn switch_mode(

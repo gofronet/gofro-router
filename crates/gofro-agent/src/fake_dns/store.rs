@@ -36,7 +36,7 @@ impl Store {
         Self::from_connection(connection)
     }
 
-    fn from_connection(connection: Connection) -> Result<Self> {
+    pub(super) fn from_connection(connection: Connection) -> Result<Self> {
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS fake_dns (

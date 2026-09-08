@@ -19,7 +19,7 @@ mod wifi;
 use std::{
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
 };
 
 use anyhow::{Context, Result, bail};
@@ -106,6 +106,7 @@ pub(crate) struct AppState {
     pub(crate) stats: Arc<Mutex<StatsTracker>>,
     pub(crate) geodata: Arc<GeoData>,
     pub(crate) routing: Arc<RwLock<RoutingPolicy>>,
+    pub(crate) routing_degraded: Arc<AtomicBool>,
     pub(crate) fake_dns: Arc<FakeDns>,
     pub(crate) auth: Arc<auth::Auth>,
     pub(crate) managed_operations: Arc<Mutex<()>>,
@@ -144,6 +145,7 @@ async fn main() -> Result<()> {
         stats: Arc::new(Mutex::new(StatsTracker::default())),
         geodata,
         routing: Arc::new(RwLock::new(routing)),
+        routing_degraded: Arc::new(AtomicBool::new(false)),
         fake_dns,
         auth,
         managed_operations: Arc::new(Mutex::new(())),

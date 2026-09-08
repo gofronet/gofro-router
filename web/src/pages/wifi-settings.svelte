@@ -1,332 +1,128 @@
 <script lang="ts">
-    import CheckCircle2 from "lucide-svelte/icons/circle-check";
-    import ExternalLink from "lucide-svelte/icons/external-link";
-    import Globe2 from "lucide-svelte/icons/globe-2";
-    import RefreshCw from "lucide-svelte/icons/refresh-cw";
-    import Router from "lucide-svelte/icons/router";
-    import Wifi from "lucide-svelte/icons/wifi";
+  import { getAppContext } from "../app-context";
+  import PasswordInput from "../components/password-input.svelte";
+  import SharedDialog from "../components/dialog.svelte";
+  import type { WifiBand } from "../domain/models";
 
-    import { getAppContext } from "../app-context";
-    import PasswordInput from "../components/password-input.svelte";
-    import type { WifiBand } from "../domain/models";
+  const app = getAppContext();
+  const status = $derived(app.status);
+  const busy = $derived(app.busy);
+  const reconnectSsid = $derived(app.reconnectSsid);
+  let selectedBand = $state<WifiBand | undefined>(undefined);
+  let ssid = $state("");
+  let password = $state("");
+  let error = $state("");
+  let confirmSave = $state(false);
+  let confirmDiscard = $state<WifiBand | undefined | null>(null);
+  let initialized = $state(false);
 
-    type WifiForm = {
-        band: WifiBand | undefined;
-        ssid: string;
-        password: string;
-        error: string;
-    };
+  const network = $derived(status.ap.networks.find((item) => item.band === selectedBand) ?? status.ap.networks[0]);
+  const hasChanges = $derived(Boolean(network) && (ssid !== network.ssid || password.length > 0));
 
-    const app = getAppContext();
-    const status = $derived(app.status);
-    const busy = $derived(app.busy);
-    const mutation = $derived(app.mutation);
-    const reconnectSsid = $derived(app.reconnectSsid);
-    const { saveAp, resumePolling } = app;
+  function bandLabel(band: WifiBand | undefined): string {
+    return band === "2g" ? "2,4 ГГц" : band === "5g" ? "5 ГГц" : "Wi-Fi";
+  }
 
-    let networks = $state<WifiForm[]>([]);
-    let initialized = $state(false);
-
-    $effect(() => {
-        if (!initialized) {
-            networks = status.ap.networks.map((network) => ({
-                ...network,
-                password: "",
-                error: "",
-            }));
-            initialized = true;
-        }
-    });
-
-    function bandLabel(band: WifiBand | undefined): string {
-        return band === "2g"
-            ? "2,4 ГГц"
-            : band === "5g"
-              ? "5 ГГц"
-              : "Все доступные диапазоны";
+  $effect(() => {
+    if (!initialized && network) {
+      selectedBand = network.band;
+      ssid = network.ssid;
+      initialized = true;
     }
+  });
 
-    async function submit(event: SubmitEvent, network: WifiForm) {
-        event.preventDefault();
-        const nextSsid = network.ssid.trim();
-        if (!nextSsid) {
-            network.error = "Введите имя Wi-Fi сети.";
-            return;
-        }
-        if (network.password && network.password.length < 8) {
-            network.error =
-                "Новый пароль должен содержать не менее 8 символов.";
-            return;
-        }
-        network.error = "";
-        if (await saveAp(network.band, nextSsid, network.password)) {
-            network.ssid = nextSsid;
-            network.password = "";
-        }
+  function loadBand(band: WifiBand | undefined) {
+    const next = status.ap.networks.find((item) => item.band === band);
+    if (!next) return;
+    selectedBand = band;
+    ssid = next.ssid;
+    password = "";
+    error = "";
+  }
+
+  function chooseBand(band: WifiBand | undefined) {
+    if (band === selectedBand) return;
+    if (hasChanges) {
+      confirmDiscard = band;
+      return;
     }
+    loadBand(band);
+  }
+
+  function reset() {
+    if (!network) return;
+    ssid = network.ssid;
+    password = "";
+    error = "";
+  }
+
+  function discardAndSwitch() {
+    const band = confirmDiscard;
+    if (band === null) return;
+    loadBand(band);
+    confirmDiscard = null;
+  }
+
+  function requestSave(event: SubmitEvent) {
+    event.preventDefault();
+    const nextSsid = ssid.trim();
+    if (!nextSsid || new TextEncoder().encode(nextSsid).length > 32 || /[\x00-\x1f\x7f]/.test(nextSsid)) {
+      error = "SSID: от 1 до 32 байт без управляющих символов.";
+      return;
+    }
+    if (password && !/^[\x20-\x7e]{8,63}$/.test(password)) {
+      error = "Пароль Wi-Fi: 8-63 печатных ASCII-символа.";
+      return;
+    }
+    error = "";
+    confirmSave = true;
+  }
+
+  async function save() {
+    if (!network) return;
+    confirmSave = false;
+    const nextSsid = ssid.trim();
+    if (await app.saveAp(selectedBand, nextSsid, password)) {
+      ssid = nextSsid;
+      password = "";
+    }
+  }
 </script>
 
-<svelte:head><title>Настройки · Gofro Router</title></svelte:head>
+<svelte:head><title>Сеть · Gofro Router</title></svelte:head>
 
-<section class="grid min-w-0 gap-5 lg:gap-6" aria-labelledby="wifi-title">
-    <header class="min-w-0 px-0.5 py-2">
-        <div class="min-w-0">
-            <span
-                class="text-xs font-bold tracking-[0.18em] text-[#74747d] uppercase"
-                >Управление роутером</span
-            >
-            <h1
-                class="mt-2 text-[clamp(2.25rem,11vw,3.25rem)] leading-[0.98] font-extrabold tracking-[-0.06em] lg:text-[clamp(3rem,5vw,4.2rem)]"
-                id="wifi-title"
-            >
-                Настройки
-            </h1>
-            <p
-                class="mt-3.5 max-w-2xl text-base leading-relaxed text-[#74747d]"
-            >
-                Wi-Fi и обновления в одном месте.
-            </p>
+{#if reconnectSsid}
+  <section class="panel p-6" role="status" aria-live="assertive">
+    <h2>Подключитесь заново</h2>
+    <p class="notice">Точка доступа перезапускается. Выберите сеть <strong>{reconnectSsid}</strong>, затем вернитесь на <a href="https://wifi.gofro.net">https://wifi.gofro.net</a>.</p>
+    <button class="btn primary" type="button" onclick={app.resumePolling}>Я подключился</button>
+  </section>
+{:else if network}
+  <section class="panel" aria-labelledby="wifi-title">
+    <div class="panel-head"><h2 id="wifi-title">Домашний Wi-Fi</h2></div>
+    <div class="panel-body">
+      <div class="segmented" aria-label="Диапазон Wi-Fi">
+        {#each status.ap.networks as item (item.band)}
+          <button type="button" aria-pressed={item.band === selectedBand} disabled={busy} onclick={() => chooseBand(item.band)}>{bandLabel(item.band)}</button>
+        {/each}
+      </div>
+      <form class="wifi-form" onsubmit={requestSave}>
+        <label class="field">Имя сети<input bind:value={ssid} required maxlength="32" autocomplete="off" disabled={busy} /></label>
+        <div>
+          <PasswordInput label="Новый пароль" bind:value={password} minlength={8} maxlength={63} autocomplete="new-password" placeholder="Оставить текущий" disabled={busy} />
+          <span class="field-help">8-63 символа: латинские буквы, цифры или знаки.</span>
         </div>
-    </header>
+        {#if error || app.actionError}<p class="error" role="alert">{error || app.actionError}</p>{/if}
+        <div class="form-actions"><button class="btn ghost" type="button" onclick={reset} disabled={!hasChanges || busy}>Отменить</button><button class="btn primary" type="submit" disabled={busy || !hasChanges}>{busy ? "Сохраняем…" : "Сохранить"}</button></div>
+      </form>
+    </div>
+  </section>
+  <section class="panel">
+    <details class="disclosure"><summary>Адрес роутера</summary><div class="details-content"><dl class="key-values"><div><dt>IP-адрес</dt><dd>{status.ap.address || "Нет данных"}</dd></div><div><dt>Адрес панели</dt><dd>https://{status.ap.domain || "wifi.gofro.net"}</dd></div></dl></div></details>
+  </section>
+{:else}
+  <section class="panel"><div class="empty"><h2>Нет доступных сетей Wi-Fi</h2><p>Обновите состояние роутера и попробуйте снова.</p></div></section>
+{/if}
 
-    {#if reconnectSsid}
-        <article
-            class="mx-auto flex min-h-130 w-full max-w-3xl flex-col items-center overflow-hidden rounded-[28px] bg-[linear-gradient(145deg,#202024,#09090b_72%)] px-5 py-9 text-center text-white shadow-xl shadow-black/10"
-            role="status"
-            aria-live="assertive"
-        >
-            <span
-                class="mb-5 grid size-16 place-items-center rounded-[18px] bg-white text-[#09090b]"
-                ><CheckCircle2 size={32} /></span
-            >
-            <span
-                class="text-xs font-bold tracking-[0.18em] text-[#aaaab1] uppercase"
-                >Настройки применены</span
-            >
-            <h2 class="my-2.5 text-3xl font-bold tracking-tighter">
-                Подключитесь заново
-            </h2>
-            <p class="my-2 max-w-lg text-sm leading-relaxed text-[#aaaab1]">
-                Точка доступа перезапускается. Откройте настройки Wi-Fi на
-                телефоне и выберите сеть:
-            </p>
-            <strong
-                class="my-2 flex min-h-14 w-full max-w-md items-center justify-center gap-2.5 rounded-2xl border border-[#3b3b40] bg-[#202024] px-4"
-                ><Wifi size={22} />{reconnectSsid}</strong
-            >
-            <p class="my-2 max-w-lg text-sm leading-relaxed text-[#aaaab1]">
-                После подключения вернитесь по локальному адресу:
-            </p>
-            <a
-                class="mb-5 flex min-h-14 w-full max-w-md items-center justify-center gap-2.5 rounded-2xl border border-[#3b3b40] bg-[#202024] px-4 font-mono text-xs text-white no-underline"
-                href="https://wifi.gofro.net"
-                ><Globe2 size={19} />https://wifi.gofro.net<ExternalLink
-                    size={16}
-                /></a
-            >
-            <button
-                class="min-h-13 w-full max-w-md rounded-2xl border border-white bg-white px-5 text-sm font-bold text-[#09090b]"
-                type="button"
-                onclick={resumePolling}>Я подключился</button
-            >
-            <small
-                class="mt-3.5 max-w-md text-[0.68rem] leading-relaxed text-[#aaaab1]"
-                >Автоопрос приостановлен, поэтому это сообщение останется на
-                экране.</small
-            >
-        </article>
-    {:else}
-        <div
-            class="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(300px,0.8fr)] lg:items-start"
-        >
-            <article
-                class="min-w-0 overflow-hidden rounded-[28px] border border-[#dedee1] bg-white p-5 shadow-sm sm:p-6"
-            >
-                <div class="mb-5">
-                    <span
-                        class="text-xs font-bold tracking-[0.18em] text-[#74747d] uppercase"
-                        >Беспроводные сети</span
-                    >
-                    <h2 class="mt-1.5 text-xl font-bold tracking-[-0.035em]">
-                        Параметры точек доступа
-                    </h2>
-                </div>
-                <div class="grid gap-4">
-                    {#each networks as network (network.band)}
-                        <form
-                            class="grid gap-4.5 rounded-2xl border border-[#dedee1] p-4 sm:p-5"
-                            onsubmit={(event) => submit(event, network)}
-                        >
-                            <strong class="text-sm"
-                                >{network.band
-                                    ? `Сеть ${bandLabel(network.band)}`
-                                    : "Общая сеть"}</strong
-                            >
-                            <label>
-                                <span
-                                    class="mb-2 block text-xs font-semibold text-[#74747d]"
-                                    >Имя сети (SSID)</span
-                                >
-                                <div class="relative">
-                                    <Wifi
-                                        class="pointer-events-none absolute left-4 top-4.5 text-[#74747d]"
-                                        size={19}
-                                    /><input
-                                        class="h-14 w-full rounded-2xl border border-[#dedee1] bg-white pl-12 pr-4 text-base"
-                                        bind:value={network.ssid}
-                                        required
-                                        maxlength="32"
-                                        autocomplete="off"
-                                        placeholder={network.band === "2g"
-                                            ? "GofroWIFI 2"
-                                            : network.band === "5g"
-                                              ? "GofroWIFI 5"
-                                              : "Имя сети"}
-                                    />
-                                </div>
-                            </label>
-                            <div>
-                                <PasswordInput
-                                    label="Новый пароль"
-                                    bind:value={network.password}
-                                    minlength={8}
-                                    maxlength={63}
-                                    autocomplete="new-password"
-                                    placeholder="Не менять"
-                                    disabled={busy}
-                                />
-                                <small
-                                    class="mt-2 block text-xs leading-relaxed text-[#74747d]"
-                                    >Оставьте поле пустым, чтобы сохранить
-                                    текущий пароль.</small
-                                >
-                            </div>
-                            {#if network.error}<p
-                                    class="m-0 rounded-2xl border border-red-200 bg-red-50 p-3 text-xs leading-relaxed text-red-700"
-                                    role="alert"
-                                >
-                                    {network.error}
-                                </p>{/if}
-                            <button
-                                class="mt-1 min-h-13 w-full rounded-2xl border border-[#09090b] bg-[#09090b] px-5 text-sm font-bold text-white"
-                                type="submit"
-                                disabled={busy}
-                                >{mutation === `ap:${network.band ?? "all"}`
-                                    ? "Применяем…"
-                                    : network.band
-                                      ? `Сохранить ${bandLabel(network.band)}`
-                                      : "Сохранить общую сеть"}</button
-                            >
-                        </form>
-                    {/each}
-                </div>
-            </article>
-
-            <aside class="grid min-w-0 gap-3">
-                <article
-                    class="min-w-0 overflow-hidden rounded-[28px] border border-[#dedee1] bg-white p-5 shadow-sm sm:p-6"
-                >
-                    <div
-                        class="mb-4.5 grid size-12.5 place-items-center rounded-2xl bg-[#f0f0f2]"
-                    >
-                        <Router size={22} />
-                    </div>
-                    <span class="text-xs text-[#74747d]">Локальные сети</span>
-                    <div class="mb-5 mt-2 grid gap-2.5">
-                        {#each status.ap.networks as network (network.band)}
-                            <div>
-                                <span class="text-[0.68rem] text-[#74747d]"
-                                    >{bandLabel(network.band)}</span
-                                >
-                                <h2
-                                    class="m-0 wrap-break-word text-lg font-bold tracking-[-0.04em]"
-                                >
-                                    {network.ssid}
-                                </h2>
-                            </div>
-                        {/each}
-                    </div>
-                    <dl class="m-0">
-                        <div
-                            class="flex justify-between gap-3 border-t border-[#ececef] py-3.5"
-                        >
-                            <dt class="text-xs text-[#74747d]">Шлюз</dt>
-                            <dd
-                                class="m-0 wrap-break-word text-right font-mono text-xs"
-                            >
-                                {status.ap.address || "Нет данных"}
-                            </dd>
-                        </div>
-                        <div
-                            class="flex justify-between gap-3 border-t border-[#ececef] py-3.5"
-                        >
-                            <dt class="text-xs text-[#74747d]">Домен</dt>
-                            <dd
-                                class="m-0 wrap-break-word text-right font-mono text-xs"
-                            >
-                                {status.ap.domain || "wifi.gofro.net"}
-                            </dd>
-                        </div>
-                    </dl>
-                </article>
-                <article
-                    class="min-w-0 overflow-hidden rounded-[28px] border border-[#dedee1] bg-white p-5 shadow-sm sm:p-6"
-                    aria-labelledby="system-title"
-                >
-                    <div
-                        class="mb-4.5 grid size-12.5 place-items-center rounded-2xl bg-[#f0f0f2]"
-                    >
-                        <Router size={22} />
-                    </div>
-                    <span class="text-xs text-[#74747d]">Система</span>
-                    <h2
-                        class="mb-1.5 mt-1 text-xl font-bold tracking-[-0.04em]"
-                        id="system-title"
-                    >
-                        OpenWrt
-                    </h2>
-                    <p class="m-0 text-xs leading-relaxed text-[#74747d]">
-                        Версия Gofro: <strong class="text-[#09090b]"
-                            >{status.version}</strong
-                        >
-                    </p>
-                    <p
-                        class={`mb-0 mt-3 text-xs leading-relaxed ${status.update.result === "failed" ? "text-red-700" : "text-[#74747d]"}`}
-                        role="status"
-                        aria-live="polite"
-                    >
-                        {status.update.running
-                            ? "Скачиваем и устанавливаем обновление. Панель может ненадолго отключиться, ничего нажимать не нужно."
-                            : status.update.result === "updated"
-                              ? `Gofro обновлён до версии ${status.version}.`
-                              : status.update.result === "current"
-                                ? "Установлена последняя версия."
-                                : status.update.result === "failed"
-                                  ? "Не удалось обновить. Проверьте интернет и попробуйте ещё раз."
-                                  : "Роутер сам проверит, скачает и безопасно установит новую версию."}
-                    </p>
-                    <button
-                        class="mt-4 flex min-h-13 w-full items-center justify-center gap-2.5 rounded-2xl border border-[#09090b] bg-[#09090b] px-4 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60"
-                        type="button"
-                        disabled={busy || status.update.running}
-                        onclick={app.startUpdate}
-                    >
-                        <RefreshCw
-                            class={status.update.running ? "animate-spin" : ""}
-                            size={18}
-                        />{status.update.running || mutation === "update"
-                            ? "Обновляем…"
-                            : status.update.result === "failed"
-                              ? "Попробовать ещё раз"
-                              : "Проверить обновления"}
-                    </button>
-                    <small
-                        class="mt-3 block text-[0.68rem] leading-relaxed text-[#74747d]"
-                        >Обновления проверяются по цифровой подписи. При ошибке
-                        роутер сохранит рабочую версию.</small
-                    >
-                </article>
-            </aside>
-        </div>
-    {/if}
-</section>
+{#if confirmSave}<SharedDialog title="Сохранить настройки Wi-Fi?" onclose={() => confirmSave = false} busy={busy}><p class="notice">Точка доступа перезапустится. Устройство нужно будет подключить к сети заново.</p><div class="form-actions"><button class="btn ghost" type="button" onclick={() => confirmSave = false} disabled={busy}>Отмена</button><button class="btn primary" type="button" onclick={save} disabled={busy}>Сохранить</button></div></SharedDialog>{/if}
+{#if confirmDiscard !== null}<SharedDialog title="Отменить изменения?" onclose={() => confirmDiscard = null}><p class="notice">Несохраненные изменения для этого диапазона будут потеряны.</p><div class="form-actions"><button class="btn ghost" type="button" onclick={() => confirmDiscard = null}>Остаться</button><button class="btn primary" type="button" onclick={discardAndSwitch}>Переключить</button></div></SharedDialog>{/if}

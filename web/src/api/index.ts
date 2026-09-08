@@ -25,6 +25,7 @@ import {
   type OnboardingWifiInput,
   onboardingStatusSchema,
   onboardingWifiInputSchema,
+  rebootSchema,
 } from "./schemas";
 
 const statusRequest = (factory: () => Promise<{ data: unknown }>) =>
@@ -47,6 +48,9 @@ export const api = {
   update: {
     start: (): Promise<Status> =>
       statusRequest(() => http.post("/update", {}, mutation)),
+  },
+  reboot: {
+    start: () => request(rebootSchema, () => http.post("/reboot", {}, mutation)),
   },
   mode: {
     set: (vpnEnabled: boolean): Promise<Status> =>

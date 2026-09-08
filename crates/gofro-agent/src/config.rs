@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use ipnet::Ipv4Net;
 
 use crate::model::{
-    ControllerConfig, DomainMatch, IpMatch, ManagedServer, RoutingConfig, ServerProfile,
+    ControllerConfig, DomainMatch, IpMatch, ManagedServer, RoutingConfig, RuleRef, ServerProfile,
 };
 
 const MAX_RULES: usize = 128;
@@ -202,6 +202,25 @@ fn required_profile_value(value: Option<String>, key: &str) -> Result<String> {
 pub(crate) fn normalize_routing(routing: &mut RoutingConfig) -> Result<()> {
     if routing.domain_rules.len() > MAX_RULES || routing.ip_rules.len() > MAX_RULES {
         bail!("допускается не более {MAX_RULES} правил каждого типа");
+    }
+    if let Some(order) = &routing.rule_order {
+        if order.len() != routing.domain_rules.len() + routing.ip_rules.len() {
+            bail!("порядок правил должен содержать каждое правило ровно один раз");
+        }
+        let mut domains = vec![false; routing.domain_rules.len()];
+        let mut ips = vec![false; routing.ip_rules.len()];
+        for reference in order {
+            let (seen, kind, index) = match *reference {
+                RuleRef::Domain { index } => (&mut domains, "domain", index),
+                RuleRef::Ip { index } => (&mut ips, "ip", index),
+            };
+            let Some(slot) = seen.get_mut(index) else {
+                bail!("{kind} правило в порядке отсутствует");
+            };
+            if std::mem::replace(slot, true) {
+                bail!("правило в порядке указано несколько раз");
+            }
+        }
     }
     for rule in &mut routing.domain_rules {
         normalize_rule_name(&mut rule.name)?;
@@ -429,6 +448,8 @@ mod tests {
                 target: crate::model::RouteTarget::Direct,
             }],
             default_target: crate::model::RouteTarget::Vpn,
+            mode: crate::model::RoutingMode::Rules,
+            rule_order: None,
         };
         normalize_routing(&mut routing).unwrap();
         assert!(matches!(
@@ -440,5 +461,21 @@ mod tests {
             IpMatch::Cidr { value } if value == "10.0.0.0/8"
         ));
         assert_eq!(normalize_tag("GEOLOCATION-!CN").unwrap(), "geolocation-!cn");
+    }
+
+    #[test]
+    fn rejects_incomplete_duplicate_and_out_of_range_rule_order() {
+        let mut routing = RoutingConfig {
+            rule_order: Some(vec![RuleRef::Domain { index: 0 }]),
+            ..RoutingConfig::default()
+        };
+        assert!(normalize_routing(&mut routing).is_err());
+        routing.rule_order = Some(vec![
+            RuleRef::Domain { index: 0 },
+            RuleRef::Domain { index: 0 },
+        ]);
+        assert!(normalize_routing(&mut routing).is_err());
+        routing.rule_order = Some(vec![RuleRef::Domain { index: 0 }, RuleRef::Ip { index: 1 }]);
+        assert!(normalize_routing(&mut routing).is_err());
     }
 }

@@ -110,6 +110,10 @@ pub(crate) struct RoutingConfig {
     pub(crate) domain_rules: Vec<DomainRule>,
     pub(crate) ip_rules: Vec<IpRule>,
     pub(crate) default_target: RouteTarget,
+    #[serde(default)]
+    pub(crate) mode: RoutingMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rule_order: Option<Vec<RuleRef>>,
 }
 
 impl Default for RoutingConfig {
@@ -132,8 +136,25 @@ impl Default for RoutingConfig {
                 target: RouteTarget::Direct,
             }],
             default_target: RouteTarget::Vpn,
+            mode: RoutingMode::Rules,
+            rule_order: None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RoutingMode {
+    #[default]
+    Rules,
+    All,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum RuleRef {
+    Domain { index: usize },
+    Ip { index: usize },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -185,6 +206,14 @@ pub(crate) struct RoutingTestResult {
     pub(crate) value: String,
     pub(crate) target: RouteTarget,
     pub(crate) matched_rule: Option<String>,
+    pub(crate) scope: RoutingTestScope,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RoutingTestScope {
+    Ip,
+    DomainPreview,
 }
 
 #[derive(Debug, Serialize)]
@@ -195,6 +224,7 @@ pub(crate) struct RoutingStatus {
     pub(crate) geosite_loaded: bool,
     pub(crate) geoip_loaded: bool,
     pub(crate) dataplane_active: bool,
+    pub(crate) degraded: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -264,5 +294,14 @@ mod tests {
         assert!(json.contains("\"managed\":false"));
         assert!(!json.contains("management"));
         assert!(!json.contains("private"));
+    }
+
+    #[test]
+    fn legacy_routing_deserializes_with_rules_mode_and_no_order() {
+        let routing: RoutingConfig =
+            serde_json::from_str(r#"{"domain_rules":[],"ip_rules":[],"default_target":"vpn"}"#)
+                .unwrap();
+        assert_eq!(routing.mode, RoutingMode::Rules);
+        assert_eq!(routing.rule_order, None);
     }
 }

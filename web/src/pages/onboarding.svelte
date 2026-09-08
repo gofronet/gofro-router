@@ -1,38 +1,53 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import ChevronRight from "lucide-svelte/icons/chevron-right";
+  import Server from "lucide-svelte/icons/server";
+  import Upload from "lucide-svelte/icons/upload";
   import { getAppContext } from "../app-context";
   import PasswordInput from "../components/password-input.svelte";
-  import Servers from "./servers.svelte";
+  import ServerDialogs, { type ServerDialogFlow } from "../components/server-dialogs.svelte";
+
+  type WifiDraft = { band: "2g" | "5g"; ssid: string; password: string };
 
   const app = getAppContext();
   const onboarding = $derived(app.onboarding);
   const busy = $derived(app.busy);
-  const steps = [
-    { key: "admin", label: "Администратор" },
-    { key: "wifi", label: "Wi-Fi" },
-    { key: "server", label: "VPN" },
-  ] as const;
-  let drafts = $state(
-    (app.onboarding?.networks ?? []).map((network) => ({
-      band: network.band,
-      ssid: network.ssid === "GofroNET Wi-Fi Setup" || network.ssid === "OpenWrt" || !network.ssid
-        ? network.band === "2g" ? "GofroNET 2G" : "GofroNET 5G"
-        : network.ssid,
-      password: "",
-    })),
-  );
+  const hasServer = $derived(app.hasStatus && app.status.servers.length > 0);
+  let drafts = $state<WifiDraft[]>([]);
+  let submittedNetworks = $state<Pick<WifiDraft, "band" | "ssid">[]>([]);
   let validationError = $state("");
-  let reconnecting = $state(false);
-  let submittedNetworks = $state<{ band: "2g" | "5g"; ssid: string }[]>([]);
   let now = $state(Date.now());
-  const windowDeadline = $derived(onboarding?.setup_window_seconds == null ? null : Date.now() + onboarding.setup_window_seconds * 1000);
-  const windowExpired = $derived(windowDeadline !== null && now >= windowDeadline);
-  const editableWifi = $derived(onboarding?.step === "wifi" && (!reconnecting || onboarding.error !== null || windowExpired));
-  const reconnectNetworks = $derived(submittedNetworks.length ? submittedNetworks : onboarding?.networks ?? []);
+  let deadline = $state<number | null>(null);
+  let deadlineWindow = "";
+  let flow = $state<ServerDialogFlow>(null);
+  let finishAfterAdd = $state(false);
+
+  $effect(() => {
+    if (onboarding?.step === "wifi" && drafts.length === 0) {
+      drafts = onboarding.networks.map((network) => ({
+        band: network.band,
+        ssid: network.ssid === "GofroNET Wi-Fi Setup" || network.ssid === "OpenWrt" || !network.ssid
+          ? ""
+          : network.ssid,
+        password: "",
+      }));
+    }
+    const window = onboarding?.step === "wifi" ? onboarding.setup_window_seconds : null;
+    const key = window === null ? "" : `${window}`;
+    if (key !== deadlineWindow) {
+      deadlineWindow = key;
+      deadline = window === null ? null : Date.now() + window * 1_000;
+    }
+  });
+
   onMount(() => {
-    const timer = window.setInterval(() => now = Date.now(), 1000);
+    const timer = window.setInterval(() => now = Date.now(), 1_000);
     return () => window.clearInterval(timer);
   });
+
+  const windowExpired = $derived(deadline !== null && now >= deadline);
+  const reconnectNetworks = $derived(submittedNetworks.length ? submittedNetworks : onboarding?.networks ?? []);
+  const reconnecting = $derived(Boolean(app.reconnectSsid && onboarding?.step === "wifi"));
 
   function validSsid(value: string): boolean {
     return value.length > 0 && new TextEncoder().encode(value).length <= 32 && !/[\x00-\x1f\x7f]/.test(value);
@@ -54,70 +69,74 @@
     const result = await app.saveOnboardingWifi({ networks: drafts });
     if (result !== "error") {
       drafts = drafts.map((network) => ({ ...network, password: "" }));
-      reconnecting = true;
     }
   }
 
   async function finish() {
+    if (busy) return;
     await app.completeOnboarding();
   }
 
+  async function completeAfterAdd() {
+    finishAfterAdd = true;
+    await finish();
+  }
 </script>
 
 <svelte:head><title>Настройка · Gofro Router</title></svelte:head>
 
-<main class="min-h-dvh bg-[#f5f5f5] p-4 text-[#09090b] sm:p-6">
-  <section class="mx-auto grid min-h-[calc(100dvh-2rem)] max-w-4xl content-center gap-5 sm:min-h-[calc(100dvh-3rem)]" aria-labelledby="onboarding-title">
-    <header class="rounded-[28px] bg-[linear-gradient(145deg,#202024,#09090b_72%)] p-5 text-white sm:p-7">
-      <span class="text-xs font-bold tracking-[0.18em] text-[#aaaab1] uppercase">Gofro Router</span>
-      <h1 class="mt-2 text-3xl font-extrabold tracking-[-0.06em] sm:text-4xl" id="onboarding-title">Настройка сети</h1>
-      <ol class="mt-6 grid grid-cols-3 gap-2 text-[0.65rem] font-bold sm:text-xs">
-        {#each steps as step, index (step.key)}
-          {@const active = onboarding?.step === step.key || (step.key === "wifi" && onboarding?.step === "wifi_applying")}
-          {@const done = (onboarding?.step === "wifi" || onboarding?.step === "wifi_applying" || onboarding?.step === "server" || onboarding?.step === "complete") && index === 0 || (onboarding?.step === "server" || onboarding?.step === "complete") && index === 1}
-          <li class={`border-b-2 pb-2 ${active ? "border-white text-white" : done ? "border-[#777780] text-[#d6d6dc]" : "border-[#47474d] text-[#aaaab1]"}`}>{index + 1}. {step.label}</li>
-        {/each}
-      </ol>
-    </header>
-
-    {#if !onboarding}
-      <article class="rounded-[28px] border border-[#dedee1] bg-white p-6 text-sm text-[#74747d]">Получаем состояние настройки…</article>
-    {:else if editableWifi}
-      <article class="rounded-[28px] border border-[#dedee1] bg-white p-5 shadow-sm sm:p-7">
-        <h2 class="text-2xl font-bold tracking-[-0.04em]">Защитите Wi-Fi</h2>
-        <p class="mt-2 text-sm leading-relaxed text-[#74747d]">Укажите сеть для каждого доступного диапазона. После сохранения текущая сеть настройки отключится через несколько секунд.</p>
-        <form class="mt-5 grid gap-5" onsubmit={saveWifi}>
-          <div class={`grid gap-4 ${drafts.length > 1 ? "sm:grid-cols-2" : ""}`}>
-          {#each drafts as network (network.band)}
-            <fieldset class="grid gap-3 rounded-2xl bg-[#f5f5f5] p-4"><legend class="px-1 text-xs font-bold text-[#74747d]">{network.band === "2g" ? "2,4 ГГц" : "5 ГГц"}</legend><label><span class="mb-1.5 block text-xs font-semibold text-[#74747d]">Название сети (SSID)</span><input class="h-12 w-full rounded-2xl border border-[#dedee1] bg-white px-4" bind:value={network.ssid} required maxlength="32" autocomplete="off" /></label><PasswordInput label="Пароль Wi-Fi" bind:value={network.password} required minlength={8} maxlength={63} autocomplete="new-password" disabled={busy} /></fieldset>
-          {/each}
+<main class="access-page">
+  <section class="access-card" aria-labelledby="onboarding-title">
+    <div class="brand access-brand"><strong>Gofro</strong><span>Router</span></div>
+    <ol class="setup-progress" aria-label="Ход настройки">
+      <li class:done={onboarding?.step !== "admin"} class:current={onboarding?.step === "admin"}><span>1</span>Пароль</li>
+      <li class:done={onboarding?.step === "server" || onboarding?.step === "complete"} class:current={onboarding?.step === "wifi" || onboarding?.step === "wifi_applying"}><span>2</span>Wi-Fi</li>
+      <li class:current={onboarding?.step === "server"}><span>3</span>VPN</li>
+    </ol>
+    <div class="access-copy">
+      {#if !onboarding}
+        <h1 id="onboarding-title">Настройка сети</h1><p class="access-note">Получаем состояние настройки…</p>
+      {:else if onboarding.step === "wifi" && !reconnecting}
+        <h1 id="onboarding-title">Настройте Wi-Fi</h1>
+        <p class="access-note">Задайте имя сети и пароль.</p>
+        <form onsubmit={saveWifi}>
+          <div class="setup-fields">
+            {#each drafts as network (network.band)}
+              <label class="field">{network.band === "2g" ? "2,4 ГГц" : "5 ГГц"}<input bind:value={network.ssid} required maxlength="32" autocomplete="off" placeholder="Имя сети" disabled={busy || windowExpired} /></label>
+              <PasswordInput label={`Пароль ${network.band === "2g" ? "2,4 ГГц" : "5 ГГц"}`} bind:value={network.password} required minlength={8} maxlength={63} autocomplete="new-password" disabled={busy || windowExpired} />
+            {/each}
           </div>
-          {#if windowExpired}<p class="rounded-2xl border border-red-200 bg-red-50 p-3 text-xs text-red-700" role="alert">Время настройки истекло; запустите команду установки в консоли роутера повторно.</p>{/if}
-          {#if validationError || onboarding.error || app.actionError}<p class="rounded-2xl border border-red-200 bg-red-50 p-3 text-xs text-red-700" role="alert">{validationError || onboarding.error || app.actionError}</p>{/if}
-          <button class="min-h-13 rounded-2xl bg-[#09090b] px-5 text-sm font-bold text-white disabled:opacity-60" type="submit" disabled={busy || windowExpired}>{busy ? "Сохраняем…" : "Сохранить Wi-Fi"}</button>
+          {#if windowExpired}<p class="error" role="alert">Время настройки истекло; запустите команду установки в консоли роутера повторно.</p>{/if}
+          {#if validationError || onboarding.error || app.actionError}<p class="error" role="alert">{validationError || onboarding.error || app.actionError}</p>{/if}
+          <button class="btn primary access-submit" type="submit" disabled={busy || windowExpired}>{busy ? "Сохраняем…" : "Продолжить"}</button>
         </form>
-      </article>
-    {:else if onboarding.step === "wifi_applying" || (onboarding.step === "wifi" && reconnecting)}
-      <article class="rounded-[28px] border border-[#dedee1] bg-white p-5 shadow-sm sm:p-7" role="status">
-        <h2 class="text-2xl font-bold tracking-[-0.04em]">Подключитесь к новой сети</h2>
-        <p class="mt-3 text-sm leading-relaxed text-[#74747d]">Сеть настройки исчезнет. Выберите новую сеть в настройках устройства, затем откройте <strong class="text-[#09090b]">https://wifi.gofro.net</strong> и войдите, если сессия сбросилась.</p>
-        <p class="mt-3 text-xs leading-relaxed text-[#74747d]">Если новая сеть не появилась, а 15 минут уже прошли, повторите команду установки в консоли роутера. Пароль панели сохранится.</p>
-        <ul class="mt-4 grid gap-2 text-sm font-bold">{#each reconnectNetworks as network (network.band)}<li class="rounded-2xl bg-[#f5f5f5] px-4 py-3">{network.band === "2g" ? "2,4 ГГц" : "5 ГГц"}: {network.ssid}</li>{/each}</ul>
-        {#if reconnecting}<p class="mt-4 rounded-2xl bg-[#f5f5f5] p-3 text-xs leading-relaxed text-[#74747d]">Ответ мог прерваться при смене Wi-Fi. Не отправляйте данные повторно: подключитесь к новой сети и проверьте состояние.</p>{/if}
-        {#if onboarding.error}<p class="mt-4 rounded-2xl border border-red-200 bg-red-50 p-3 text-xs text-red-700">{onboarding.error}</p>{/if}
-        <button class="mt-5 min-h-12 rounded-2xl border border-[#dedee1] bg-white px-5 text-sm font-bold" type="button" onclick={app.loadOnboarding} disabled={app.onboardingLoading}>Проверить подключение</button>
-      </article>
-    {:else if onboarding.step === "server"}
-      <article class="rounded-[28px] border border-[#dedee1] bg-white p-5 shadow-sm sm:p-7">
-        <h2 class="text-2xl font-bold tracking-[-0.04em]">VPN, если нужен</h2>
-        <p class="mt-2 text-sm leading-relaxed text-[#74747d]">Импортируйте WireGuard-профиль или подключите собственный VPS. VPN не включится автоматически.</p>
-        {#if app.hasStatus}<div class="mt-5"><Servers onboarding /></div>{:else}<div class="mt-5 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700" role="alert"><p>{app.pollError || "Не удалось загрузить данные VPS."}</p><button class="mt-3 min-h-11 rounded-xl border border-red-200 bg-white px-4 text-xs font-bold" type="button" onclick={app.refresh}>Повторить</button></div>{/if}
-        {#if app.actionError}<p class="mt-4 rounded-2xl border border-red-200 bg-red-50 p-3 text-xs text-red-700" role="alert">{app.actionError}</p>{/if}
-        <button class="mt-5 min-h-13 w-full rounded-2xl bg-[#09090b] px-5 text-sm font-bold text-white disabled:opacity-60" type="button" onclick={finish} disabled={busy}>{busy ? "Завершаем…" : app.hasStatus && app.status.servers.length > 0 ? "Завершить настройку" : "Пропустить, настроить позже"}</button>
-        <p class="mt-3 text-xs leading-relaxed text-[#74747d]">После добавления профиля нажмите эту кнопку. VPN можно включить на главной панели позже.</p>
-      </article>
-    {:else}
-      <article class="rounded-[28px] border border-[#bde4cc] bg-[#edf9f1] p-6 text-sm text-[#185c38]">Настройка завершена. Открываем панель управления…</article>
-    {/if}
+      {:else if onboarding.step === "wifi_applying" || reconnecting}
+        <h1 id="onboarding-title">Подключитесь к новой сети</h1>
+        <p class="access-note">Сеть настройки исчезнет. Выберите новую сеть, затем откройте <strong>https://wifi.gofro.net</strong> и войдите, если сессия сбросилась.</p>
+        <ul class="notice">{#each reconnectNetworks as network (network.band)}<li>{network.band === "2g" ? "2,4 ГГц" : "5 ГГц"}: {network.ssid}</li>{/each}</ul>
+        {#if reconnecting}<p class="notice">Ответ мог прерваться при смене Wi-Fi. Не отправляйте данные повторно: подключитесь к новой сети и проверьте состояние.</p>{/if}
+        {#if onboarding.error || app.actionError}<p class="error" role="alert">{onboarding.error || app.actionError}</p>{/if}
+        <button class="btn primary access-submit" type="button" onclick={app.loadOnboarding} disabled={app.onboardingLoading}>Проверить подключение</button>
+      {:else if onboarding.step === "server"}
+        <h1 id="onboarding-title">Подключите VPN</h1>
+        <p class="access-note">Можно добавить сейчас или сделать это позже.</p>
+        {#if app.hasStatus}
+          <div class="setup-choices">
+            <button class="choice-button" type="button" disabled={busy} onclick={() => flow = { kind: "import" }}><Upload size={20} /><span><strong>Импортировать настройки</strong><small>Файл WireGuard (.conf)</small></span><ChevronRight size={20} /></button>
+            <button class="choice-button" type="button" disabled={busy} onclick={() => flow = { kind: "vps" }}><Server size={20} /><span><strong>Подключить свой сервер</strong><small>Вход по логину и паролю</small></span><ChevronRight size={20} /></button>
+          </div>
+        {:else}
+          <p class="notice">Не удалось загрузить данные VPN. Подключитесь к новой сети и повторите попытку.</p>
+          <button class="btn ghost access-submit" type="button" onclick={app.refresh}>Повторить</button>
+        {/if}
+        {#if app.actionError}<p class="error" role="alert">{app.actionError}</p>{/if}
+        {#if finishAfterAdd && hasServer}<p class="notice">Сервер добавлен. Завершите настройку, когда подключение восстановится.</p>{/if}
+        <button class="btn ghost access-submit" type="button" onclick={finish} disabled={busy}>{busy ? "Завершаем…" : hasServer ? "Завершить настройку" : "Настроить позже"}</button>
+      {:else}
+        <h1 id="onboarding-title">Настройка сети</h1><p class="access-note">Проверяем состояние настройки…</p>
+      {/if}
+    </div>
   </section>
 </main>
+
+{#if app.hasStatus}<ServerDialogs bind:flow onadded={completeAfterAdd} />{/if}

@@ -531,6 +531,7 @@ mod tests {
         routing::RoutingPolicy,
         stats::StatsTracker,
     };
+    use tower::ServiceExt;
 
     fn test_state(dir: &std::path::Path, password: PathBuf, setup_code: PathBuf) -> AppState {
         let geodata = Arc::new(GeoData::default());
@@ -549,6 +550,8 @@ mod tests {
                     domain_rules: vec![],
                     ip_rules: vec![],
                     default_target: crate::model::RouteTarget::Vpn,
+                    mode: crate::model::RoutingMode::Rules,
+                    rule_order: None,
                 },
             })),
             access_points: Arc::new(Mutex::new(vec![])),
@@ -559,11 +562,14 @@ mod tests {
                         domain_rules: vec![],
                         ip_rules: vec![],
                         default_target: crate::model::RouteTarget::Vpn,
+                        mode: crate::model::RoutingMode::Rules,
+                        rule_order: None,
                     },
                     Arc::clone(&geodata),
                 )
                 .unwrap(),
             )),
+            routing_degraded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             geodata,
             fake_dns: Arc::new(FakeDns::open(&dir.join("routing.sqlite")).unwrap()),
             auth: Arc::new(Auth::open(password, setup_code).unwrap()),
@@ -730,6 +736,42 @@ mod tests {
         assert_eq!(
             login_response(&state, &uri, &headers, password)
                 .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reboot_route_rejects_missing_session_and_csrf() {
+        let dir = std::env::temp_dir().join(format!("gofro-reboot-auth-{}", token().unwrap()));
+        fs::create_dir(&dir).unwrap();
+        let state = test_state(&dir, dir.join("admin-password"), dir.join("setup-code"));
+        let request = Request::post("/api/reboot")
+            .header(header::HOST, "wifi.gofro.net")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            crate::api::secure_router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let (session, csrf) = state.auth.issue().unwrap();
+        let request = Request::post("/api/reboot")
+            .header(header::HOST, "wifi.gofro.net")
+            .header(header::ORIGIN, "https://wifi.gofro.net")
+            .header(header::COOKIE, format!("{SESSION}={session}"))
+            .header("x-csrf-token", format!("wrong-{csrf}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            crate::api::secure_router(state)
+                .oneshot(request)
+                .await
+                .unwrap()
                 .status(),
             StatusCode::FORBIDDEN
         );

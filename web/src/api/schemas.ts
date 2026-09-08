@@ -99,6 +99,8 @@ export const ipRuleSchema = z.object({
   target: routeTargetSchema,
 });
 export const routingConfigSchema = z.object({
+  mode: z.enum(["rules", "all"]).default("rules"),
+  rule_order: z.array(z.object({ kind: z.enum(["domain", "ip"]), index: z.number().int().nonnegative() })).nullable().default(null),
   domain_rules: z.array(domainRuleSchema),
   ip_rules: z.array(ipRuleSchema),
   default_target: routeTargetSchema,
@@ -107,7 +109,10 @@ export const routingTestSchema = z.object({
   value: z.string(),
   target: routeTargetSchema,
   matched_rule: z.string().nullable(),
+  scope: z.enum(["ip", "domain_preview"]).optional(),
 });
+
+export const rebootSchema = z.object({ rebooting: z.literal(true) });
 
 const apStatusSchema = z.object({
   ssid: z.string().optional(),
@@ -164,6 +169,7 @@ export const statusSchema = z.object({
     geosite_loaded: z.boolean(),
     geoip_loaded: z.boolean(),
     dataplane_active: z.boolean(),
+    degraded: z.boolean().default(false),
   }),
 });
 
