@@ -779,6 +779,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_routes_reject_missing_sessions_and_bad_csrf_before_ssh() {
+        let dir = std::env::temp_dir().join(format!("gofro-managed-auth-{}", token().unwrap()));
+        fs::create_dir(&dir).unwrap();
+        let state = test_state(&dir, dir.join("admin-password"), dir.join("setup-code"));
+        for (method, path) in [
+            (Method::POST, "/api/servers/management"),
+            (Method::POST, "/api/servers/restart"),
+            (Method::POST, "/api/servers/friends"),
+            (Method::PUT, "/api/servers/friends"),
+            (Method::DELETE, "/api/servers/friends"),
+            (Method::POST, "/api/servers/friends/profile"),
+        ] {
+            let request = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .header(header::HOST, "wifi.gofro.net")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            assert_eq!(
+                crate::api::secure_router(state.clone())
+                    .oneshot(request)
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            let (session, csrf) = state.auth.issue().unwrap();
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::HOST, "wifi.gofro.net")
+                .header(header::ORIGIN, "https://wifi.gofro.net")
+                .header(header::COOKIE, format!("{SESSION}={session}"))
+                .header("x-csrf-token", format!("wrong-{csrf}"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            assert_eq!(
+                crate::api::secure_router(state.clone())
+                    .oneshot(request)
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        let (session, csrf) = state.auth.issue().unwrap();
+        let request = Request::post("/api/servers/friends")
+            .header(header::HOST, "wifi.gofro.net")
+            .header(header::ORIGIN, "https://wifi.gofro.net")
+            .header(header::COOKIE, format!("{SESSION}={session}"))
+            .header("x-csrf-token", csrf)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                r#"{"public_key":"Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","name":"Friend"}"#,
+            ))
+            .unwrap();
+        // The body is accepted without peer_key; the unmanaged server is rejected before SSH.
+        assert_eq!(
+            crate::api::secure_router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn incomplete_onboarding_cannot_fall_back_to_a_legacy_code() {
         let dir = std::env::temp_dir().join(format!("gofro-claim-closed-{}", token().unwrap()));
         fs::create_dir(&dir).unwrap();

@@ -20,10 +20,8 @@ const KEEPALIVE: u16 = 10;
 const MTU: u16 = 1280;
 
 pub(crate) fn validate_server(server: &ServerProfile) -> Result<()> {
-    if server.name.is_empty() || server.name.len() > 40 || server.name.chars().any(char::is_control)
-    {
-        bail!("имя сервера должно содержать от 1 до 40 символов");
-    }
+    validate_server_name(&server.name)?;
+    validate_emoji(&server.emoji)?;
     validate_endpoint(&server.endpoint)?;
     validate_wireguard_key(&server.public_key, "public")?;
     if let Some(address) = &server.client_tunnel_address {
@@ -34,6 +32,25 @@ pub(crate) fn validate_server(server: &ServerProfile) -> Result<()> {
     }
     if let Some(management) = &server.management {
         validate_management(management)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn normalize_server_name(name: &mut String) -> Result<()> {
+    *name = name.trim().to_owned();
+    validate_server_name(name)
+}
+
+fn validate_server_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.chars().count() > 60 || name.chars().any(char::is_control) {
+        bail!("имя сервера должно содержать от 1 до 60 символов");
+    }
+    Ok(())
+}
+
+fn validate_emoji(emoji: &str) -> Result<()> {
+    if emoji.len() > 32 || emoji.chars().any(char::is_control) {
+        bail!("некорректный значок сервера");
     }
     Ok(())
 }
@@ -177,13 +194,14 @@ pub(crate) fn parse_server_profile(name: String, profile: &str) -> Result<Server
 
     let mut server = ServerProfile {
         name,
+        emoji: String::new(),
         endpoint: required_profile_value(endpoint, "Endpoint")?,
         public_key: required_profile_value(public_key, "PublicKey")?,
         client_tunnel_address: Some(client_tunnel_address),
         client_private_key: Some(required_profile_value(private_key, "PrivateKey")?),
         management: None,
     };
-    server.name = server.name.trim().to_owned();
+    normalize_server_name(&mut server.name)?;
     validate_server(&server)?;
     Ok(server)
 }
@@ -297,7 +315,8 @@ pub(crate) fn load(path: &Path) -> Result<ControllerConfig> {
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut config: ControllerConfig =
         serde_json::from_str(&contents).with_context(|| format!("invalid {}", path.display()))?;
-    for server in &config.servers {
+    for server in &mut config.servers {
+        normalize_server_name(&mut server.name)?;
         validate_server(server)?;
     }
     normalize_routing(&mut config.routing)?;
@@ -329,6 +348,7 @@ mod tests {
     fn validates_server_profile() {
         let server = ServerProfile {
             name: "Primary".into(),
+            emoji: String::new(),
             endpoint: "vpn.example.com:8443".into(),
             public_key: "aq2K6tZ6JqYCpNPLseGJPHceMMxxEdkx5AeRm6cEfSE=".into(),
             client_tunnel_address: Some("10.202.0.2/32".into()),
@@ -390,6 +410,7 @@ mod tests {
             active_server_key: None,
             servers: vec![ServerProfile {
                 name: "Private".into(),
+                emoji: "🛰".into(),
                 endpoint: "vpn.example.com:8443".into(),
                 public_key: "aq2K6tZ6JqYCpNPLseGJPHceMMxxEdkx5AeRm6cEfSE=".into(),
                 client_tunnel_address: Some("10.202.0.2/32".into()),
@@ -426,6 +447,22 @@ mod tests {
                 .get("ap_ssid")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn serializes_emoji_and_accepts_legacy_profiles() {
+        let legacy: ServerProfile = serde_json::from_str(
+            r#"{"name":" Old ","endpoint":"vpn.example.com:8443","public_key":"aq2K6tZ6JqYCpNPLseGJPHceMMxxEdkx5AeRm6cEfSE="}"#,
+        )
+        .unwrap();
+        assert!(legacy.emoji.is_empty());
+        let mut named = legacy.clone();
+        normalize_server_name(&mut named.name).unwrap();
+        named.emoji = "🛰".into();
+        validate_server(&named).unwrap();
+        let output = serde_json::to_string(&named).unwrap();
+        assert!(output.contains("emoji"));
+        assert!(validate_emoji("\n").is_err());
     }
 
     #[test]

@@ -117,9 +117,6 @@
       </form>
     </div>
   </section>
-  <section class="panel">
-    <details class="disclosure"><summary>Адрес роутера</summary><div class="details-content"><dl class="key-values"><div><dt>IP-адрес</dt><dd>{status.ap.address || "Нет данных"}</dd></div><div><dt>Адрес панели</dt><dd>https://{status.ap.domain || "wifi.gofro.net"}</dd></div></dl></div></details>
-  </section>
 {:else}
   <section class="panel"><div class="empty"><h2>Нет доступных сетей Wi-Fi</h2><p>Обновите состояние роутера и попробуйте снова.</p></div></section>
 {/if}

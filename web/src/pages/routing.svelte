@@ -15,8 +15,8 @@
   const routing = $derived(status.routing.config);
   const targets: { value: RouteTarget; label: string }[] = [{ value: "vpn", label: "Через VPN" }, { value: "direct", label: "Без VPN" }, { value: "block", label: "Блокировать" }];
   const matcherOptions = {
-    domain: [{ value: "suffix", label: "Сайт целиком", help: "Домен и все его поддомены. Например, example.com." }, { value: "exact", label: "Только этот адрес", help: "Только указанный домен, без поддоменов." }, { value: "geo_site", label: "Список сайтов", help: "Например, category-ru для российского списка." }],
-    ip: [{ value: "cidr", label: "IP-адрес или сеть", help: "Один IP или сеть CIDR, например 192.0.2.0/24." }, { value: "geo_ip", label: "Страна или список адресов", help: "Например, ru для России." }],
+    domain: [{ value: "suffix", label: "Сайт целиком", field: "Адрес сайта", example: "example.com", help: "Без https:// и /страницы. Например, example.com включает mail.example.com." }, { value: "exact", label: "Только этот адрес", field: "Адрес сайта", example: "mail.example.com", help: "Без https:// и /страницы. Только указанный адрес." }, { value: "geo_site", label: "Список сайтов", field: "Название списка", example: "category-ru", help: "Например, category-ru для российских сайтов." }],
+    ip: [{ value: "cidr", label: "IP-адрес или сеть", field: "IP-адрес или сеть", example: "192.0.2.1", help: "Один адрес: 192.0.2.1. Диапазон адресов: 192.0.2.0/24." }, { value: "geo_ip", label: "Страна или список адресов", field: "Код страны или название списка", example: "ru", help: "Например, ru для России, de для Германии." }],
   };
 
   // Keep an editing draft independent from polling updates.

@@ -1,7 +1,6 @@
 <script lang="ts">
   import RouterIcon from "lucide-svelte/icons/router";
   import Globe from "lucide-svelte/icons/globe";
-  import ShieldCheck from "lucide-svelte/icons/shield-check";
   import Power from "lucide-svelte/icons/power";
   import ChevronRight from "lucide-svelte/icons/chevron-right";
   import Laptop from "lucide-svelte/icons/laptop";
@@ -11,13 +10,21 @@
   import { p } from "../router";
   import { formatRate } from "../format";
   import ServerDialogs, { type ServerDialogFlow } from "../components/server-dialogs.svelte";
+  import ServerMarker from "../components/server-marker.svelte";
   import TrafficPanel from "../components/traffic-panel.svelte";
 
   const app = getAppContext();
   const status = $derived(app.status);
   const server = $derived(status.servers.find(item => item.public_key === status.active_server_key));
-  const label = $derived(app.connected ? "VPN подключён" : status.vpn_enabled ? "Нет соединения с VPN" : "VPN отключён");
+  const connected = $derived(app.connected);
+  const label = $derived(connected ? "VPN подключён" : status.vpn_enabled ? "Нет соединения с VPN" : "VPN отключён");
   let flow = $state<ServerDialogFlow>(null);
+
+  function toggleVpn() {
+    if (status.vpn_enabled) flow = { kind: "disconnect" };
+    else if (server) app.setMode(true);
+    else flow = { kind: "choose" };
+  }
 </script>
 
 <svelte:head><title>Обзор · GofroRouter</title></svelte:head>
@@ -25,19 +32,18 @@
 <section class="panel connection" aria-labelledby="connection-heading">
   <div class="connection-top">
     <div>
-      <h2 id="connection-heading" class="status" class:off={!app.connected}><span class="dot"></span>{label}</h2>
-      <p class="connection-description">{!status.vpn_enabled ? "VPN не используется. Правила блокировки могут оставаться активными." : !app.connected ? "Проверяем соединение с сервером." : status.routing.config.mode === "all" ? "Весь интернет через VPN. Локальная сеть доступна напрямую." : "Часть сайтов может открываться без VPN."}</p>
+      <h2 id="connection-heading" class="status" class:off={!connected}><span class="dot"></span>{label}</h2>
+      <a class="connection-mode" href={p("/routing")}>{!status.vpn_enabled ? "Интернет без VPN" : !connected ? "Ожидаем соединение с VPN" : status.routing.config.mode === "all" ? "Весь интернет через VPN" : "По правилам"}<ChevronRight class="icon" /></a>
     </div>
-    <button class="icon-btn power" type="button" aria-label={status.vpn_enabled ? "Отключить VPN" : "Подключить VPN"} disabled={app.busy} onclick={() => flow = { kind: status.vpn_enabled ? "disconnect" : "choose" }}><Power class="icon" /></button>
   </div>
-  <div class="connection-path" aria-label={app.connected ? "Роутер, VPN-сервер, интернет" : "Роутер, состояние маршрута, интернет"}>
+  <button class="connection-power" type="button" aria-label={status.vpn_enabled ? "Отключить VPN" : "Подключить VPN"} aria-pressed={status.vpn_enabled} disabled={app.busy} onclick={toggleVpn}><Power class="icon" /><span>{status.vpn_enabled ? "Вкл" : "Выкл"}</span></button>
+  <div class="connection-path" class:connected-path={status.vpn_enabled} aria-label={status.vpn_enabled ? `Ваш роутер, VPN-сервер ${server?.name || ""}, интернет` : "Ваш роутер, интернет"}>
     <div class="path-stop"><span class="path-icon"><RouterIcon class="icon" /></span><strong>Ваш роутер</strong></div>
-    <div class="path-stop"><span class="path-icon">{#if status.vpn_enabled}<ShieldCheck class="icon" />{:else}<Globe class="icon" />{/if}</span><strong>{status.vpn_enabled ? server?.name || "VPN-сервер" : "Без VPN"}</strong></div>
+    {#if status.vpn_enabled}<div class="path-stop"><span class="path-icon"><Globe class="icon" /></span><strong>{server?.name || "VPN-сервер"}</strong></div>{/if}
     <div class="path-stop"><span class="path-icon"><Globe class="icon" /></span><strong>Интернет</strong></div>
   </div>
   <div class="connection-footer">
-    <div class="server-inline"><span class="country-code">VPN</span><div><strong>{server?.name || "Сервер не выбран"}</strong>{#if server}<small> · {server.managed ? "Управляемый VPS" : "Импортированный"}</small>{/if}</div></div>
-    <button class="text-link btn ghost" type="button" disabled={app.busy} onclick={() => flow = { kind: "choose" }}>Сменить сервер <ChevronRight class="icon" /></button>
+    <button class="connection-server" type="button" aria-label="Выбрать VPN-сервер" disabled={app.busy} onclick={() => flow = { kind: "choose" }}><ServerMarker emoji={server?.emoji} /><span class="connection-server-name"><strong>{server?.name || "Выбрать сервер"}</strong></span><ChevronRight class="icon" /></button>
   </div>
 </section>
 

@@ -8,6 +8,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
+pub mod managed;
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct PeerStatus {
     pub public_key: String,

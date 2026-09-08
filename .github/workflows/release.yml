@@ -109,7 +109,8 @@ jobs:
           sh deploy/raspios/tests/onboarding.sh
           bash -n deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install
           shellcheck -s bash deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install deploy/server/tests/*.sh
-          bash deploy/server/tests/*.sh
+          bash deploy/server/tests/version.sh
+          bash deploy/server/tests/managed.sh
 
       - name: Build web UI
         working-directory: web

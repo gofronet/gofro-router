@@ -7,15 +7,15 @@
 
 <script lang="ts">
   import Check from "lucide-svelte/icons/check";
-  import Download from "lucide-svelte/icons/download";
   import ServerIcon from "lucide-svelte/icons/server";
   import Upload from "lucide-svelte/icons/upload";
 
   import { getAppContext } from "../app-context";
   import Dialog from "./dialog.svelte";
   import PasswordInput from "./password-input.svelte";
-  import type { Server, ServerProbe, ServerVersion } from "../domain/models";
-  import { p as path } from "../router";
+  import type { Server, ServerProbe } from "../domain/models";
+  import { p as path, serverManagementPath } from "../router";
+  import ServerMarker from "./server-marker.svelte";
 
   let { flow = $bindable<ServerDialogFlow>(null), onadded }: { flow?: ServerDialogFlow; onadded?: () => Promise<void> } = $props();
 
@@ -33,8 +33,7 @@
   let error = $state("");
   let fileName = $state("Файл не выбран");
   let fileVersion = 0;
-  let serverVersion = $state<ServerVersion | null>(null);
-  let friendProfile = $state("");
+  let emoji = $state("");
   let lastFlow = "";
   const fileId = $props.id();
 
@@ -52,14 +51,13 @@
     if (flow) app.clearActionError();
     error = "";
     probe = null;
-    serverVersion = null;
-    friendProfile = "";
     fileName = "Файл не выбран";
     fileVersion++;
     if (flow?.kind === "edit" && server) {
       name = server.name;
       endpoint = server.endpoint;
       publicKey = server.public_key;
+      emoji = server.emoji || "";
       return;
     }
     name = "";
@@ -69,6 +67,7 @@
     host = "";
     port = "22";
     password = "";
+    emoji = "";
   });
 
   function close() {
@@ -108,7 +107,7 @@
     if (busy) return;
     const trimmedName = name.trim();
     if (!trimmedName || !profile.trim()) return showError("Введите название и добавьте WireGuard-профиль.");
-    if (new TextEncoder().encode(trimmedName).length > 40) return showError("Название не должно быть длиннее 40 байт.");
+    if (Array.from(trimmedName).length > 60) return showError("Название не должно быть длиннее 60 символов.");
     if (new TextEncoder().encode(profile).length > 4096) return showError("WireGuard-профиль не должен быть больше 4096 байт.");
     error = "";
     if (await app.importServer({ name: trimmedName, profile: profile.trim() })) {
@@ -123,6 +122,7 @@
     if (busy) return;
     const sshPort = Number(port);
     if (!name.trim() || !host.trim() || !password || !Number.isInteger(sshPort) || sshPort < 1 || sshPort > 65535) return showError("Введите название, IP-адрес, SSH-порт и пароль root.");
+    if (Array.from(name.trim()).length > 60) return showError("Название не должно быть длиннее 60 символов.");
     error = "";
     probe = await app.probeServer(host.trim(), sshPort);
     if (!probe) password = "";
@@ -158,7 +158,8 @@
   async function saveEdit(event: SubmitEvent) {
     event.preventDefault();
     if (!server || busy || !name.trim()) return showError("Введите название профиля.");
-    const next = { name: name.trim(), endpoint: server.managed ? server.endpoint : endpoint.trim(), public_key: server.managed ? server.public_key : publicKey.trim() };
+    if (Array.from(name.trim()).length > 60) return showError("Название не должно быть длиннее 60 символов.");
+    const next = { name: name.trim(), endpoint: server.managed ? server.endpoint : endpoint.trim(), public_key: server.managed ? server.public_key : publicKey.trim(), emoji };
     if (!next.endpoint || !next.public_key) return showError("Введите endpoint и публичный ключ.");
     error = "";
     if (await app.updateServer(server.public_key, next)) close();
@@ -169,37 +170,18 @@
     if (await app.removeServer(server.public_key)) close();
   }
 
-  async function check() {
-    if (!server || busy) return;
-    serverVersion = await app.checkServer(server.public_key);
-  }
-
-  async function update() {
-    if (!server || busy) return;
-    serverVersion = await app.updateManagedServer(server.public_key);
-  }
-
-  async function createProfile() {
-    if (!server || busy) return;
-    const result = await app.createFriendProfile(server.public_key);
-    if (result) friendProfile = result.profile;
-  }
-
-  function downloadProfile() {
-    const url = URL.createObjectURL(new Blob([friendProfile], { type: "text/plain" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "gofro-friend.conf";
-    link.click();
-    URL.revokeObjectURL(url);
-  }
+  const emojiGroups = [
+    { title: "Значки", options: [["", "Без значка"], ["🌍", "Земля"], ["🏠", "Дом"], ["💼", "Работа"], ["🚀", "Ракета"], ["⚡", "Молния"], ["🛡️", "Щит"], ["🔑", "Ключ"], ["🐈", "Кот"], ["🦊", "Лиса"], ["🐻", "Медведь"], ["🛰️", "Спутник"]] },
+    { title: "Флаги", options: [["🇩🇪", "Германия"], ["🇳🇱", "Нидерланды"], ["🇫🇮", "Финляндия"], ["🇸🇪", "Швеция"], ["🇨🇭", "Швейцария"], ["🇫🇷", "Франция"], ["🇬🇧", "Великобритания"], ["🇺🇸", "США"], ["🇨🇦", "Канада"], ["🇯🇵", "Япония"], ["🇸🇬", "Сингапур"], ["🇹🇷", "Турция"]] },
+  ];
+  const emojiOptions = $derived(emojiGroups.flatMap((group) => group.options.map(([value]) => value)));
 </script>
 
 {#if flow}
   <Dialog title={flow.kind === "choose" ? "Выбрать сервер" : flow.kind === "add" ? "Добавить сервер" : flow.kind === "import" ? "Импорт VPN" : flow.kind === "vps" ? probe ? "Проверьте VPS" : "Свой сервер" : flow.kind === "edit" ? "Настройки сервера" : flow.kind === "connect" ? "Подключить VPN?" : flow.kind === "delete" ? "Удалить сервер?" : "Отключить VPN?"} onclose={close} {busy}>
     {#if flow.kind === "choose"}
       {#each status.servers as item (item.public_key)}
-        <button class="choice-button" type="button" disabled={busy || (item.public_key === status.active_server_key && app.connected)} onclick={() => flow = { kind: "connect", publicKey: item.public_key }}><span class="country-code">VPN</span><span><strong>{item.name}</strong><small>{item.endpoint}</small></span>{#if item.public_key === status.active_server_key}<Check size={20} />{/if}</button>
+        <button class="choice-button" type="button" disabled={busy || (item.public_key === status.active_server_key && app.connected)} onclick={() => flow = { kind: "connect", publicKey: item.public_key }}><ServerMarker emoji={item.emoji} /><span><strong>{item.name}</strong><small>{item.endpoint}</small></span>{#if item.public_key === status.active_server_key}<Check size={20} />{/if}</button>
       {:else}
         <p class="dialog-intro">Нет настроенных серверов.</p>
       {/each}
@@ -209,7 +191,7 @@
       <button class="choice-button" type="button" onclick={() => flow = { kind: "vps" }}><ServerIcon size={20} /><span><strong>Свой сервер</strong><small>Настройка через SSH</small></span></button>
     {:else if flow.kind === "import"}
       <form onsubmit={importProfile}>
-        <label class="field">Название<input bind:value={name} required maxlength="40" autocomplete="off" /></label>
+        <label class="field">Название<input bind:value={name} required maxlength="120" autocomplete="off" /></label>
         <span class="file-field">Файл WireGuard (.conf)<span class="file-upload"><input id={fileId} type="file" accept=".conf,text/plain" aria-label="Выберите файл WireGuard" onchange={readFile} /><label class="btn file-upload-button" for={fileId}><Upload size={17} />Выбрать файл</label><span class="file-upload-name">{fileName}</span></span></span>
         <label class="field">Или вставьте настройки<textarea bind:value={profile} maxlength="4096" spellcheck="false" placeholder="[Interface]"></textarea></label>
         <p class="notice">Ключи передаются роутеру по защищённому соединению и хранятся там с правами 0600.</p>
@@ -222,7 +204,7 @@
         <div class="form-actions"><button class="btn ghost" type="button" disabled={busy} onclick={() => { probe = null; password = ""; }}>Изменить данные</button><button class="btn primary" type="button" disabled={busy} onclick={bootstrap}>Подтвердить и настроить</button></div>
       {:else}
         <form onsubmit={probeVps}>
-          <label class="field">Название<input bind:value={name} required maxlength="40" autocomplete="off" /></label>
+          <label class="field">Название<input bind:value={name} required maxlength="120" autocomplete="off" /></label>
           <label class="field">IP-адрес VPS<input bind:value={host} required maxlength="255" inputmode="text" autocomplete="off" /></label>
           <div class="form-line"><label class="field">Логин<input value="root" readonly /></label><label class="field">Порт SSH<input bind:value={port} type="number" min="1" max="65535" /></label></div>
           <PasswordInput label="Пароль root" bind:value={password} required autocomplete="off" disabled={busy} />
@@ -232,12 +214,14 @@
       {/if}
     {:else if flow.kind === "edit" && server}
       <form onsubmit={saveEdit}>
-        <label class="field">Название<input bind:value={name} required maxlength="40" autocomplete="off" /></label>
+        <label class="field">Название<input bind:value={name} required maxlength="120" autocomplete="off" /></label>
+        <fieldset class="emoji-picker"><legend>Значок сервера</legend>
+          {#if emoji && !emojiOptions.includes(emoji)}<div class="emoji-group-title">Текущий значок</div><div class="emoji-grid"><label class="emoji-option" title="Текущий значок"><input type="radio" name="emoji" bind:group={emoji} value={emoji} aria-label="Текущий значок" /><span aria-hidden="true">{emoji}</span></label></div>{/if}
+          {#each emojiGroups as group (group.title)}<div class="emoji-group-title">{group.title}</div><div class="emoji-grid">{#each group.options as option (option[0])}<label class="emoji-option" title={option[1]}><input type="radio" name="emoji" bind:group={emoji} value={option[0]} aria-label={option[1]} /><span aria-hidden="true">{option[0] || "−"}</span></label>{/each}</div>{/each}
+        </fieldset>
         {#if !server.managed}<label class="field">Endpoint<input bind:value={endpoint} required maxlength="255" /></label><label class="field">Публичный ключ WireGuard<input bind:value={publicKey} required maxlength="128" /></label>{/if}
         <dl class="key-values"><div><dt>Адрес сервера</dt><dd class="mono">{server.endpoint}</dd></div><div><dt>Состояние</dt><dd>{server.public_key === status.active_server_key && app.connected ? "Подключён" : status.vpn_enabled ? "Ожидание VPN" : "Отключён"}</dd></div></dl>
-        {#if server.managed}
-          <details class="disclosure"><summary>Управление VPS</summary><div class="details-content"><div class="form-actions flex-wrap"><button class="btn" type="button" disabled={busy} onclick={check}>Проверить версию</button><button class="btn" type="button" disabled={busy} onclick={update}>Обновить</button><button class="btn" type="button" disabled={busy} onclick={createProfile}>Профиль для друга</button></div>{#if serverVersion}<p class="notice">Версия {serverVersion.version}. {serverVersion.update_available ? "Доступно обновление." : "Обновлений нет."}</p>{/if}{#if friendProfile}<textarea readonly value={friendProfile} aria-label="Профиль WireGuard для друга"></textarea><button class="btn" type="button" onclick={downloadProfile}><Download size={17} />Скачать .conf</button>{/if}</div></details>
-        {/if}
+        {#if server.managed}<a class="text-link" href={serverManagementPath(server.public_key)} onclick={close}>Управление сервером</a>{/if}
         <div class="form-actions"><button class="btn ghost danger" type="button" disabled={busy} onclick={() => flow = { kind: "delete", publicKey: server.public_key }}>Удалить</button><button class="btn primary" type="submit" disabled={busy}>Сохранить</button></div>
       </form>
     {:else if flow.kind === "connect" && server}

@@ -3,7 +3,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use super::mode::switch_mode;
 use crate::{
     AppState,
-    config::{parse_server_profile, save, validate_server},
+    config::{normalize_server_name, parse_server_profile, save, validate_server},
     model::{ControllerConfig, ServerProfile, ServerUpdate},
     network::select_server_peer,
 };
@@ -59,6 +59,7 @@ fn replace_imported_server(
         server.management = previous.management.clone();
         server.endpoint = previous.endpoint.clone();
     }
+    server.emoji = previous.emoji.clone();
     next.servers[index] = server;
     Some((next, previous, reconnect, index))
 }
@@ -87,7 +88,8 @@ pub(crate) fn add_server(state: &AppState, server: ServerProfile) -> Result<()> 
     Ok(())
 }
 
-pub(crate) fn update_server(state: &AppState, update: ServerUpdate) -> Result<()> {
+pub(crate) fn update_server(state: &AppState, mut update: ServerUpdate) -> Result<()> {
+    normalize_server_name(&mut update.name)?;
     let mut config = state
         .config
         .lock()
@@ -106,6 +108,9 @@ pub(crate) fn update_server(state: &AppState, update: ServerUpdate) -> Result<()
     server.name = update.name;
     server.endpoint = update.endpoint;
     server.public_key = update.public_key;
+    if let Some(emoji) = update.emoji {
+        server.emoji = emoji;
+    }
     validate_server(&server)?;
     if config
         .servers
@@ -248,6 +253,7 @@ mod tests {
     fn reimport_replaces_credentials_for_active_server() {
         let old = ServerProfile {
             name: "Old".into(),
+            emoji: "🛰".into(),
             endpoint: "old.example:8443".into(),
             public_key: "server-key".into(),
             client_tunnel_address: Some("10.202.0.2/32".into()),
@@ -266,6 +272,7 @@ mod tests {
         };
         let new = ServerProfile {
             name: "New".into(),
+            emoji: String::new(),
             endpoint: "new.example:8443".into(),
             public_key: "server-key".into(),
             client_tunnel_address: Some("10.202.0.5/32".into()),
@@ -287,5 +294,6 @@ mod tests {
         );
         assert_eq!(previous.client_private_key.as_deref(), Some("old-private"));
         assert!(next.servers[0].management.is_some());
+        assert_eq!(next.servers[0].emoji, "🛰");
     }
 }

@@ -10,7 +10,12 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use ipnet::Ipv4Net;
-use wireguard_status::wireguard_peers;
+use wireguard_status::{
+    managed::{FRIEND_NAME_INPUT_LIMIT, FriendNameInput},
+    wireguard_peers,
+};
+
+mod managed;
 
 const CLIENT_SUBNET: &str = "10.203.1.0/24";
 const TUNNEL_LOCK: &str = "/run/lock/gofro-server.lock";
@@ -51,6 +56,21 @@ enum ServerCommand {
         subnet: Option<String>,
     },
     Status,
+    ManagedStatus,
+    CreateFriend {
+        endpoint: String,
+    },
+    RenameFriend {
+        public_key: String,
+    },
+    RevokeFriend {
+        public_key: String,
+    },
+    FriendProfile {
+        public_key: String,
+        endpoint: String,
+    },
+    RestartVpn,
 }
 
 fn run(command: &mut Command) -> Result<String> {
@@ -167,20 +187,90 @@ fn main() -> Result<()> {
                 serde_json::to_string_pretty(&wireguard_peers(&args.interface)?)?
             );
         }
+        ServerCommand::ManagedStatus => {
+            require_root()?;
+            let _lock = mutating_lock()?;
+            println!(
+                "{}",
+                serde_json::to_string(&managed::status(&args.interface)?)?
+            );
+        }
+        ServerCommand::CreateFriend { endpoint } => {
+            require_root()?;
+            validate_managed_endpoint(&endpoint)?;
+            let name = read_friend_name()?;
+            let _lock = mutating_lock()?;
+            print!("{}", managed::create(&args.interface, &endpoint, name)?);
+        }
+        ServerCommand::RenameFriend { public_key } => {
+            require_root()?;
+            let name = read_friend_name()?;
+            let _lock = mutating_lock()?;
+            managed::rename(&args.interface, &public_key, name)?;
+        }
+        ServerCommand::RevokeFriend { public_key } => {
+            require_root()?;
+            let _lock = mutating_lock()?;
+            managed::revoke(&args.interface, &public_key)?;
+        }
+        ServerCommand::FriendProfile {
+            public_key,
+            endpoint,
+        } => {
+            require_root()?;
+            validate_managed_endpoint(&endpoint)?;
+            let _lock = mutating_lock()?;
+            print!(
+                "{}",
+                managed::profile(&args.interface, &public_key, &endpoint)?
+            );
+        }
+        ServerCommand::RestartVpn => {
+            require_root()?;
+            let _lock = mutating_lock()?;
+            managed::restart(&args.interface)?;
+        }
     }
 
     Ok(())
 }
 
+fn read_friend_name() -> Result<String> {
+    use std::io::Read;
+
+    let mut input = String::new();
+    std::io::stdin()
+        .take((FRIEND_NAME_INPUT_LIMIT + 1) as u64)
+        .read_to_string(&mut input)
+        .context("failed to read friend request")?;
+    if input.len() > FRIEND_NAME_INPUT_LIMIT {
+        bail!("friend request is too large");
+    }
+    let input: FriendNameInput = serde_json::from_str(&input).context("invalid friend request")?;
+    wireguard_status::managed::validate_name(&input.name)
+}
+
 fn mutating_lock() -> Result<File> {
+    let path = test_path("GOFRO_TEST_LOCK", TUNNEL_LOCK);
     let lock = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(TUNNEL_LOCK)
-        .with_context(|| format!("failed to open {TUNNEL_LOCK}"))?;
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
     lock.lock()
-        .with_context(|| format!("failed to lock {TUNNEL_LOCK}"))?;
+        .with_context(|| format!("failed to lock {}", path.display()))?;
     Ok(lock)
+}
+
+fn test_path(variable: &str, default: &str) -> std::path::PathBuf {
+    match (
+        cfg!(debug_assertions)
+            && std::env::var_os("GOFRO_TESTING").as_deref() == Some(std::ffi::OsStr::new("1")),
+        std::env::var_os(variable),
+    ) {
+        (true, Some(path)) => path.into(),
+        _ => default.into(),
+    }
 }
 
 fn add_peer(
@@ -340,6 +430,30 @@ fn validate_endpoint(endpoint: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_managed_endpoint(endpoint: &str) -> Result<()> {
+    let (host, port) = endpoint
+        .rsplit_once(':')
+        .context("managed endpoint must have canonical IP:8443 format")?;
+    if port != "8443" {
+        bail!("managed endpoint must have canonical IP:8443 format");
+    }
+    let bracketed = host.starts_with('[') || host.ends_with(']');
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    let address = host
+        .parse::<std::net::IpAddr>()
+        .context("managed endpoint must have canonical IP:8443 format")?;
+    if host != address.to_string()
+        || (address.is_ipv6() && !bracketed)
+        || (address.is_ipv4() && bracketed)
+    {
+        bail!("managed endpoint must have canonical IP:8443 format");
+    }
+    Ok(())
+}
+
 fn save(interface: &str) -> Result<()> {
     run(Command::new("wg-quick").args(["save", interface]))?;
     Ok(())
@@ -375,6 +489,12 @@ mod tests {
         assert!(profile.contains("PersistentKeepalive = 10"));
         assert!(profile.contains("Endpoint = vpn.test:8443"));
         assert!(validate_endpoint("vpn.test:8443").is_ok());
+        assert!(validate_managed_endpoint("198.51.100.1:8443").is_ok());
+        assert!(validate_managed_endpoint("[2001:db8::1]:8443").is_ok());
+        assert!(validate_managed_endpoint("999.51.100.1:8443").is_err());
+        assert!(validate_managed_endpoint("[:::]:8443").is_err());
+        assert!(validate_managed_endpoint("[2001:0db8::1]:8443").is_err());
+        assert!(validate_managed_endpoint("vpn.test:8443").is_err());
         assert!(validate_endpoint("vpn.test").is_err());
         assert!(validate_endpoint(&format!("{}:8443", "a".repeat(251))).is_err());
         assert_eq!(allowed_ips("10.202.0.5/32", None), "10.202.0.5/32");

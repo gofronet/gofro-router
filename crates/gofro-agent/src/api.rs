@@ -17,7 +17,7 @@ use wireguard_status::wireguard_peers;
 use crate::{
     AppState, auth, controller, dataplane,
     model::{
-        AP_ADDRESS, AP_DOMAIN, AgentStatus, ApInput, ApStatus, ModeInput, ProfileInput,
+        AP_ADDRESS, AP_DOMAIN, AgentStatus, ApInput, ApStatus, ModeInput, ProfileInput, RouterInfo,
         RoutingConfig, RoutingStatus, RoutingTestInput, RoutingTestResult, ServerKeyInput,
         ServerStatus, ServerUpdate, UpdateInput, UpdateResult, UpdateStatus,
     },
@@ -97,6 +97,13 @@ fn private_router() -> Router<AppState> {
         .route("/api/servers/check", post(check_managed_server))
         .route("/api/servers/update-managed", post(update_managed_server))
         .route("/api/servers/create-profile", post(create_managed_profile))
+        .route("/api/servers/management", post(managed_server_status))
+        .route("/api/servers/restart", post(restart_managed_server))
+        .route(
+            "/api/servers/friends",
+            post(create_friend).put(rename_friend).delete(revoke_friend),
+        )
+        .route("/api/servers/friends/profile", post(friend_profile))
         .route("/api/servers/select", post(select_server))
         .route("/api/ap", post(update_ap))
         .route("/api/routing", post(update_routing))
@@ -434,6 +441,30 @@ struct CreatedProfile {
     profile: String,
 }
 
+#[derive(serde::Deserialize)]
+struct CreateFriendInput {
+    public_key: String,
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RenameFriendInput {
+    public_key: String,
+    peer_key: String,
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct FriendProfileInput {
+    public_key: String,
+    peer_key: String,
+}
+
+#[derive(Serialize)]
+struct FriendProfile {
+    profile: String,
+}
+
 async fn probe_server(Json(input): Json<ProbeInput>) -> Result<Json<ProbeResult>, ApiError> {
     tokio::task::spawn_blocking(move || {
         crate::managed::probe(input.host.trim().to_owned(), input.port)
@@ -522,6 +553,93 @@ async fn create_managed_profile(
     .map_err(ApiError)?
     .map(|profile| Json(CreatedProfile { profile }))
     .map_err(ApiError)
+}
+
+async fn managed_server_status(
+    State(state): State<AppState>,
+    Json(input): Json<ServerKeyInput>,
+) -> Result<Json<wireguard_status::managed::ManagedServerStatus>, ApiError> {
+    managed_status(state, input.public_key).await
+}
+
+async fn restart_managed_server(
+    State(state): State<AppState>,
+    Json(input): Json<ServerKeyInput>,
+) -> Result<Json<wireguard_status::managed::ManagedServerStatus>, ApiError> {
+    tokio::task::spawn_blocking(move || crate::managed::restart(&state, input.public_key.trim()))
+        .await
+        .context("managed restart task failed")
+        .map_err(ApiError)?
+        .map(Json)
+        .map_err(ApiError)
+}
+
+async fn create_friend(
+    State(state): State<AppState>,
+    Json(input): Json<CreateFriendInput>,
+) -> Result<Json<wireguard_status::managed::ManagedServerStatus>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed::create_friend(&state, &input.public_key, &input.name)
+    })
+    .await
+    .context("create friend task failed")
+    .map_err(ApiError)?
+    .map(Json)
+    .map_err(ApiError)
+}
+
+async fn rename_friend(
+    State(state): State<AppState>,
+    Json(input): Json<RenameFriendInput>,
+) -> Result<Json<wireguard_status::managed::ManagedServerStatus>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed::rename_friend(&state, &input.public_key, &input.peer_key, &input.name)
+    })
+    .await
+    .context("rename friend task failed")
+    .map_err(ApiError)?
+    .map(Json)
+    .map_err(ApiError)
+}
+
+async fn revoke_friend(
+    State(state): State<AppState>,
+    Json(input): Json<FriendProfileInput>,
+) -> Result<Json<wireguard_status::managed::ManagedServerStatus>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed::revoke_friend(&state, &input.public_key, &input.peer_key)
+    })
+    .await
+    .context("revoke friend task failed")
+    .map_err(ApiError)?
+    .map(Json)
+    .map_err(ApiError)
+}
+
+async fn friend_profile(
+    State(state): State<AppState>,
+    Json(input): Json<FriendProfileInput>,
+) -> Result<Json<FriendProfile>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed::friend_profile(&state, &input.public_key, &input.peer_key)
+    })
+    .await
+    .context("friend profile task failed")
+    .map_err(ApiError)?
+    .map(|profile| Json(FriendProfile { profile }))
+    .map_err(ApiError)
+}
+
+async fn managed_status(
+    state: AppState,
+    public_key: String,
+) -> Result<Json<wireguard_status::managed::ManagedServerStatus>, ApiError> {
+    tokio::task::spawn_blocking(move || crate::managed::status(&state, public_key.trim()))
+        .await
+        .context("managed status task failed")
+        .map_err(ApiError)?
+        .map(Json)
+        .map_err(ApiError)
 }
 
 async fn update_ap(
@@ -646,7 +764,59 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
             dataplane_active: dataplane::is_installed(),
             degraded: state.routing_degraded.load(Ordering::Relaxed),
         },
+        router_info: router_info(),
     })
+}
+
+fn router_info() -> RouterInfo {
+    let model = read_small("/tmp/sysinfo/model")
+        .and_then(|value| nonempty(value.trim_matches(['\0', ' ', '\t', '\r', '\n'])))
+        .or_else(|| {
+            read_small("/proc/device-tree/model")
+                .and_then(|value| nonempty(value.trim_matches(['\0', ' ', '\t', '\r', '\n'])))
+        });
+    let openwrt = read_small("/etc/openwrt_release")
+        .and_then(|value| parse_release(&value, "DISTRIB_ID", "DISTRIB_RELEASE"));
+    let os =
+        read_small("/etc/os-release").and_then(|value| parse_release(&value, "NAME", "VERSION_ID"));
+    let (os_name, os_version) = openwrt.or(os).unwrap_or((None, None));
+    RouterInfo {
+        model,
+        os_name,
+        os_version,
+    }
+}
+
+fn read_small(path: &str) -> Option<String> {
+    let metadata = fs::metadata(path).ok()?;
+    (metadata.len() <= 4096)
+        .then(|| fs::read_to_string(path).ok())
+        .flatten()
+}
+
+fn parse_release(
+    value: &str,
+    name_key: &str,
+    version_key: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    let mut name = None;
+    let mut version = None;
+    for line in value.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches(['\'', '"']);
+        if key == name_key {
+            name = nonempty(value)
+        } else if key == version_key {
+            version = nonempty(value)
+        }
+    }
+    (name.is_some() || version.is_some()).then_some((name, version))
+}
+
+fn nonempty(value: &str) -> Option<String> {
+    (!value.is_empty() && !value.chars().any(char::is_control)).then(|| value.to_owned())
 }
 
 fn queue_update() -> Result<()> {
@@ -754,5 +924,36 @@ mod tests {
         );
         assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    }
+
+    #[test]
+    fn parses_release_files_without_executing_them() {
+        assert_eq!(
+            parse_release("NAME=Gofro\nVERSION_ID=1.2\n", "NAME", "VERSION_ID"),
+            Some((Some("Gofro".into()), Some("1.2".into())))
+        );
+        assert_eq!(
+            parse_release(
+                "DISTRIB_ID='OpenWrt'\nDISTRIB_RELEASE=24.10\n",
+                "DISTRIB_ID",
+                "DISTRIB_RELEASE"
+            ),
+            Some((Some("OpenWrt".into()), Some("24.10".into())))
+        );
+        assert_eq!(
+            parse_release("NAME=$EVIL\n", "NAME", "VERSION_ID"),
+            Some((Some("$EVIL".into()), None))
+        );
+    }
+
+    #[test]
+    fn friend_request_bodies_require_only_the_fields_the_route_uses() {
+        let create: CreateFriendInput =
+            serde_json::from_str(r#"{"public_key":"server","name":"Friend"}"#).unwrap();
+        assert_eq!(create.name, "Friend");
+        assert!(
+            serde_json::from_str::<RenameFriendInput>(r#"{"public_key":"server","name":"Friend"}"#)
+                .is_err()
+        );
     }
 }

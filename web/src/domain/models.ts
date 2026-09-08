@@ -13,6 +13,8 @@ export type {
   ServerProbe,
   ServerInput,
   ServerVersion,
+  FriendPeer,
+  ManagedServerStatus,
   Status,
   WifiBand,
   WifiInput,

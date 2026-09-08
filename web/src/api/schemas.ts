@@ -5,7 +5,23 @@ export const serverSchema = z.object({
   endpoint: z.string(),
   public_key: z.string(),
   managed: z.boolean(),
+  emoji: z.string().optional(),
 });
+
+export const friendNameSchema = z.string().trim().min(1).refine(
+  value => Array.from(value).length <= 60 && !/[\x00-\x1f\x7f-\x9f]/.test(value),
+  "Имя должно содержать до 60 символов без управляющих знаков.",
+);
+export const friendPeerSchema = z.object({
+  public_key: z.string().regex(/^[A-Za-z0-9+/]{43}=$/),
+  name: friendNameSchema,
+  revoked: z.boolean(),
+  can_share: z.boolean(),
+}).refine(peer => !peer.revoked || !peer.can_share);
+export const managedServerStatusSchema = z.object({
+  version: z.string(),
+  peers: z.array(friendPeerSchema),
+}).refine(status => new Set(status.peers.map(peer => peer.public_key)).size === status.peers.length);
 
 export const serverProbeSchema = z.object({
   host: z.string(),
@@ -131,6 +147,11 @@ const apStatusSchema = z.object({
 
 export const statusSchema = z.object({
   version: z.string(),
+  router_info: z.object({
+    model: z.string().nullable(),
+    os_name: z.string().nullable(),
+    os_version: z.string().nullable(),
+  }).optional(),
   update: z.object({
     running: z.boolean(),
     result: z.enum(["current", "updated", "failed"]).nullable(),
@@ -177,6 +198,7 @@ export const serverInputSchema = serverSchema.pick({
   name: true,
   endpoint: true,
   public_key: true,
+  emoji: true,
 });
 export const profileInputSchema = z.object({
   name: z.string(),
@@ -189,6 +211,8 @@ export const wifiInputSchema = z.object({
 });
 
 export type Server = z.infer<typeof serverSchema>;
+export type FriendPeer = z.infer<typeof friendPeerSchema>;
+export type ManagedServerStatus = z.infer<typeof managedServerStatusSchema>;
 export type ServerProbe = z.infer<typeof serverProbeSchema>;
 export type ServerVersion = z.infer<typeof serverVersionSchema>;
 export type Profile = z.infer<typeof profileSchema>;

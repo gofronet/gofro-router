@@ -6,6 +6,8 @@ import {
   serverProbeSchema,
   serverInputSchema,
   serverVersionSchema,
+  managedServerStatusSchema,
+  friendNameSchema,
   routingConfigSchema,
   routingTestSchema,
   statusSchema,
@@ -16,6 +18,7 @@ import {
   type ServerProbe,
   type ServerInput,
   type ServerVersion,
+  type ManagedServerStatus,
   type RoutingConfig,
   type RoutingTest,
   type Status,
@@ -114,6 +117,18 @@ export const api = {
       request(profileSchema, () =>
         http.post("/servers/create-profile", { public_key: publicKey }, mutation),
       ),
+    inspect: (publicKey: string): Promise<ManagedServerStatus> =>
+      request(managedServerStatusSchema, () => http.post("/servers/management", { public_key: publicKey }, mutation)),
+    restart: (publicKey: string): Promise<ManagedServerStatus> =>
+      request(managedServerStatusSchema, () => http.post("/servers/restart", { public_key: publicKey }, mutation)),
+    createFriend: (publicKey: string, name: string): Promise<ManagedServerStatus> =>
+      request(managedServerStatusSchema, () => http.post("/servers/friends", { public_key: publicKey, name: friendNameSchema.parse(name) }, mutation)),
+    renameFriend: (publicKey: string, peerKey: string, name: string): Promise<ManagedServerStatus> =>
+      request(managedServerStatusSchema, () => http.put("/servers/friends", { public_key: publicKey, peer_key: peerKey, name: friendNameSchema.parse(name) }, mutation)),
+    revokeFriend: (publicKey: string, peerKey: string): Promise<ManagedServerStatus> =>
+      request(managedServerStatusSchema, () => http.delete("/servers/friends", { data: { public_key: publicKey, peer_key: peerKey }, ...mutation })),
+    friendProfile: (publicKey: string, peerKey: string): Promise<Profile> =>
+      request(profileSchema, () => http.post("/servers/friends/profile", { public_key: publicKey, peer_key: peerKey }, mutation)),
   },
   wifi: {
     save: (input: WifiInput): Promise<Status> => {
@@ -157,6 +172,8 @@ export type {
   ServerProbe,
   ServerInput,
   ServerVersion,
+  FriendPeer,
+  ManagedServerStatus,
   Status,
   WifiBand,
   WifiInput,
