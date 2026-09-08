@@ -3,7 +3,8 @@ set -euo pipefail
 
 command=${SSH_ORIGINAL_COMMAND:-}
 
-valid_endpoint() {
+# Keep validation regexes from overwriting the command's BASH_REMATCH captures.
+valid_endpoint() (
   local host octet
   [[ $1 =~ ^(\[[0-9a-f:]+\]|[0-9]{1,3}(\.[0-9]{1,3}){3}):8443$ ]] || return 1
   host=${1%:8443}
@@ -12,7 +13,7 @@ valid_endpoint() {
   for host in "${octet[@]}"; do
     [[ $host =~ ^(0|[1-9][0-9]{0,2})$ ]] && (( host <= 255 )) || return 1
   done
-}
+)
 
 if [[ $command == version ]]; then
   exec /usr/local/bin/gofro-router-server --version
