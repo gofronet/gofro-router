@@ -3,7 +3,9 @@
 The next release workflow cross-compiles static musl binaries for eight
 supported OpenWrt 25.12 ABIs and one x86_64 VPS target: nine signed bundles,
 nine manifests, nine signatures and two installers (29 release assets total).
-The next workspace version is `0.5.16`.
+The next signed candidate workspace version is `0.5.17`. The installed signed
+v0.5.16 candidate is the immutable, pinned baseline; changes require a new
+candidate, not modification of its artifact. Published Latest remains v0.5.15.
 
 ## Create a release
 
@@ -11,7 +13,7 @@ The next workspace version is `0.5.16`.
    `Cargo.toml` and the workspace package versions in `Cargo.lock`.
 2. Run the checks below and squash-merge the pull request into `main`.
 3. Open **Actions -> Release -> Run workflow**, select `main`, and enter the
-   version without the `v` prefix (`0.5.16`). Leave **publish** unchecked
+   version without the `v` prefix (`0.5.17`). Leave **publish** unchecked
    (the default) to build a candidate.
 
 The workflow requires the latest `main` commit and a matching Cargo workspace
@@ -43,6 +45,19 @@ are scoped to a workflow run; record the run ID and artifact IDs as well.
    reboot/recovery and guarded rollback; qualify the VPS install/managed lifecycle
    and router-to-VPS tunnel. Record untested ABIs explicitly. CI/emulation alone
    is not hardware qualification.
+
+For v0.5.17, also record the upgrade from the pinned signed v0.5.16 baseline.
+Qualify bare `wifi.gofro.net` from LAN using the router's local LAN resolver:
+its DNS A answer is reserved VIP `198.18.0.0` (TTL 30 seconds), outside FakeDNS
+lease allocation. Renew stale cached DNS answers (wait out the previous TTL or
+flush the client cache); external DNS/DoH is not a substitute for this resolver.
+Verify LAN-only TCP VIP `80`/`8081` -> existing LAN `8081` and VIP `443`/`8443`
+-> existing LAN `8443`, strict canonical alias Host/Origin validation, and
+unchanged LAN-address access and all existing panel/LuCI ports. No additional
+LAN IP, network configuration, proxy, listener or dependency is introduced.
+Check `https://<LAN-address>:8443` as the direct-IP fallback, especially after
+an initial reconcile failure when VIP rules may not yet be installed. Candidate
+qualification must not overwrite the v0.5.16 artifact or change published Latest.
 
 ### Publish after qualification
 

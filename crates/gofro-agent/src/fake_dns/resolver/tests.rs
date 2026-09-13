@@ -38,16 +38,78 @@ fn accepts_dns_service_labels() {
 
 #[test]
 fn panel_hostname_never_needs_an_upstream() {
-    let name = Name::from_ascii("wifi.gofro.net.").unwrap();
-    let mut request = Message::new();
-    request.add_query(hickory_proto::op::Query::query(name, RecordType::A));
-
-    let response =
-        Message::from_vec(&panel_response(&request, "192.168.0.1".parse().unwrap()).unwrap())
-            .unwrap();
-
-    assert!(
-        matches!(response.answers()[0].data(), RData::A(A(address)) if *address == "192.168.0.1".parse::<Ipv4Addr>().unwrap())
+    let upstream = UdpSocket::bind("127.0.0.1:0").unwrap();
+    upstream.set_nonblocking(true).unwrap();
+    let dns = FakeDns {
+        store: Mutex::new(
+            Store::from_connection(rusqlite::Connection::open_in_memory().unwrap()).unwrap(),
+        ),
+        updates: RwLock::new(()),
+        active: AtomicBool::new(false),
+        vpn_enabled: AtomicBool::new(false),
+    };
+    for mode in [RoutingMode::Rules, RoutingMode::All] {
+        let policy = RoutingPolicy::compile(
+            RoutingConfig {
+                domain_rules: vec![DomainRule {
+                    name: "Block panel".into(),
+                    enabled: true,
+                    matcher: DomainMatch::Exact {
+                        value: AP_DOMAIN.into(),
+                    },
+                    target: RouteTarget::Block,
+                }],
+                ip_rules: vec![],
+                mode,
+                ..RoutingConfig::default()
+            },
+            Arc::new(GeoData::default()),
+        )
+        .unwrap();
+        for enabled in [false, true] {
+            dns.set_vpn_enabled(enabled);
+            for kind in [
+                RecordType::A,
+                RecordType::AAAA,
+                RecordType::HTTPS,
+                RecordType::SVCB,
+                RecordType::TXT,
+                RecordType::ANY,
+            ] {
+                let mut request = Message::new();
+                request
+                    .set_id(42)
+                    .add_query(hickory_proto::op::Query::query(
+                        Name::from_ascii("WiFi.GoFrO.NeT.").unwrap(),
+                        kind,
+                    ));
+                let response = Message::from_vec(
+                    &dns.process(
+                        &request.to_vec().unwrap(),
+                        &policy,
+                        upstream.local_addr().unwrap(),
+                        &test_lan(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(response.id(), 42);
+                assert_eq!(response.response_code(), ResponseCode::NoError);
+                assert_eq!(response.queries(), request.queries());
+                if kind == RecordType::A {
+                    assert_eq!(response.answers().len(), 1);
+                    assert_eq!(response.answers()[0].data(), &RData::A(A(PANEL_VIRTUAL_IP)));
+                    assert_eq!(response.answers()[0].ttl(), 30);
+                } else {
+                    assert!(response.answers().is_empty());
+                }
+                assert_eq!(dns.count(), 0);
+            }
+        }
+    }
+    assert_eq!(
+        upstream.recv(&mut [0; 512]).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
     );
 }
 

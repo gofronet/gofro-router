@@ -8,7 +8,9 @@ ROOT="$(CDPATH='' cd "$(dirname "$0")/../../.." && pwd)"
 if [ "$(uname -s)" != Linux ] || [ "$(id -u)" != 0 ] || [ ! -f /.dockerenv ]; then
 	printf '%s\n' 'BLOCKED: requires a disposable root Linux Docker container' >&2; exit 1;
 fi
-for command in ip nft python3; do command -v "$command" >/dev/null; done
+for command in ip nft python3 mount; do
+    command -v "$command" >/dev/null || { printf 'missing required command: %s\n' "$command" >&2; exit 1; }
+done
 [ -x "${AGENT_BIN:?mount the production agent read-only}" ]
 [ -s "${FIXTURES:?mount real rendered fixtures read-only}/routing.nft" ]
 [ -f "$ROOT/deploy/openwrt/root/usr/libexec/gofro/guard" ]
@@ -16,7 +18,7 @@ for command in ip nft python3; do command -v "$command" >/dev/null; done
 ip -j address show | python3 -c 'import json,sys; links=json.load(sys.stdin); assert [x["ifname"] for x in links if "UP" in x["flags"]] == ["lo"] and all(x["ifname"] == "lo" or not x.get("addr_info") for x in links), "requires --network none; refusing existing networking"'
 
 tag="gdn$$" owned=''
-r="${tag}r" c="${tag}c" w="${tag}w"
+r="${tag}r" c="${tag}c" w="${tag}w" v="${tag}v"
 cleanup() {
 	for ns in $owned; do
 		for pid in $(ip netns pids "$ns"); do kill "$pid" 2>/dev/null || true; done
@@ -26,14 +28,15 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-for ns in "$r" "$c" "$w"; do
+for ns in "$r" "$c" "$w" "$v"; do
 	ip netns add "$ns"
 	owned="$owned $ns"
 	ip -n "$ns" link set lo up
 done
 ip -n "$r" link add lan0 type veth peer name client0 netns "$c"
 ip -n "$r" link add wan0 type veth peer name peer0 netns "$w"
-for pair in "$r lan0" "$c client0" "$r wan0" "$w peer0"; do
+ip -n "$r" link add gt0 type veth peer name vpn0 netns "$v"
+for pair in "$r lan0" "$c client0" "$r wan0" "$w peer0" "$r gt0" "$v vpn0"; do
 	ns=${pair% *} device=${pair#* }
 	ip -n "$ns" link set "$device" addrgenmode none
 	ip -n "$ns" link set "$device" up
@@ -44,6 +47,26 @@ ip -n "$r" addr add 192.0.2.1/24 dev wan0
 ip -n "$w" addr add 192.0.2.2/24 dev peer0
 ip -n "$c" route add default via 192.168.0.1
 ip -n "$w" route add default via 192.0.2.1
+ip -n "$r" addr add 10.0.0.1/24 dev gt0
+ip -n "$v" addr add 10.0.0.2/24 dev vpn0
+ip -n "$v" route add default via 10.0.0.1
+ip -n "$r" route add default via 192.0.2.2
+ip -n "$r" rule add pref 80 fwmark 0x10000/0x30000 lookup main
+ip -n "$r" rule add pref 81 fwmark 0x20000/0x30000 lookup 100
+ip -n "$r" route add default dev gt0 table 100 metric 10 proto 186
+ip -n "$r" route add unreachable default table 100 metric 32767 proto 186
+ip -n "$r" route add 192.168.0.0/24 dev lan0 table 100 proto 186
+# CI's minimal image has no procps/sysctl, and Docker masks /proc/sys read-only.
+# ip netns exec creates a slave mount namespace: this fresh proc mount and all
+# sysctl writes are confined to this invocation and our owned router netns.
+# shellcheck disable=SC2016 # device is expanded by the namespace's child shell.
+ip netns exec "$r" sh -eu -c '
+    mount -t proc -o nosuid,nodev,noexec proc /proc
+    printf "1\n" > /proc/sys/net/ipv4/ip_forward
+    for device in all default lan0 wan0 gt0; do
+        printf "0\n" > "/proc/sys/net/ipv4/conf/$device/rp_filter"
+    done
+'
 # Deliberately install ULA before GUA, with two addresses in each global-scope prefix.
 for address in fe80::1 fd12:3456::1 fd12:3456::11 2001:db8:1::1 2001:db8:1::11; do
 	ip -n "$r" -6 addr add "$address/64" dev lan0 nodad
@@ -56,7 +79,8 @@ ip -n "$w" -6 addr add 2001:db8:ff::2/64 dev peer0 nodad
 ip -n "$c" -6 route add default via 2001:db8:1::1
 ip -n "$w" -6 route add default via 2001:db8:ff::1
 
-python3 - "$r" "$c" "$w" "$AGENT_BIN" "$FIXTURES" "$ROOT/deploy/openwrt/root/usr/libexec/gofro/guard" <<'PY'
+python3 - "$r" "$c" "$w" "$v" "$AGENT_BIN" "$FIXTURES" "$ROOT/deploy/openwrt/root/usr/libexec/gofro/guard" <<'PY'
+import hashlib
 import json
 import pathlib
 import select
@@ -65,7 +89,7 @@ import sys
 import tempfile
 import time
 
-r, c, w, agent_bin, fixtures, guard_helper = sys.argv[1:]
+r, c, w, v, agent_bin, fixtures, guard_helper = sys.argv[1:]
 
 def run(ns, *args, **kwargs):
     return subprocess.run(["ip", "netns", "exec", ns, *args], text=True,
@@ -127,7 +151,7 @@ try:
     answer, offset = dns_name(response, offset + 4)
     kind, klass, ttl, size = struct.unpack_from("!HHIH", response, offset)
     assert answer == question and (kind, klass, ttl, size) == (1, 1, 30, 4)
-    assert response[offset + 10:] == socket.inet_aton("192.168.0.1"), response.hex()
+    assert response[offset + 10:] == socket.inet_aton("198.18.0.0"), response.hex()
 except (TimeoutError, ConnectionRefusedError) as error:
     if blocked:
         # Native SO_BINDTODEVICE can produce refusal rather than a silent drop.
@@ -162,6 +186,13 @@ with tempfile.TemporaryDirectory(prefix="gofro-real-dns-", dir="/run") as tempor
         "routing": {"domain_rules": [], "ip_rules": [], "default_target": "vpn", "mode": "rules"},
     }))
     (root / "empty.dat").write_bytes(b"")
+    # Disposable known credential in the production record format; no user auth files.
+    password = "netns-only-password"
+    salt = bytes(range(32))
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1, dklen=32)
+    credential = root / "password"
+    credential.touch(mode=0o600)
+    credential.write_text(f"gofro-scrypt-v1$16384$8$1${salt.hex()}${digest.hex()}")
     args = [agent_bin, "--lan-interface", "lan0", "--lan-subnet", "192.168.0.0/24",
             "--listen", "127.0.0.1:8080", "--http-listen", "192.168.0.1:8081",
             "--https-listen", "192.168.0.1:8443", "--dns-listen", "192.168.0.1:5353",
@@ -172,7 +203,8 @@ with tempfile.TemporaryDirectory(prefix="gofro-real-dns-", dir="/run") as tempor
         args += ["--" + flag, str(root / name)]
     run(r, agent_bin, "--version")
     agent = subprocess.Popen(["ip", "netns", "exec", r, *args], stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, bufsize=0)
+                              stderr=subprocess.STDOUT, bufsize=0)
+    luci = None
     try:
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -186,6 +218,29 @@ with tempfile.TemporaryDirectory(prefix="gofro-real-dns-", dir="/run") as tempor
             raise AssertionError("actual agent startup timed out")
         assert any("network recovery failed" in line and "/bin/false" in line for line in logs), "reconcile did not fail at the intended no-op command"
         run(r, "nft", "list", "table", "inet", "gofro_guard")
+        # Check cold degraded startup BEFORE rendered fixtures can mask missing
+        # production VIP setup. Keep running the existing cases even if this fails.
+        run(c, "python3", "-c", query, "192.168.0.2", "192.168.0.1", "5353", "udp", "900", "")
+        cold = subprocess.run(["ip", "netns", "exec", c, "python3", "-c", r'''
+import http.client, json, socket, ssl, sys
+context = ssl.create_default_context(cafile=sys.argv[1])
+def status(address, port, host):
+    connection = http.client.HTTPConnection(address, port, timeout=2)
+    connection.connect()
+    connection.sock = context.wrap_socket(connection.sock, server_hostname="wifi.gofro.net")
+    connection.request("GET", "/api/auth/status", headers={"Host": host})
+    response = connection.getresponse()
+    assert response.status == 200 and json.loads(response.read())["state"] == "login"
+    connection.close()
+status("192.168.0.1", 8443, "192.168.0.1:8443")
+print("PASS: cold reconcile failure retains actual direct-LAN TLS/auth recovery", flush=True)
+status("198.18.0.0", 443, "wifi.gofro.net")
+print("PASS: cold reconcile failure retains canonical VIP TLS/auth", flush=True)
+''', str(root / "cert.pem")], text=True, capture_output=True, timeout=10)
+        print(cold.stdout, end="", flush=True)
+        if cold.returncode:
+            print("FAIL: cold degraded startup has no working canonical VIP before fixture preload", flush=True)
+            print(cold.stderr, end="", flush=True)
         run(r, "nft", "--check", "-f", str(pathlib.Path(fixtures) / "routing.nft"))
         run(r, "nft", "-f", str(pathlib.Path(fixtures) / "routing.nft"))
         # Count the actual post-DNAT IPv6 destination and any accidental upstream query.
@@ -222,9 +277,178 @@ with tempfile.TemporaryDirectory(prefix="gofro-real-dns-", dir="/run") as tempor
                     for expression in item["rule"]["expr"] if "counter" in expression]
         assert upstream == [0], "local panel DNS unexpectedly queried an upstream"
         print(f"Actual production DNS: {completed - len(failures)} passed, {len(failures)} failed, {completed} total", flush=True)
+        assert completed == 44, f"existing DNS coverage changed: {completed}/44"
         assert not failures, f"actual production DNS failed {len(failures)}/{completed} cases: {failures}"
         print(f"PASS: actual production Rust DNS, {completed} cases; connected UDP and TCP source/ID/A checks with LL+ULA+GUA aliases")
+
+        # Bind real LAN default ports after agent startup: any frontend occupation
+        # fails bind. The identities below must survive every rendered mode change.
+        luci_code = r'''
+import http.server, socketserver, ssl, sys, threading
+class Server(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer's getfqdn() would consult Docker DNS outside this netns.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "LuCI", self.server_address[1]
+class LuCI(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = f"simulated-LuCI:{self.server.server_port}".encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(body)))
+        self.end_headers(); self.wfile.write(body)
+    def log_message(self, *args): pass
+for port in (80, 443):
+    server = Server(("192.168.0.1", port), LuCI)
+    if port == 443:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(sys.argv[1], sys.argv[2])
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+print("ready", flush=True)
+threading.Event().wait()
+'''
+        luci = subprocess.Popen(["ip", "netns", "exec", r, "python3", "-u", "-c", luci_code,
+                                 str(root / "cert.pem"), str(root / "key.pem")], stdout=subprocess.PIPE, text=True)
+        assert select.select([luci.stdout], [], [], 5)[0] and luci.stdout.readline().strip() == "ready", "LAN 80/443 occupied by frontend or LuCI failed"
+
+        panel = r'''
+import http.client, json, socket, ssl, sys
+cert, password = sys.argv[1:]
+context = ssl.create_default_context(cafile=cert)
+def request(address, port, host, secure, path, method="GET", headers=None, body=None):
+    connection = http.client.HTTPConnection(address, port, timeout=3)
+    connection.connect()
+    if secure:
+        # Verify the actual generated certificate and send canonical TLS SNI,
+        # independently of the destination IP and explicit HTTP Host header.
+        connection.sock = context.wrap_socket(connection.sock, server_hostname="wifi.gofro.net")
+        assert connection.sock.version() in ("TLSv1.2", "TLSv1.3")
+    connection.request(method, path, body=body, headers={"Host": host, **(headers or {})})
+    response = connection.getresponse()
+    data = response.read()
+    result = response.status, response.getheaders(), data
+    connection.close()
+    return result
+path = "/api/auth/status?next=%2Fhome&x=1"
+checks = 0
+for address, port, host, destination in (
+    ("198.18.0.0", 80, "wifi.gofro.net", "https://wifi.gofro.net"),
+    ("198.18.0.0", 8081, "wifi.gofro.net:8081", "https://wifi.gofro.net"),
+    ("192.168.0.1", 8081, "192.168.0.1:8081", "https://192.168.0.1:8443"),
+):
+    status, headers, body = request(address, port, host, False, path)
+    assert status == 307 and dict(headers).get("location") == destination + path, (status, headers, body)
+    checks += 1
+for address, port, host in (("198.18.0.0", 443, "wifi.gofro.net"),
+                            ("198.18.0.0", 8443, "wifi.gofro.net:8443"),
+                            ("192.168.0.1", 8443, "192.168.0.1:8443")):
+    status, headers, body = request(address, port, host, True, path)
+    reply = json.loads(body)
+    assert status == 200 and reply["state"] == "login" and len(reply["csrf_token"]) == 64, (status, body)
+    cookies = "; ".join(value.split(";", 1)[0] for name, value in headers if name.lower() == "set-cookie")
+    status, headers, body = request(address, port, host, True, "/api/auth/login", "POST",
+        {"Origin": "https://" + host, "Cookie": cookies, "X-CSRF-Token": reply["csrf_token"],
+         "Content-Type": "application/json"}, json.dumps({"password": password}))
+    assert status == 200 and json.loads(body)["state"] == "authenticated", (status, body)
+    cookies = "; ".join(value.split(";", 1)[0] for name, value in headers if name.lower() == "set-cookie")
+    assert "__Host-gofro-session=" in cookies
+    status, _, body = request(address, port, host, True, path, headers={"Cookie": cookies})
+    assert status == 200 and json.loads(body)["state"] == "authenticated", (status, body)
+    checks += 3
+for port in (80, 443):
+    status, _, body = request("192.168.0.1", port, "192.168.0.1", port == 443, "/")
+    assert status == 200 and body == f"simulated-LuCI:{port}".encode(), (status, body)
+    checks += 1
+assert checks == 14
+print("PASS: 14 actual HTTP/TLS/auth and LuCI identity checks", flush=True)
+'''
+        # Observe both sides of the production drop hook: a timeout alone could
+        # be an absent route/listener or the forward guard hiding a VIP WAN leak.
+        run(r, "nft", "-f", "-", input='''
+add table inet panel_probe
+add counter inet panel_probe arrived
+add counter inet panel_probe survived
+add counter inet panel_probe leak
+add counter inet panel_probe ingress_dnat
+add counter inet panel_probe forward_before
+add counter inet panel_probe forward_after
+add chain inet panel_probe before { type filter hook prerouting priority -151; }
+add rule inet panel_probe before ip daddr 198.18.0.0 counter name arrived
+add chain inet panel_probe after { type filter hook prerouting priority -149; }
+add rule inet panel_probe after ip daddr 198.18.0.0 counter name survived
+add chain inet panel_probe input { type filter hook input priority 10; }
+add rule inet panel_probe input iifname != "lan0" ct status dnat ip daddr 192.168.0.1 tcp dport { 8081, 8443 } counter name ingress_dnat
+add chain inet panel_probe egress { type filter hook postrouting priority 110; }
+add rule inet panel_probe egress oifname { "wan0", "gt0" } ct original ip daddr 198.18.0.0 counter name leak
+add chain inet panel_probe forward_before { type filter hook forward priority -1; }
+add rule inet panel_probe forward_before iifname "lan0" ip daddr 198.51.100.2 udp dport 2080 counter name forward_before
+add chain inet panel_probe forward_after { type filter hook forward priority 1; }
+add rule inet panel_probe forward_after iifname "lan0" ip daddr 198.51.100.2 udp dport 2080 counter name forward_after
+''')
+        def counts():
+            table = json.loads(run(r, "nft", "-j", "list", "table", "inet", "panel_probe", capture_output=True).stdout)
+            return {item["counter"]["name"]: item["counter"]["packets"] for item in table["nftables"] if "counter" in item}
+
+        blocked_probe = r'''
+import socket, sys
+port, transport = sys.argv[1:]
+with socket.socket(type=socket.SOCK_STREAM if transport == "tcp" else socket.SOCK_DGRAM) as s:
+    s.settimeout(0.3)
+    try:
+        s.connect(("198.18.0.0", int(port)))
+        s.sendall(b"VIP must drop\n")
+        s.recv(4096)
+    except TimeoutError: pass
+    else: raise AssertionError("unsupported/wrong-ingress VIP did not silently drop")
+'''
+        panel_checks = alias_checks = drop_checks = 0
+        for mode, guarded, tunnel_down in (("routing", False, False), ("off", False, False),
+                                           ("all", False, False), ("all", False, True),
+                                           ("off", True, False), ("routing", True, False),
+                                           ("all", True, False)):
+            run(r, "nft", "-f", str(pathlib.Path(fixtures) / (mode + ".nft")))
+            if guarded:
+                run(r, "nft", "-f", str(pathlib.Path(fixtures) / "guard.nft"))
+                run(r, "nft", "list", "table", "inet", "gofro_guard", capture_output=True)
+            else:
+                run(r, "nft", "-f", "-", input="destroy table inet gofro_guard\n")
+            run(r, "ip", "link", "set", "gt0", "down" if tunnel_down else "up")
+            if tunnel_down:
+                run(r, "ip", "route", "flush", "table", "100", "dev", "gt0", "exact", "0.0.0.0/0")
+                route = subprocess.run(["ip", "-n", r, "route", "get", "8.8.8.8", "mark", "0x20000"], capture_output=True)
+                assert route.returncode != 0, "missing tunnel did not fail closed"
+            else:
+                run(r, "ip", "route", "replace", "default", "dev", "gt0", "table", "100", "metric", "10", "proto", "186")
+            for transport in ("tcp", "udp"):
+                run(c, "python3", "-c", query, "192.168.0.2", "192.168.0.1", "53", transport, str(2000 + alias_checks), "")
+                alias_checks += 1
+            run(c, "python3", "-c", panel, str(root / "cert.pem"), password)
+            panel_checks += 14
+            if not tunnel_down:
+                before_forward = counts()
+                run(c, "python3", "-c", 'import socket; s=socket.socket(type=socket.SOCK_DGRAM); s.sendto(b"guard probe", ("198.51.100.2", 2080)); s.close()')
+                after_forward = counts()
+                assert after_forward["forward_before"] > before_forward["forward_before"], "forward guard probe never arrived"
+                assert (after_forward["forward_after"] == before_forward["forward_after"]) == guarded, "forward guard inactive or unguarded positive control failed"
+            forbidden = [(c, port, proto) for port, proto in ((443, "udp"), (53, "tcp"), (53, "udp"),
+                         (22, "tcp"), (22, "udp"), (80, "udp"), (8443, "udp"))]
+            forbidden += [(ns, port, "tcp") for ns in ((w,) if tunnel_down else (w, v)) for port in (80, 443, 8081, 8443)]
+            for ns, port, transport in forbidden:
+                before_drop = counts()
+                run(ns, "python3", "-c", blocked_probe, str(port), transport)
+                after_drop = counts()
+                assert after_drop["arrived"] > before_drop["arrived"], (ns, port, transport, "probe never arrived")
+                assert after_drop["survived"] == before_drop["survived"], (ns, port, transport, "production VIP drop bypassed")
+                assert after_drop["leak"] == after_drop["ingress_dnat"] == 0, after_drop
+                drop_checks += 1
+            assert luci.poll() is None and agent.poll() is None, "management process died"
+            print(f"PASS: VIP alias/management/drop isolation: {mode}, guard={guarded}, tunnel_down={tunnel_down}", flush=True)
+        assert (panel_checks, alias_checks, drop_checks) == (98, 14, 101)
+        print(f"PASS: {panel_checks} real panel/LuCI checks, {alias_checks} mode DNS aliases, {drop_checks} observed VIP drops", flush=True)
     finally:
+        if luci is not None:
+            luci.terminate()
+            try: luci.wait(timeout=5)
+            except subprocess.TimeoutExpired: luci.kill(); luci.wait()
         agent.terminate()
         try: agent.wait(timeout=5)
         except subprocess.TimeoutExpired: agent.kill(); agent.wait()
@@ -250,4 +474,5 @@ with tempfile.TemporaryDirectory(prefix="gofro-real-dns-", dir="/run") as tempor
         assert run(r, "nft", "-s", "-y", "list", "table", "inet", "gofro_guard", capture_output=True).stdout == forward_guard, f"guard {action} altered forwarding protection"
         print(f"PASS: actual guard {action}; expected DNS state, other dataplane objects and forwarding guard preserved", flush=True)
     print(f"PASS: {completed} actual DNS cases and 4 real guard boot/stop checks")
+    assert cold.returncode == 0, "PRODUCTION BUG: cold reconcile failure answers VIP DNS but canonical TLS/auth is unreachable; rendered fixture preload masks it"
 PY

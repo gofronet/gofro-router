@@ -466,6 +466,7 @@ add rule inet observe egress oifname "gt0" ip daddr 8.8.8.8 udp sport 31000 coun
     assert counter("bad_meta") == 0, "unrelated packet mark bits were clobbered"
     assert counter("bad_ct") == 0, "unrelated conntrack mark bits were clobbered"
     assert all(p.poll() is None for p in processes), "endpoint died during regression"
+    assert traffic_checks == 145, f"existing network coverage changed: {traffic_checks}/145"
     print(f"PASS: kernel namespace regression, {traffic_checks} socket checks, {udp_retries} verified UDP NAT-switch retries (simulated pppoe-wan; no PPPoE negotiation)")
 except BaseException:
     print(f"FAIL: kernel regression after {traffic_checks} completed socket checks", flush=True)

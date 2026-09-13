@@ -98,6 +98,10 @@ fn apply_policy(state: &AppState, vpn_enabled: bool, policy: &RoutingPolicy) -> 
             vpn_enabled,
             policy,
             &mappings,
+            crate::model::PanelPorts {
+                http: state.http_listen.port(),
+                https: state.https_listen.port(),
+            },
         )
     })?;
     state.fake_dns.commit_targets(policy)

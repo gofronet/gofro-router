@@ -6,6 +6,109 @@ use crate::{
     model::{IpMatch, IpRule, RoutingConfig, RoutingMode, RuleRef},
 };
 
+const PANEL_PORTS: PanelPorts = PanelPorts {
+    http: 8081,
+    https: 8443,
+};
+
+#[test]
+fn panel_vip_is_direct_and_dnat_is_lan_only_with_unsupported_traffic_dropped() {
+    for device in ["br-home", "lan0"] {
+        let lan = LanContext {
+            device: device.into(),
+            address: "100.64.0.1".parse().unwrap(),
+            subnet: "100.64.0.0/24".parse().unwrap(),
+        };
+        for mode in [RoutingMode::Rules, RoutingMode::All] {
+            let policy = RoutingPolicy::compile(
+                RoutingConfig {
+                    domain_rules: vec![],
+                    ip_rules: vec![IpRule {
+                        name: "Block everything".into(),
+                        enabled: true,
+                        matcher: IpMatch::Cidr {
+                            value: "0.0.0.0/0".into(),
+                        },
+                        target: RouteTarget::Block,
+                    }],
+                    default_target: RouteTarget::Block,
+                    mode,
+                    rule_order: None,
+                },
+                Arc::new(GeoData::default()),
+            )
+            .unwrap();
+            for enabled in [false, true] {
+                for (ports, http_sources, https_sources, allowed) in [
+                    (PANEL_PORTS, "80, 8081", "443, 8443", "80, 443, 8081, 8443"),
+                    (
+                        PanelPorts {
+                            http: 80,
+                            https: 443,
+                        },
+                        "80, 8081",
+                        "443, 8443",
+                        "80, 443, 8081, 8443",
+                    ),
+                    (
+                        PanelPorts {
+                            http: 9081,
+                            https: 9443,
+                        },
+                        "80, 8081, 9081",
+                        "443, 8443, 9443",
+                        "80, 443, 8081, 8443, 9081, 9443",
+                    ),
+                ] {
+                    let script = render(&lan, 5353, enabled, &policy, &[], ports);
+                    let clear = script.find("meta mark set meta mark & 0xfffcffff").unwrap();
+                    let direct = script
+                        .find("ip daddr 198.18.0.0 meta mark set (meta mark & 0xfffcffff) | 65536")
+                        .unwrap();
+                    let fake = script.find("ip daddr @fake_direct").unwrap();
+                    assert!(clear < direct && direct < fake);
+                    assert!(script.contains(
+                        "meta mark & 0x30000 == 65536 ct mark set (ct mark & 0xfffcffff) | 65536"
+                    ));
+                    let dns = script
+                        .find("add chain inet gofro_routing gofro_dns")
+                        .unwrap();
+                    for condition in [
+                        format!("iifname != \"{device}\""),
+                        "meta l4proto != tcp".into(),
+                        format!("tcp dport != {{ {allowed} }}"),
+                    ] {
+                        let drop = script
+                            .find(&format!("gofro_mark ip daddr 198.18.0.0 {condition} drop"))
+                            .unwrap();
+                        assert!(drop < direct && drop < dns);
+                    }
+                    let dnat = script
+                        .lines()
+                        .filter(|line| line.contains("gofro_dnat") && line.contains("add rule"))
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        dnat,
+                        vec![
+                            format!(
+                                "add rule inet gofro_routing gofro_dnat iifname \"{device}\" ip daddr 198.18.0.0 tcp dport {{ {http_sources} }} dnat ip to 100.64.0.1:{}",
+                                ports.http
+                            ),
+                            format!(
+                                "add rule inet gofro_routing gofro_dnat iifname \"{device}\" ip daddr 198.18.0.0 tcp dport {{ {https_sources} }} dnat ip to 100.64.0.1:{}",
+                                ports.https
+                            ),
+                            format!(
+                                "add rule inet gofro_routing gofro_dnat iifname \"{device}\" dnat ip to ip daddr map @fake_to_real"
+                            ),
+                        ]
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn renders_kernel_only_split_routing() {
     let policy = RoutingPolicy::compile(
@@ -41,6 +144,7 @@ fn renders_kernel_only_split_routing() {
             real: "1.1.1.1".parse().unwrap(),
             target: RouteTarget::Direct,
         }],
+        PANEL_PORTS,
     );
     assert!(script.contains("198.18.0.1 : 1.1.1.1"));
     assert!(script.contains("add element inet gofro_routing fake_direct { 198.18.0.1 }"));
@@ -103,12 +207,12 @@ fn renders_ip_rules_in_effective_order_and_none_in_all_mode() {
         address: "192.168.0.1".parse().unwrap(),
         subnet: "192.168.0.0/24".parse().unwrap(),
     };
-    let script = render(&lan, 5353, true, &policy, &[]);
+    let script = render(&lan, 5353, true, &policy, &[], PANEL_PORTS);
     assert!(script.find("1.1.0.0/16").unwrap() < script.find("1.0.0.0/8").unwrap());
     let mut all = config;
     all.mode = RoutingMode::All;
     let policy = RoutingPolicy::compile(all, Arc::new(GeoData::default())).unwrap();
-    let script = render(&lan, 5353, false, &policy, &[]);
+    let script = render(&lan, 5353, false, &policy, &[], PANEL_PORTS);
     assert!(!script.contains("1.1.0.0/16"));
     assert!(script.contains("| 65536"));
     assert!(!script.contains("gofro_ipv6"));
@@ -143,6 +247,7 @@ fn cached_vpn_fake_ips_become_direct_after_mode_flip() {
             real: "1.1.1.1".parse().unwrap(),
             target: RouteTarget::Vpn,
         }],
+        PANEL_PORTS,
     );
 
     assert!(script.contains("add element inet gofro_routing fake_vpn { 198.18.0.1 }"));
@@ -162,6 +267,7 @@ fn cached_vpn_fake_ips_become_direct_after_mode_flip() {
             real: "1.1.1.1".parse().unwrap(),
             target: RouteTarget::Vpn,
         }],
+        PANEL_PORTS,
     );
     assert!(on.contains("add element inet gofro_routing fake_vpn { 198.18.0.1 }"));
     assert!(on.contains("ip daddr @fake_vpn meta mark set (meta mark & 0xfffcffff) | 131072"));
@@ -214,7 +320,7 @@ fn reclassifies_original_packets_without_clobbering_foreign_marks() {
         address: "192.168.0.1".parse().unwrap(),
         subnet: "192.168.0.0/24".parse().unwrap(),
     };
-    let script = render(&lan, 5353, true, &policy, &[]);
+    let script = render(&lan, 5353, true, &policy, &[], PANEL_PORTS);
     let reply = script.find("ct direction reply return").unwrap();
     let clear = script.find("meta mark set meta mark & 0xfffcffff").unwrap();
     let local = script.find("fib daddr type local").unwrap();
@@ -291,13 +397,13 @@ fn emit_netns_fixtures() {
 
     fs::write(
         format!("{directory}/routing.nft"),
-        render(&lan, 5353, true, &policy, &mappings),
+        render(&lan, 5353, true, &policy, &mappings, PANEL_PORTS),
     )
     .unwrap();
     fs::write(format!("{directory}/guard.nft"), render_guard(&lan)).unwrap();
     fs::write(
         format!("{directory}/off.nft"),
-        render(&lan, 5353, false, &policy, &mappings),
+        render(&lan, 5353, false, &policy, &mappings, PANEL_PORTS),
     )
     .unwrap();
     let mut all = policy.config().clone();
@@ -305,7 +411,7 @@ fn emit_netns_fixtures() {
     let all = RoutingPolicy::compile(all, Arc::new(GeoData::default())).unwrap();
     fs::write(
         format!("{directory}/all.nft"),
-        render(&lan, 5353, true, &all, &mappings),
+        render(&lan, 5353, true, &all, &mappings, PANEL_PORTS),
     )
     .unwrap();
 }

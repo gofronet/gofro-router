@@ -117,6 +117,7 @@ impl Fixture {
                 subnet: "192.168.8.0/24".parse().unwrap(),
             },
             https_listen: "192.168.8.1:443".parse().unwrap(),
+            http_listen: "192.168.8.1:8081".parse().unwrap(),
             dns_listen: "192.168.8.1:5353".parse().unwrap(),
             config_path: dir.join("config.json"),
             mode_command: dir.join("never-execute"),
@@ -302,12 +303,101 @@ fn failed_rollback_blocks_all_partial_requests_until_full_reconcile() {
             let runner = runner.as_ref().unwrap();
             assert_eq!(
                 runner.calls,
-                ["guard", "network", "policy", "retire", "clear"]
+                ["guard", "policy", "network", "retire", "clear"]
             );
             assert!(!runner.guarded);
         });
         assert!(!state.routing_degraded.load(Ordering::Relaxed));
         mutate(state, "same-mode").unwrap();
+    }
+}
+
+#[test]
+fn full_reconcile_publishes_saved_policy_before_network_and_stops_on_policy_failure() {
+    if run_in_child() {
+        return;
+    }
+    for failure in ["network", "policy", "sqlite"] {
+        for populated in [false, true] {
+            // An UPDATE trigger needs a lease to exercise a real commit failure.
+            if failure == "sqlite" && !populated {
+                continue;
+            }
+            for enabled in [false, true] {
+                let mut fixture = Fixture::new();
+                let state = &mut fixture.0;
+                let directory = state.config_path.parent().unwrap();
+                let history = directory.join("routing-legacy.json");
+                fs::write(&history, b"legacy history").unwrap();
+                let database = directory.join("routing.sqlite");
+                let connection = rusqlite::Connection::open(&database).unwrap();
+                if populated {
+                    connection.execute(
+                        "INSERT INTO fake_dns (fake, domain, real, target, expires) VALUES (?1, 'example.com', ?2, 3, ?3)",
+                        rusqlite::params![u32::from(std::net::Ipv4Addr::new(198, 18, 0, 1)), u32::from(std::net::Ipv4Addr::new(8, 8, 8, 8)), i64::MAX],
+                    ).unwrap();
+                    state.fake_dns = Arc::new(FakeDns::open(&database).unwrap());
+                }
+                if failure == "sqlite" {
+                    connection.execute_batch("CREATE TRIGGER refuse_update BEFORE UPDATE ON fake_dns BEGIN SELECT RAISE(FAIL, 'injected SQLite failure'); END;").unwrap();
+                } else {
+                    RUNNER.with_borrow_mut(|runner| {
+                        runner.as_mut().unwrap().failures.push_back(failure)
+                    });
+                }
+                state.config.lock().unwrap().vpn_enabled = enabled;
+                save(&state.config_path, &state.config.lock().unwrap()).unwrap();
+                let saved = fs::read(&state.config_path).unwrap();
+                let mut stale = fixture_routing();
+                stale.default_target = crate::model::RouteTarget::Block;
+                *state.routing.write().unwrap() =
+                    RoutingPolicy::compile(stale, state.geodata.clone()).unwrap();
+                state.fake_dns.set_vpn_enabled(!enabled);
+
+                let error = reconcile(state).unwrap_err();
+                assert!(error.to_string().contains(if failure == "sqlite" {
+                    "SQLite"
+                } else {
+                    failure
+                }));
+                RUNNER.with_borrow(|runner| {
+                    let runner = runner.as_ref().unwrap();
+                    assert_eq!(
+                        runner.calls,
+                        if failure == "network" {
+                            vec!["guard", "policy", "network"]
+                        } else {
+                            vec!["guard", "policy"]
+                        }
+                    );
+                    assert!(runner.guarded);
+                });
+                assert!(state.routing_degraded.load(Ordering::Relaxed));
+                assert_eq!(fs::read(&history).unwrap(), b"legacy history");
+                assert_eq!(fs::read(&state.config_path).unwrap(), saved);
+                let published = failure == "network";
+                assert_eq!(
+                    state.fake_dns.vpn_enabled(),
+                    if published { enabled } else { !enabled }
+                );
+                assert_eq!(
+                    state.routing.read().unwrap().config().default_target,
+                    if published {
+                        crate::model::RouteTarget::Vpn
+                    } else {
+                        crate::model::RouteTarget::Block
+                    }
+                );
+                assert_eq!(state.fake_dns.count(), usize::from(populated));
+                if populated {
+                    let target: i64 = connection
+                        .query_row("SELECT target FROM fake_dns", [], |row| row.get(0))
+                        .unwrap();
+                    // Persist intent even with VPN disabled, just like the nft sets.
+                    assert_eq!(target, if published { 2 } else { 3 });
+                }
+            }
+        }
     }
 }
 
@@ -428,7 +518,7 @@ fn history_removal_error_keeps_guard_and_blocks_partial_requests() {
     assert!(state.routing_degraded.load(Ordering::Relaxed));
     RUNNER.with_borrow(|runner| {
         let runner = runner.as_ref().unwrap();
-        assert_eq!(runner.calls, ["guard", "network", "policy", "retire"]);
+        assert_eq!(runner.calls, ["guard", "policy", "network", "retire"]);
         assert!(runner.guarded);
     });
     assert!(mutate(state, "same-mode").is_err());
@@ -501,7 +591,7 @@ esac
         assert!(state.routing_degraded.load(Ordering::Relaxed));
         RUNNER.with_borrow(|runner| {
             let runner = runner.as_ref().unwrap();
-            assert_eq!(runner.calls, ["guard", "network", "select-peer"]);
+            assert_eq!(runner.calls, ["guard", "policy", "network", "select-peer"]);
             assert!(runner.guarded);
         });
         assert!(mutate(state, "same-mode").is_err());

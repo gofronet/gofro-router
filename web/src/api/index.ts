@@ -61,6 +61,8 @@ export const api = {
       authRequest(() => http.post("/auth/setup", { password, ...(setupCode ? { setup_code: setupCode } : {}) }, authentication)),
     login: (password: string): Promise<AuthStatus> =>
       authRequest(() => http.post("/auth/login", { password }, authentication)),
+    changePassword: (currentPassword: string, password: string): Promise<AuthStatus> =>
+      authRequest(() => http.post("/auth/password", { current_password: currentPassword, password }, authentication)),
     logout: (): Promise<AuthStatus> =>
       authRequest(() => http.post("/auth/logout", {}, authentication)),
   },

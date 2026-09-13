@@ -24,6 +24,150 @@ const auth = { state: "authenticated", csrf_token: "new-session" };
 const onboarding = { step: "complete", networks: [], setup_window_seconds: null, error: null };
 function deferred() { return Promise.withResolvers(); }
 
+test("password rotation preserves polling/status, rejects double submit and stale auth replies", () => scenario(async (app, timers) => {
+  await app.loginAuth("old-password");
+  await app.refresh();
+  const generation = app.generation;
+  const timer = [...timers.keys()][0];
+  const snapshot = app.status;
+  const pending = deferred();
+  let writes = 0;
+  api.auth.changePassword = () => { writes++; return pending.promise; };
+  const oldPoll = deferred();
+  api.status.get = () => oldPoll.promise;
+  const polling = app.refresh();
+  const changing = app.changePassword("old-password", "new-password");
+  assert.equal(app.busy, true);
+  assert.equal(await app.changePassword("old-password", "new-password"), false);
+  pending.resolve({ state: "authenticated", csrf_token: "rotated" });
+  assert.equal(await changing, true);
+  oldPoll.reject(new ApiError("session_expired", 401));
+  await polling;
+  assert.equal(app.authState, "authenticated");
+  assert.equal(app.status, snapshot);
+  assert.equal(app.pollError, "");
+  assert.equal(app.generation, generation);
+  assert.equal([...timers.keys()][0], timer);
+  assert.equal(app.statusUncertain, false);
+  assert.equal(app.busy, false);
+  assert.equal(writes, 1);
+
+  for (const fail of [false, true]) {
+    const old = deferred();
+    api.auth.status = () => old.promise;
+    const initializing = app.initializeAuth();
+    api.auth.changePassword = async () => ({ state: "authenticated", csrf_token: "newer" });
+    assert.equal(await app.changePassword("old-password", "new-password"), true);
+    if (fail) old.reject(new ApiError("session_expired", 401));
+    else old.resolve({ state: "login", csrf_token: "stale" });
+    await initializing;
+    assert.equal(app.authState, "authenticated");
+    assert.equal(app.auth.csrf_token, "newer");
+    assert.equal(app.authLoading, false);
+  }
+}));
+
+test("password rotation rejects stale routing success/401 while the current session keeps polling", () => scenario(async (app, timers) => {
+  const originalTest = api.routing.test;
+  try {
+    await app.loginAuth("old-password");
+    await app.refresh();
+    const generation = app.generation;
+    const [timer, tick] = [...timers.entries()][0];
+    const rotated = { state: "authenticated", csrf_token: "rotated-route-session" };
+    api.auth.changePassword = async () => rotated;
+    for (const fail of [true, false]) {
+      const pending = deferred();
+      api.routing.test = () => pending.promise;
+      const routing = app.testRouting("example.com");
+      const rejected = assert.rejects(routing, fail ? /session_expired/ : /Request superseded/);
+      assert.equal(await app.changePassword("old-password", "new-password"), true);
+      if (fail) pending.reject(new ApiError("session_expired", 401));
+      else pending.resolve({ value: "example.com", target: "direct", matched_rule: null });
+      await rejected;
+      assert.equal(app.authState, "authenticated");
+      assert.deepEqual(app.auth, rotated);
+      assert.equal(app.generation, generation);
+      assert.equal(timers.get(timer), tick);
+      assert.equal(app.hasStatus, true);
+      assert.equal(app.authError, "");
+      const polled = deferred();
+      api.status.get = async () => { polled.resolve(); return { ...status, version: `after-rotation-${fail}` }; };
+      tick();
+      await polled.promise;
+      assert.equal(app.status.version, `after-rotation-${fail}`);
+    }
+    api.routing.test = async () => { throw new ApiError("session_expired", 401); };
+    await assert.rejects(app.testRouting("example.com"), /session_expired/);
+    assert.equal(app.authState, "login", "a current-session 401 still expires the session");
+    assert.equal(timers.size, 0);
+  } finally { api.routing.test = originalTest; }
+}));
+
+test("wrong current password keeps the session; unknown rotation guides the next login", () => scenario(async app => {
+  await app.loginAuth("old-password");
+  await app.refresh();
+  api.auth.changePassword = async () => { throw new ApiError("invalid_current_password", 400); };
+  await assert.rejects(app.changePassword("wrong", "new-password"), /Неверный текущий пароль/);
+  assert.equal(app.authState, "authenticated");
+  assert.equal(app.statusUncertain, false);
+  assert.equal(app.busy, false);
+  api.auth.changePassword = async () => { throw new ApiError("timeout"); };
+  await assert.rejects(app.changePassword("old-password", "new-password"), /попробуйте новый пароль/);
+  api.status.get = async () => { throw new ApiError("session_expired", 401); };
+  await app.refresh();
+  assert.equal(app.authState, "login");
+  assert.match(app.authError, /попробуйте новый пароль/);
+}));
+
+test("password transport serializes body settlement and resyncs rotated CSRF without replay", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalTimeout = globalThis.setTimeout;
+  try {
+    for (const mode of ["success", "wrong-current", "invalid-body", "body-timeout"]) {
+      const body = deferred();
+      const arrived = deferred();
+      const calls = [];
+      let cookieCsrf = "old-csrf"; // Simulated browser cookie rotation at response headers.
+      globalThis.setTimeout = (callback, ms, ...args) => originalTimeout(callback, ms === 30_000 && mode === "body-timeout" ? 20 : ms, ...args);
+      globalThis.fetch = async (url, init) => {
+        calls.push(url);
+        assert.equal(init.credentials, "same-origin");
+        if (url === "/api/auth/status") return Response.json({ state: "authenticated", csrf_token: cookieCsrf });
+        assert.equal(new Headers(init.headers).get("X-CSRF-Token"), cookieCsrf);
+        if (url === "/api/auth/password") {
+          assert.equal(init.method, "POST");
+          assert.deepEqual(JSON.parse(init.body), { current_password: "old-password", password: "new-password" });
+          cookieCsrf = mode === "wrong-current" ? "old-csrf" : "rotated-csrf";
+          arrived.resolve();
+          return new Response(new ReadableStream({ start(controller) {
+            init.signal.addEventListener("abort", () => controller.error(init.signal.reason), { once: true });
+            void body.promise.then(() => {
+              controller.enqueue(new TextEncoder().encode(JSON.stringify(mode === "success" ? { state: "authenticated", csrf_token: cookieCsrf } : mode === "wrong-current" ? { error: "invalid_current_password" } : { state: "authenticated" })));
+              controller.close();
+            });
+          } }), { status: mode === "wrong-current" ? 400 : 200 });
+        }
+        assert.equal(url, "/api/auth/logout");
+        return Response.json({ state: "login", csrf_token: "logged-out" });
+      };
+      await api.auth.status();
+      calls.length = 0;
+      const changing = api.auth.changePassword("old-password", "new-password").catch(error => error);
+      await arrived.promise;
+      const logout = api.auth.logout();
+      await Promise.resolve();
+      assert.deepEqual(calls, ["/api/auth/password"]);
+      if (mode !== "body-timeout") body.resolve();
+      const result = await changing;
+      if (mode === "success") assert.equal(result.state, "authenticated");
+      else assert.ok(result instanceof ApiError);
+      await logout;
+      assert.deepEqual(calls, mode === "success" ? ["/api/auth/password", "/api/auth/logout"] : ["/api/auth/password", "/api/auth/status", "/api/auth/logout"]);
+    }
+  } finally { globalThis.fetch = originalFetch; globalThis.setTimeout = originalTimeout; clearCsrfToken(); }
+});
+
 async function scenario(run) {
   const original = { status: api.status.get, auth: { ...api.auth }, onboarding: api.onboarding.get, save: api.routing.save, create: api.servers.createFriend, window: globalThis.window };
   const timers = new Map();
