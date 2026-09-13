@@ -17,6 +17,15 @@ done
 # Loaded kernel tunnel modules may create down, unaddressed template devices.
 ip -j address show | python3 -c 'import json,sys; links=json.load(sys.stdin); assert [x["ifname"] for x in links if "UP" in x["flags"]] == ["lo"] and all(x["ifname"] == "lo" or not x.get("addr_info") for x in links), "requires --network none; refusing existing networking"'
 
+# The real agent invokes this installed path, independently of GOFRO_HELPERS.
+# Provision it in the disposable container even when CI mounts only /src.
+if [ ! -e /usr/libexec/gofro/dns-flows ]; then
+	mkdir -p /usr/libexec/gofro
+	ln -s "$ROOT/deploy/openwrt/root/usr/libexec/gofro/dns-flows" /usr/libexec/gofro/dns-flows
+fi
+[ -x /usr/libexec/gofro/dns-flows ]
+cmp "$ROOT/deploy/openwrt/root/usr/libexec/gofro/dns-flows" /usr/libexec/gofro/dns-flows
+
 tag="gdn$$" owned=''
 r="${tag}r" c="${tag}c" w="${tag}w" v="${tag}v"
 cleanup() {
