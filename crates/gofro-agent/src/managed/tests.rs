@@ -42,6 +42,7 @@ impl Fixture {
                 subnet: "192.168.8.0/24".parse().unwrap(),
             },
             https_listen: "192.168.8.1:443".parse().unwrap(),
+            http_listen: "192.168.8.1:8081".parse().unwrap(),
             dns_listen: "192.168.8.1:5353".parse().unwrap(),
             config_path: root.join("controller.json"),
             mode_command: root.join("never-execute"),

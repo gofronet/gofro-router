@@ -96,6 +96,7 @@ struct Args {
 pub(crate) struct AppState {
     pub(crate) interface: String,
     pub(crate) lan: LanContext,
+    pub(crate) http_listen: SocketAddr,
     pub(crate) https_listen: SocketAddr,
     pub(crate) dns_listen: SocketAddr,
     pub(crate) config_path: PathBuf,
@@ -125,6 +126,11 @@ async fn main() -> Result<()> {
     if !args.listen.ip().is_loopback() {
         bail!("--listen must be loopback-only");
     }
+    model::PanelPorts {
+        http: args.http_listen.port(),
+        https: args.https_listen.port(),
+    }
+    .validate()?;
     ipv4(args.http_listen)?;
     let lan_address = ipv4(args.https_listen)?;
     if args.http_listen.ip() != IpAddr::V4(lan_address) {
@@ -162,6 +168,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         interface: args.interface,
         lan,
+        http_listen: args.http_listen,
         https_listen: args.https_listen,
         dns_listen,
         config_path: args.config,

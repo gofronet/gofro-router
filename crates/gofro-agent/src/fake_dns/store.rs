@@ -76,6 +76,14 @@ impl Store {
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
+        for lease in &leases {
+            if !(FIRST_FAKE..=LAST_FAKE).contains(&u32::from(lease.mapping.fake)) {
+                bail!(
+                    "persisted fake IP {} is outside the allocation pool",
+                    lease.mapping.fake
+                );
+            }
+        }
         let used = leases.iter().map(|lease| lease.mapping.fake).collect();
         let leases = leases
             .into_iter()
@@ -251,6 +259,49 @@ fn ipv4_from_sql(value: i64) -> rusqlite::Result<Ipv4Addr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pool_wrap_and_reopen_never_allocate_panel_or_broadcast() {
+        let mut store = Store::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        store.next = LAST_FAKE;
+        let real = Ipv4Addr::new(1, 1, 1, 1);
+        let (last, _) = store
+            .allocate("last.example", real, RouteTarget::Vpn, 60)
+            .unwrap();
+        let (first, _) = store
+            .allocate("first.example", real, RouteTarget::Vpn, 60)
+            .unwrap();
+        assert_eq!(last.fake, Ipv4Addr::from(LAST_FAKE));
+        assert_eq!(first.fake, Ipv4Addr::from(FIRST_FAKE));
+        let mut reopened = Store::from_connection(store.connection).unwrap();
+        assert_eq!(reopened.len(), 2);
+        assert_eq!(
+            reopened
+                .allocate("last.example", real, RouteTarget::Vpn, 60)
+                .unwrap(),
+            (last, false)
+        );
+        let (next, _) = reopened
+            .allocate("next.example", real, RouteTarget::Vpn, 60)
+            .unwrap();
+        assert_eq!(next.fake, Ipv4Addr::from(FIRST_FAKE + 1));
+        assert!(!reopened.used.contains(&crate::model::PANEL_VIRTUAL_IP));
+    }
+
+    #[test]
+    fn rejects_persisted_reserved_and_out_of_pool_rows() {
+        for fake in [0, FIRST_FAKE - 1, LAST_FAKE + 1, u32::MAX] {
+            let store = Store::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+            store.connection.execute(
+                "INSERT INTO fake_dns (fake, domain, real, target, expires) VALUES (?1, 'bad.example', 1, 2, ?2)",
+                params![i64::from(fake), i64::MAX],
+            ).unwrap();
+            let error = Store::from_connection(store.connection)
+                .err()
+                .expect("invalid pool row accepted");
+            assert!(error.to_string().contains("outside the allocation pool"));
+        }
+    }
 
     #[test]
     fn persists_fake_ip_leases() {

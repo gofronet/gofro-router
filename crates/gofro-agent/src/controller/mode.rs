@@ -40,10 +40,10 @@ pub(crate) fn reconcile(state: &AppState) -> Result<()> {
         .map_err(|_| anyhow!("routing lock poisoned"))?;
     external("guard", || dataplane::install_guard(&state.lan))?;
     // Only a full reconcile may take ownership of a guard left by a failed update.
-    external("network", || apply_network(state, &config))?;
     apply_policy(state, config.vpn_enabled, &policy)?;
     *active = policy;
     state.fake_dns.set_vpn_enabled(config.vpn_enabled);
+    external("network", || apply_network(state, &config))?;
     external("retire", || crate::network::retire_legacy_routing(state))?;
     clear_guard(state)?;
     state.routing_degraded.store(false, Ordering::Relaxed);

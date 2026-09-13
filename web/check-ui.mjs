@@ -6,8 +6,8 @@ import { gunzipSync } from "node:zlib";
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const assets = new URL("../assets/", import.meta.url);
-// Reserved origin, entirely fulfilled in-process. No device, dev server, or network fallback.
-const origin = "https://gofro.test:8443";
+// Canonical origin, entirely fulfilled in-process. No device or network fallback.
+const origin = "https://wifi.gofro.net";
 const key = (n) => Buffer.from(String.fromCharCode(97 + n).repeat(32)).toString("base64");
 const serverKey = key(20);
 const otherKey = key(21);
@@ -43,12 +43,30 @@ async function open(browser, path = "/#/", width = 1440, setup = false, theme = 
       state.requests.push({ endpoint: "POST /api/servers/bootstrap", body: request.body });
     } catch (error) { errors.push(error.message); throw error; }
   });
+  await context.exposeBinding("mockPasswordTimeout", (_source, request) => {
+    try {
+      assert.equal(request.method, "POST");
+      assert.equal(request.credentials, "same-origin");
+      assert.equal(request.headers["x-csrf-token"], state.auth.csrf_token);
+      assert.deepEqual(request.body, state.passwordBody);
+      state.requests.push({ endpoint: "POST /api/auth/password", body: request.body, csrf: request.headers["x-csrf-token"] });
+      state.auth = { state: "authenticated", csrf_token: "uncertain-csrf" };
+    } catch (error) { errors.push(error.message); throw error; }
+  });
   // Playwright route.fulfill buffers bodies. Mock only fetch's transport for this
   // endpoint so the built app consumes a real, incrementally delivered byte stream.
   await context.addInitScript(() => {
     const fetch = window.fetch.bind(window);
     window.fetch = async (input, options) => {
       const url = new URL(typeof input === "string" ? input : input.url, location.href);
+      if (url.origin === location.origin && url.pathname === "/api/auth/password" && window.passwordTimeout) {
+        await window.mockPasswordTimeout({ method: options.method, credentials: options.credentials, headers: Object.fromEntries(new Headers(options.headers)), body: JSON.parse(options.body) });
+        options.signal.throwIfAborted();
+        window.passwordSignal = options.signal;
+        return new Response(new ReadableStream({ start(controller) {
+          options.signal.addEventListener("abort", () => controller.error(options.signal.reason), { once: true });
+        } }));
+      }
       if (url.origin !== location.origin || url.pathname !== "/api/servers/bootstrap") return fetch(input, options);
       await window.mockBootstrapRequest({ method: options.method, headers: Object.fromEntries(new Headers(options.headers)), body: JSON.parse(options.body) });
       options.signal.throwIfAborted();
@@ -72,9 +90,15 @@ async function open(browser, path = "/#/", width = 1440, setup = false, theme = 
       const method = req.method();
       const endpoint = `${method} ${url.pathname}`;
       const body = method === "GET" ? null : req.postDataJSON();
-      state.requests.push({ endpoint, body });
+      state.requests.push({ endpoint, body, csrf: req.headers()["x-csrf-token"] });
       assert.notEqual(url.pathname, "/api/servers/probe", "bootstrap must not probe or ask for a fingerprint");
       if (method !== "GET") assert.equal(req.headers()["x-csrf-token"], state.auth.csrf_token);
+      if (state.hold?.endpoint === endpoint) await state.hold.promise;
+      if (endpoint === "POST /api/auth/password") {
+        assert.deepEqual(body, state.passwordBody);
+        assert.ok(Array.from(body.password).length >= 8 && Buffer.byteLength(body.password) <= 128);
+        if (state.fail?.error === "password_change_uncertain") state.auth = { state: "authenticated", csrf_token: "uncertain-csrf" };
+      }
       if (state.fail?.endpoint === endpoint) {
         const failure = state.fail;
         state.fail = null;
@@ -84,6 +108,15 @@ async function open(browser, path = "/#/", width = 1440, setup = false, theme = 
       const onboarding = () => ({ step: state.step, networks: [], setup_window_seconds: state.step === "admin" ? 900 : null, error: null });
       const managed = () => ({ version: "v1", peers: state.peers });
       if (endpoint === "GET /api/auth/status") return await route.fulfill(json(state.auth));
+      if (endpoint === "POST /api/auth/password") {
+        state.auth = { state: "authenticated", csrf_token: "password-rotated-csrf" };
+        return await route.fulfill(json(state.auth));
+      }
+      if (endpoint === "POST /api/auth/login") {
+        assert.deepEqual(body, { password: state.passwordBody.password });
+        state.auth = { state: "authenticated", csrf_token: "login-csrf" };
+        return await route.fulfill(json(state.auth));
+      }
       if (endpoint === "POST /api/auth/setup") {
         assert.deepEqual(body, { password: state.adminPassword, setup_code: "mock-setup-code" });
         assert.ok(Array.from(body.password).length >= 8 && Buffer.byteLength(body.password) <= 128);
@@ -169,6 +202,158 @@ async function friends(page, names) {
   assert.equal(await page.locator(".management .count").textContent(), String(names.length));
 }
 
+const passwordPosts = state => state.requests.filter(req => req.endpoint === "POST /api/auth/password");
+async function passwordOpen(page) {
+  await page.getByRole("button", { name: "Сменить пароль", exact: true }).click();
+  await page.getByRole("dialog", { name: "Сменить пароль", exact: true }).waitFor();
+}
+async function passwordFill(page, current, password, confirmation = password) {
+  for (const [label, value] of [["Текущий пароль", current], ["Новый пароль", password], ["Повторите новый пароль", confirmation]]) await page.getByLabel(label, { exact: true }).fill(value);
+}
+const passwordSubmit = page => page.getByRole("dialog").getByRole("button", { name: "Сменить пароль", exact: true }).click();
+async function passwordEmpty(page) {
+  assert.deepEqual(await page.getByRole("dialog").locator("input").evaluateAll(inputs => inputs.map(input => input.value)), ["", "", ""]);
+  assert.equal(await page.evaluate(() => JSON.stringify(localStorage) + JSON.stringify(sessionStorage)).then(text => /old-secret|new-secret/.test(text)), false);
+}
+
+async function passwordChecks(browser) {
+  for (const width of [1440, 390]) {
+    let test = await open(browser, "/#/system", width);
+    let { page, state } = test;
+    await passwordOpen(page);
+    assert.deepEqual(await page.getByRole("dialog").locator("input").evaluateAll(inputs => inputs.map(input => [input.type, input.autocomplete, input.required])), [["password", "current-password", true], ["password", "new-password", true], ["password", "new-password", true]]);
+    await screenshot(page, `password-open-${width}`);
+    for (const [current, password, confirmation, message] of [
+      ["", "new-secret", "new-secret", null],
+      ["old-secret", "", "new-secret", null],
+      ["old-secret", "new-secret", "", null],
+      ["old-secret", "1234567", "1234567", /не менее 8 символов/],
+      ["old-secret", "😀".repeat(7), "😀".repeat(7), /не менее 8 символов/],
+      ["old-secret", "я".repeat(64) + "a", "я".repeat(64) + "a", /Максимум 128 байт/],
+      ["old-secret", "😀".repeat(33), "😀".repeat(33), /Максимум 128 байт/],
+      ["old-secret", "new-secret", "different", /Новые пароли не совпадают/],
+    ]) {
+      await passwordFill(page, current, password, confirmation);
+      await passwordSubmit(page);
+      if (message) await page.getByRole("dialog").getByRole("alert").getByText(message).waitFor();
+      else assert.equal(await page.getByRole("dialog").locator("form").evaluate(form => form.checkValidity()), false);
+      assert.equal(passwordPosts(state).length, 0);
+    }
+    await screenshot(page, `password-validation-${width}`);
+    await page.getByRole("button", { name: "Отмена", exact: true }).click();
+    await passwordOpen(page); await passwordEmpty(page);
+    await passwordFill(page, "old-secret", "new-secret");
+    await page.keyboard.press("Escape");
+    await passwordOpen(page); await passwordEmpty(page);
+    await passwordFill(page, "old-secret", "new-secret");
+    await page.evaluate(() => { location.hash = "#/"; });
+    await page.getByRole("heading", { name: "Трафик VPN" }).waitFor();
+    await page.locator(width < 920 ? ".mobile-nav" : ".nav-list").getByRole("link", { name: "Панель", exact: true }).click();
+    await passwordOpen(page); await passwordEmpty(page);
+    assert.equal(passwordPosts(state).length, 0);
+    await close(test, `password required/current/new/confirm, Unicode 7 and >128-byte refusal, mismatch no POST, cancel/Escape/unmount clear ${width}px`);
+
+    test = await open(browser, "/#/system", width); ({ page, state } = test);
+    await passwordOpen(page);
+    state.passwordBody = { current_password: "wrong-current", password: "😀".repeat(8) };
+    state.fail = { endpoint: "POST /api/auth/password", status: 400, error: "invalid_current_password" };
+    await passwordFill(page, state.passwordBody.current_password, state.passwordBody.password);
+    await passwordSubmit(page);
+    await page.getByRole("dialog").getByText("Неверный текущий пароль.", { exact: true }).waitFor();
+    await passwordEmpty(page);
+    assert.equal(await page.locator(".app-main").count(), 1);
+    assert.equal(state.auth.state, "authenticated");
+    assert.equal(passwordPosts(state).length, 1);
+    await screenshot(page, `password-wrong-current-${width}`);
+    await close(test, `password Unicode 8 accepted, wrong-current 400 retains login and clears all fields ${width}px`);
+
+    test = await open(browser, "/#/system", width); ({ page, state } = test);
+    await passwordOpen(page);
+    state.passwordBody = { current_password: "old-secret", password: "😀".repeat(32) };
+    const held = Promise.withResolvers();
+    state.hold = { endpoint: "POST /api/auth/password", promise: held.promise };
+    const arrived = page.waitForRequest(req => req.url().endsWith("/api/auth/password"));
+    await passwordFill(page, state.passwordBody.current_password, state.passwordBody.password);
+    await passwordSubmit(page); await arrived;
+    await page.getByRole("button", { name: "Сохраняем…", exact: true }).waitFor();
+    assert.ok(await page.getByRole("button", { name: "Сохраняем…", exact: true }).isDisabled());
+    assert.ok(await page.getByRole("button", { name: "Отмена", exact: true }).isDisabled());
+    assert.ok(await page.getByRole("button", { name: "Выйти", exact: true }).isDisabled());
+    assert.ok(await page.getByRole("button", { name: "Проверить обновления", exact: true }).isDisabled());
+    assert.ok(await page.getByRole("dialog").locator("input").evaluateAll(inputs => inputs.every(input => input.disabled)));
+    await page.getByRole("dialog").locator("form").evaluate(form => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+    await page.keyboard.press("Enter"); await page.keyboard.press("Escape");
+    assert.ok(await page.getByRole("dialog").isVisible());
+    assert.equal(passwordPosts(state).length, 1);
+    await screenshot(page, `password-busy-${width}`);
+    held.resolve();
+    await page.getByText("Пароль изменён. Остальные сеансы завершены.", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("dialog").count(), 0);
+    assert.equal(await page.locator(".app-main").count(), 1);
+    assert.equal(state.requests.filter(req => req.endpoint === "POST /api/auth/login" || req.endpoint === "POST /api/auth/logout").length, 0);
+    await screenshot(page, `password-success-${width}`);
+    await passwordOpen(page); await passwordEmpty(page);
+    await page.getByRole("button", { name: "Отмена", exact: true }).click();
+    await page.getByRole("button", { name: "Проверить обновления", exact: true }).click();
+    await page.getByRole("button", { name: "Проверить и обновить", exact: true }).click();
+    await page.getByText("Обновлений нет.", { exact: true }).waitFor();
+    assert.equal(state.requests.find(req => req.endpoint === "POST /api/update").csrf, "password-rotated-csrf");
+    await page.reload(); await page.locator(".version").waitFor();
+    assert.equal(passwordPosts(state).length, 1);
+    await close(test, `password exact POST, Unicode 128 bytes accepted, busy duplicate guard, login preserved, rotated CSRF next mutation ${width}px`);
+
+    for (const failure of ["500", "timeout"]) {
+      test = await open(browser, "/#/system", width); ({ page, state } = test);
+      await passwordOpen(page);
+      state.passwordBody = { current_password: "old-secret", password: "new-secret" };
+      if (failure === "500") state.fail = { endpoint: "POST /api/auth/password", status: 500, error: "password_change_uncertain" };
+      else await page.evaluate(() => { window.passwordTimeout = true; });
+      await passwordFill(page, state.passwordBody.current_password, state.passwordBody.password);
+      await passwordSubmit(page);
+      if (failure === "timeout") {
+        await page.waitForFunction(() => !!window.passwordSignal);
+        assert.equal(await page.evaluate(() => window.passwordSignal.aborted), false);
+        await page.waitForFunction(() => window.passwordSignal.aborted, null, { timeout: 35_000 });
+        assert.equal(await page.evaluate(() => window.passwordSignal.aborted), true);
+      }
+      await page.getByRole("dialog").getByRole("alert").getByText(/Результат смены пароля неизвестен/).waitFor();
+      const guidance = await page.getByRole("dialog").getByRole("alert").innerText();
+      assert.match(guidance, /Запрос не повторён автоматически/);
+      assert.match(guidance, /Обновите страницу.*попробуйте новый пароль/);
+      await passwordEmpty(page);
+      await screenshot(page, `password-${failure}-${width}`);
+      await page.waitForTimeout(5500);
+      assert.equal(passwordPosts(state).length, 1, "no automatic password replay after uncertainty");
+      // A later expired poll preserves the guidance on the actual login screen.
+      state.auth = { state: "login", csrf_token: "resync-csrf" };
+      state.fail = { endpoint: "GET /api/status", status: 401, error: "session_expired" };
+      await page.getByRole("heading", { name: "Вход в панель", exact: true, level: 1 }).waitFor();
+      await page.getByRole("alert").getByText(/попробуйте новый пароль/).waitFor();
+      await screenshot(page, `password-${failure}-login-${width}`);
+      const resync = Promise.withResolvers();
+      state.hold = { endpoint: "GET /api/auth/status", promise: resync.promise };
+      await page.locator('input[autocomplete="current-password"]').fill("new-secret");
+      try {
+        await Promise.all([
+          page.waitForRequest(req => req.url().endsWith("/api/auth/status")),
+          page.getByRole("button", { name: "Войти", exact: true }).click({ timeout: 5000 }),
+        ]);
+      } catch (error) {
+        console.error({ requests: state.requests.map(req => req.endpoint), errors: test.errors, body: await page.locator("body").innerText() });
+        throw error;
+      }
+      await page.waitForTimeout(100);
+      assert.equal(state.requests.filter(req => req.endpoint === "POST /api/auth/login").length, 0, "login waits for serialized status resync");
+      resync.resolve();
+      await page.locator(".app-main .panel").first().waitFor();
+      assert.equal(state.requests.find(req => req.endpoint === "POST /api/auth/login").csrf, "resync-csrf");
+      assert.deepEqual(state.requests.filter(req => req.endpoint.includes("/api/auth/")).map(req => req.endpoint), ["GET /api/auth/status", "POST /api/auth/password", "GET /api/auth/status", "POST /api/auth/login"]);
+      assert.equal(passwordPosts(state).length, 1);
+      await close(test, `password ${failure}: uncertain guidance survives login, secrets cleared, no replay, serialized GET resync before new-password login ${width}px`);
+    }
+  }
+}
+
 async function setupAdmin(test, password = adminPassword) {
   test.state.adminPassword = password;
   await test.page.locator('input[autocomplete="one-time-code"]').fill("mock-setup-code");
@@ -243,6 +428,7 @@ for (const name of ["app.js", "app.css", "chart.js"]) {
   const reference = await readFile(new URL(name === "chart.js" ? "app.js" : "index.html", assets), "utf8");
   assert.ok(reference.includes(`${name}?v=${hash}`), "generated cache-busting reference matches hash");
   console.log(`ASSET ${name} sha256=${hash}; gzip and reference verified`);
+  if (name === "app.js") assert.doesNotMatch(bytes.toString(), /8443/, "production client must not hardcode legacy port");
 }
 const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH ?? (process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : undefined) });
 try {
@@ -572,5 +758,7 @@ try {
     assert.equal(state.requests.filter(req => req.endpoint === "POST /api/servers/bootstrap").length, 2, "refresh never resubmits bootstrap");
     await close(test, `VPS ${failure}: visible failure, cleared password, no auto-retry, explicit retry succeeds`);
   }
+  assert.equal(passed, 35, "all original browser baselines retained");
+  await passwordChecks(browser);
   console.log(`PASS: ${passed} browser scenarios; ${screenshots} screenshots; 3 asset hashes/gzip verified. All requests mocked at ${origin}.`);
 } finally { await browser.close(); }

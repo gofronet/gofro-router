@@ -83,6 +83,7 @@ pub(crate) fn secure_router(state: AppState) -> Router {
 fn private_router() -> Router<AppState> {
     Router::new()
         .route("/api/auth/logout", post(auth::logout))
+        .route("/api/auth/password", post(auth::change_password))
         .route("/api/onboarding", get(onboarding_status))
         .route("/api/onboarding/complete", post(onboarding_complete))
         .route("/api/status", get(status))
@@ -135,17 +136,27 @@ pub(crate) fn redirect_router(state: AppState) -> Router {
 }
 
 async fn redirect(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Response {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok());
-    if !matches!(host, Some(value) if value == format!("{}:8081", state.lan.address) || value == format!("{}:8081", crate::model::AP_DOMAIN))
-    {
+    let Some(host) = auth::request_authority(&uri, &headers) else {
         return StatusCode::FORBIDDEN.into_response();
-    }
+    };
+    let destination = if host == crate::model::AP_DOMAIN
+        || host == format!("{}:80", crate::model::AP_DOMAIN)
+        || host == format!("{}:8081", crate::model::AP_DOMAIN)
+        || host == format!("{}:{}", crate::model::AP_DOMAIN, state.http_listen.port())
+    {
+        format!("https://{}", crate::model::AP_DOMAIN)
+    } else if host == format!("{}:{}", state.lan.address, state.http_listen.port()) {
+        format!(
+            "https://{}:{}",
+            state.lan.address,
+            state.https_listen.port()
+        )
+    } else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
     let location = format!(
-        "https://{}:{}{}",
-        state.lan.address,
-        state.https_listen.port(),
+        "{}{}",
+        destination,
         uri.path_and_query()
             .map(|value| value.as_str())
             .unwrap_or("/")

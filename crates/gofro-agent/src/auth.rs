@@ -45,6 +45,21 @@ pub(crate) struct PasswordInput {
     setup_code: Option<String>,
     password: String,
 }
+#[derive(Deserialize)]
+pub(crate) struct PasswordChangeInput {
+    current_password: String,
+    password: String,
+}
+
+#[derive(Debug)]
+struct RecordPublished;
+
+impl std::fmt::Display for RecordPublished {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("credential published but directory sync failed")
+    }
+}
+
 #[derive(Serialize)]
 struct AuthReply {
     state: &'static str,
@@ -167,14 +182,15 @@ pub(crate) async fn setup(
     let auth = state.auth.clone();
     let state_for_write = state.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let _hashing = hashing;
-        write_record(&auth.password, &input.password)?;
-        onboarding::complete_admin(&state_for_write, &auth.setup_code)
+        let result = write_record(&auth.password, &input.password)
+            .and_then(|()| onboarding::complete_admin(&state_for_write, &auth.setup_code));
+        (result, hashing)
     })
     .await;
-    if !matches!(result, Ok(Ok(()))) {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
-    }
+    let _hashing = match result {
+        Ok((Ok(()), hashing)) => hashing,
+        _ => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+    };
     match state.auth.issue() {
         Ok((token, csrf)) => reply("authenticated", csrf, Some(token), None, None),
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
@@ -236,11 +252,102 @@ pub(crate) async fn login(
         drop(hashing);
         return error(StatusCode::UNAUTHORIZED, "invalid_password");
     }
-    drop(hashing);
+    // Keep verification and session issuance serialized with password changes.
+    let _hashing = hashing;
     match state.auth.issue() {
         Ok((token, csrf)) => reply("authenticated", csrf, Some(token), None, None),
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }
+}
+
+pub(crate) async fn change_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<PasswordChangeInput>,
+) -> Response {
+    let Ok(hashing) = state.auth.hashing.clone().try_acquire_owned() else {
+        return error(StatusCode::CONFLICT, "auth_busy");
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _hashing = hashing;
+        change_password_record(&state.auth, &headers, input, write_record)
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+    }
+}
+
+fn change_password_record(
+    auth: &Auth,
+    headers: &HeaderMap,
+    input: PasswordChangeInput,
+    persist: impl FnOnce(&PathBuf, &str) -> Result<()>,
+) -> Response {
+    let Ok(mut inner) = auth.inner.lock() else {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
+    };
+    // Middleware may have authorized this request before another change or logout.
+    let session_token = cookie(headers, SESSION);
+    let Some(session) = inner.sessions.iter().find(|session| {
+        Some(session.token.as_str()) == session_token.as_deref() && session.expires > Instant::now()
+    }) else {
+        return error(StatusCode::UNAUTHORIZED, "session_expired");
+    };
+    if !headers
+        .get("x-csrf-token")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| constant_time_eq(value, &session.csrf))
+    {
+        return error(StatusCode::FORBIDDEN, "request_rejected");
+    }
+    if let Some(code) = setup_password_error(&input.password) {
+        return error(StatusCode::BAD_REQUEST, code);
+    }
+    if inner
+        .failed
+        .is_some_and(|time| time.elapsed() < Duration::from_secs(1))
+    {
+        return error(StatusCode::TOO_MANY_REQUESTS, "login_throttled");
+    }
+    let valid = read_record(&auth.password).and_then(|record| {
+        if password_too_long(&input.current_password) {
+            Ok(false)
+        } else {
+            verify(&record, &input.current_password)
+        }
+    });
+    match valid {
+        Ok(true) => {}
+        Ok(false) => {
+            inner.failed = Some(Instant::now());
+            return error(StatusCode::BAD_REQUEST, "invalid_current_password");
+        }
+        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+    }
+    // Generate both tokens before publication so RNG failure cannot strand the caller.
+    let (Ok(session_token), Ok(csrf)) = (token(), token()) else {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
+    };
+    if let Err(failure) = persist(&auth.password, &input.password) {
+        if failure.is::<RecordPublished>() {
+            inner.sessions.clear();
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "password_change_uncertain",
+            );
+        }
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
+    }
+    inner.sessions.clear();
+    inner.failed = None;
+    inner.sessions.push(Session {
+        token: session_token.clone(),
+        csrf: csrf.clone(),
+        expires: Instant::now() + TTL,
+    });
+    reply("authenticated", csrf, Some(session_token), None, None)
 }
 
 pub(crate) async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -341,36 +448,36 @@ fn password_too_long(password: &str) -> bool {
     password.len() > 128
 }
 fn allowed_host(state: &AppState, uri: &Uri, headers: &HeaderMap) -> bool {
+    request_authority(uri, headers).is_some_and(|value| allowed_https_authority(state, value))
+}
+pub(crate) fn request_authority<'a>(uri: &'a Uri, headers: &'a HeaderMap) -> Option<&'a str> {
     let authority = uri.authority().map(|value| value.as_str());
-    let host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok());
-    if authority.is_some() && host.is_some() && authority != host {
-        return false;
+    let mut hosts = headers.get_all(header::HOST).iter();
+    let host = match hosts.next() {
+        Some(value) => Some(value.to_str().ok()?),
+        None => None,
+    };
+    if hosts.next().is_some() {
+        return None;
     }
-    authority.or(host).is_some_and(|value| {
-        value == format!("{}:{}", state.lan.address, state.https_listen.port())
-            || value == format!("{}:{}", crate::model::AP_DOMAIN, state.https_listen.port())
-    })
+    if authority.is_some() && host.is_some() && authority != host {
+        return None;
+    }
+    authority.or(host)
+}
+fn allowed_https_authority(state: &AppState, value: &str) -> bool {
+    value == crate::model::AP_DOMAIN
+        || value == format!("{}:443", crate::model::AP_DOMAIN)
+        || value == format!("{}:8443", crate::model::AP_DOMAIN)
+        || value == format!("{}:{}", state.lan.address, state.https_listen.port())
+        || value == format!("{}:{}", crate::model::AP_DOMAIN, state.https_listen.port())
 }
 fn allowed_origin(state: &AppState, headers: &HeaderMap) -> bool {
     headers
         .get(header::ORIGIN)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|value| {
-            value
-                == format!(
-                    "https://{}:{}",
-                    state.lan.address,
-                    state.https_listen.port()
-                )
-                || value
-                    == format!(
-                        "https://{}:{}",
-                        crate::model::AP_DOMAIN,
-                        state.https_listen.port()
-                    )
-        })
+        .and_then(|value| value.strip_prefix("https://"))
+        .is_some_and(|value| allowed_https_authority(state, value))
 }
 pub(crate) fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut found = None;
@@ -497,16 +604,33 @@ fn write_record(path: &PathBuf, password: &str) -> Result<()> {
         hex(&hash),
     ]
     .join("$");
+    // Callers hold the hashing permit. Unlink a crashed write without following symlinks.
+    match fs::remove_file(&temporary) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .write(true)
         .mode(0o600)
         .open(&temporary)?;
-    file.write_all(record.as_bytes())?;
-    file.sync_all()?;
-    fs::rename(temporary, path)?;
-    fs::File::open(path.parent().context("missing credential parent")?)?.sync_all()?;
+    let result = (|| -> Result<()> {
+        file.write_all(record.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result?;
+    // Once rename succeeds, errors must not imply that the old password is still live.
+    (|| -> Result<()> {
+        fs::File::open(path.parent().context("missing credential parent")?)?.sync_all()?;
+        Ok(())
+    })()
+    .context(RecordPublished)?;
     Ok(())
 }
 

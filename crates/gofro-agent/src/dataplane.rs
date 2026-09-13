@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fmt::Write as _,
     io::Write as _,
     net::Ipv4Addr,
@@ -8,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    model::{IpMatch, LanContext, RouteTarget},
+    model::{IpMatch, LanContext, PANEL_VIRTUAL_IP, PanelPorts, RouteTarget},
     routing::{LAN_RANGES, RoutingPolicy},
 };
 
@@ -38,8 +39,16 @@ pub(crate) fn apply(
     vpn_enabled: bool,
     policy: &RoutingPolicy,
     mappings: &[FakeMapping],
+    panel_ports: PanelPorts,
 ) -> Result<()> {
-    run_nft(&render(lan, dns_port, vpn_enabled, policy, mappings))
+    run_nft(&render(
+        lan,
+        dns_port,
+        vpn_enabled,
+        policy,
+        mappings,
+        panel_ports,
+    ))
 }
 
 pub(crate) fn install_guard(lan: &LanContext) -> Result<()> {
@@ -131,7 +140,21 @@ fn render(
     vpn_enabled: bool,
     policy: &RoutingPolicy,
     mappings: &[FakeMapping],
+    panel_ports: PanelPorts,
 ) -> String {
+    let port_set = |ports: &[u16]| {
+        ports
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let http_ports = port_set(&[80, 8081, panel_ports.http]);
+    let https_ports = port_set(&[443, 8443, panel_ports.https]);
+    let allowed_ports = port_set(&[80, 443, 8081, 8443, panel_ports.http, panel_ports.https]);
     let mut script = String::new();
     writeln!(script, "destroy table inet {TABLE}").unwrap();
     writeln!(script, "add table inet {TABLE}").unwrap();
@@ -177,6 +200,18 @@ fn render(
         "add chain inet {TABLE} gofro_mark {{ type filter hook prerouting priority mangle; policy accept; }}"
     )
     .unwrap();
+    // The VIP is only a LAN TCP panel endpoint, including before DNS redirect.
+    for condition in [
+        format!("iifname != \"{}\"", lan.device),
+        "meta l4proto != tcp".to_owned(),
+        format!("tcp dport != {{ {allowed_ports} }}"),
+    ] {
+        writeln!(
+            script,
+            "add rule inet {TABLE} gofro_mark ip daddr {PANEL_VIRTUAL_IP} {condition} drop"
+        )
+        .unwrap();
+    }
     writeln!(
         script,
         "add rule inet {TABLE} gofro_mark iifname \"{}\" ct direction reply meta mark set (meta mark & {KEEP_FOREIGN_MARKS}) | {DIRECT_MARK}",
@@ -199,6 +234,12 @@ fn render(
     writeln!(
         script,
         "add rule inet {TABLE} gofro_mark iifname \"{}\" meta mark set meta mark & {KEEP_FOREIGN_MARKS}",
+        lan.device,
+    )
+    .unwrap();
+    writeln!(
+        script,
+        "add rule inet {TABLE} gofro_mark iifname \"{}\" ip daddr {PANEL_VIRTUAL_IP} meta mark set (meta mark & {KEEP_FOREIGN_MARKS}) | {DIRECT_MARK}",
         lan.device,
     )
     .unwrap();
@@ -275,6 +316,17 @@ fn render(
         "add chain inet {TABLE} gofro_dnat {{ type nat hook prerouting priority dstnat; policy accept; }}"
     )
     .unwrap();
+    for (ports, destination) in [
+        (http_ports, panel_ports.http),
+        (https_ports, panel_ports.https),
+    ] {
+        writeln!(
+            script,
+            "add rule inet {TABLE} gofro_dnat iifname \"{}\" ip daddr {PANEL_VIRTUAL_IP} tcp dport {{ {ports} }} dnat ip to {}:{destination}",
+            lan.device, lan.address,
+        )
+        .unwrap();
+    }
     writeln!(
         script,
         "add rule inet {TABLE} gofro_dnat iifname \"{}\" dnat ip to ip daddr map @fake_to_real",

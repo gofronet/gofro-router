@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     fs,
     io::{Read, Write},
-    net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket},
+    net::{SocketAddr, TcpStream, UdpSocket},
     path::Path,
     sync::{
         Mutex, RwLock,
@@ -21,7 +21,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::{
     config::normalize_domain,
     dataplane::{self, FakeMapping},
-    model::{LanContext, RouteTarget},
+    model::{AP_DOMAIN, LanContext, PANEL_VIRTUAL_IP, RouteTarget},
     routing::{RoutingPolicy, is_lan_destination},
 };
 
@@ -78,6 +78,11 @@ impl FakeDns {
         self.vpn_enabled.store(enabled, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
+    pub(crate) fn vpn_enabled(&self) -> bool {
+        self.vpn_enabled.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn begin_update(&self) -> Result<std::sync::RwLockWriteGuard<'_, ()>> {
         self.updates
             .write()
@@ -119,8 +124,8 @@ impl FakeDns {
         let request = Message::from_vec(packet).context("invalid DNS request")?;
         let query = request.query().context("DNS request has no question")?;
         let domain = query_domain(&query.name().to_utf8());
-        if domain == "wifi.gofro.net" {
-            return panel_response(&request, lan.address);
+        if domain == AP_DOMAIN {
+            return panel_response(&request);
         }
         let response = query_upstream(packet, upstream)?;
         let mut message = Message::from_vec(&response).context("invalid upstream DNS response")?;
@@ -295,7 +300,7 @@ fn retain_ipv4_records(records: &mut Vec<Record>) -> bool {
     records.len() != before
 }
 
-fn panel_response(request: &Message, address: Ipv4Addr) -> Result<Vec<u8>> {
+fn panel_response(request: &Message) -> Result<Vec<u8>> {
     let mut response = Message::new();
     response
         .set_id(request.id())
@@ -312,7 +317,7 @@ fn panel_response(request: &Message, address: Ipv4Addr) -> Result<Vec<u8>> {
         response.add_answer(Record::from_rdata(
             query.name().clone(),
             30,
-            RData::A(A(address)),
+            RData::A(A(PANEL_VIRTUAL_IP)),
         ));
     }
     response

@@ -24,6 +24,7 @@ export class RouterState {
   private onboardingInFlight = false;
   private onboardingVersion = 0;
   private generation = 0;
+  private authVersion = 0;
 
   loading = $state(true);
   authLoading = $state(true);
@@ -69,6 +70,7 @@ export class RouterState {
       case "password_too_long": return "Пароль слишком длинный. Максимум 128 байт: кириллица занимает больше одного байта на символ.";
       case "invalid_setup_code": return "Неверный одноразовый код установки.";
       case "invalid_password": return "Неверный пароль администратора.";
+      case "invalid_current_password": return "Неверный текущий пароль.";
       case "request_rejected": return "Проверка безопасности не пройдена. Обновите страницу и попробуйте снова.";
       case "auth_busy": return "Уже выполняется проверка пароля. Подождите и попробуйте снова.";
       case "setup_completed": return "Пароль уже создан. Обновите страницу и войдите.";
@@ -172,6 +174,7 @@ export class RouterState {
 
     this.pollInFlight = true;
     const version = this.statusVersion;
+    const authVersion = this.authVersion;
     const generation = this.generation;
 
     try {
@@ -184,7 +187,7 @@ export class RouterState {
         if (!this.warningServerKey) this.actionWarning = "";
       }
     } catch (error) {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || authVersion !== this.authVersion) return;
       if (this.handleAuthError(error)) return;
       if (version === this.statusVersion) {
         this.pollError = this.message(error);
@@ -214,6 +217,7 @@ export class RouterState {
 
   stop(): void {
     this.generation++;
+    this.authVersion++;
     this.statusUncertain = true;
     this.onboardingVersion++;
     this.stopPolling();
@@ -230,6 +234,7 @@ export class RouterState {
     if (this.authState !== "authenticated" || this.onboardingInFlight) return;
     const version = this.onboardingVersion;
     const generation = this.generation;
+    const authVersion = this.authVersion;
     this.onboardingInFlight = true;
     this.onboardingLoading = true;
     try {
@@ -241,7 +246,7 @@ export class RouterState {
       if (generation !== this.generation) return;
       if (onboarding.step === "complete") this.startPolling();
     } catch (error) {
-      if (generation !== this.generation || version !== this.onboardingVersion || this.authState !== "authenticated" || this.handleAuthError(error)) return;
+      if (generation !== this.generation || authVersion !== this.authVersion || version !== this.onboardingVersion || this.authState !== "authenticated" || this.handleAuthError(error)) return;
       this.actionError = this.message(error);
     } finally {
       if (generation === this.generation && version === this.onboardingVersion) {
@@ -257,41 +262,43 @@ export class RouterState {
 
   initializeAuth = async (): Promise<void> => {
     this.stop();
+    const authVersion = this.authVersion;
     const generation = this.generation;
     this.authLoading = true;
     this.authError = "";
     try {
       const auth = await api.auth.status();
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || authVersion !== this.authVersion) return;
       this.applyAuth(auth);
       this.loading = auth.state === "authenticated";
       if (auth.state === "authenticated") await this.loadOnboarding();
     } catch (error) {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || authVersion !== this.authVersion) return;
       clearCsrfToken();
       this.authState = "login";
       this.auth = null;
       this.authError = this.message(error);
       this.loading = false;
     } finally {
-      if (generation === this.generation) this.authLoading = false;
+      if (generation === this.generation && authVersion === this.authVersion) this.authLoading = false;
     }
   };
 
   setupAuth = async (password: string, setupCode?: string): Promise<boolean> => {
     this.stop();
+    const authVersion = this.authVersion;
     const generation = this.generation;
     this.authError = "";
     try {
       const auth = await api.auth.setup(password, setupCode);
-      if (generation !== this.generation) return false;
+      if (generation !== this.generation || authVersion !== this.authVersion) return false;
       this.applyAuth(auth);
       if (auth.state !== "authenticated") return false;
       this.loading = true;
       await this.loadOnboarding();
-      return generation === this.generation;
+      return generation === this.generation && authVersion === this.authVersion;
     } catch (error) {
-      if (generation !== this.generation) return false;
+      if (generation !== this.generation || authVersion !== this.authVersion) return false;
       this.authError = this.message(error);
       if (error instanceof Error && error.message === "setup_closed") this.setupClosed = true;
       this.handleAuthError(error);
@@ -301,18 +308,19 @@ export class RouterState {
 
   loginAuth = async (password: string): Promise<boolean> => {
     this.stop();
+    const authVersion = this.authVersion;
     const generation = this.generation;
     this.authError = "";
     try {
       const auth = await api.auth.login(password);
-      if (generation !== this.generation) return false;
+      if (generation !== this.generation || authVersion !== this.authVersion) return false;
       this.applyAuth(auth);
       if (auth.state !== "authenticated") return false;
       this.loading = true;
       await this.loadOnboarding();
-      return generation === this.generation;
+      return generation === this.generation && authVersion === this.authVersion;
     } catch (error) {
-      if (generation !== this.generation) return false;
+      if (generation !== this.generation || authVersion !== this.authVersion) return false;
       this.authError = this.message(error);
       this.handleAuthError(error);
       return false;
@@ -321,6 +329,7 @@ export class RouterState {
 
   logoutAuth = async (): Promise<void> => {
     this.stop();
+    const authVersion = this.authVersion;
     const generation = this.generation;
     this.authLoading = true;
     const pending = api.auth.logout();
@@ -333,14 +342,43 @@ export class RouterState {
     this.authError = "";
     try {
       const auth = await pending;
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || authVersion !== this.authVersion) return;
       this.applyAuth(auth);
     } catch (error) {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || authVersion !== this.authVersion) return;
       this.authError = this.message(error);
       this.handleAuthError(error);
     } finally {
-      if (generation === this.generation) this.authLoading = false;
+      if (generation === this.generation && authVersion === this.authVersion) this.authLoading = false;
+    }
+  };
+
+  changePassword = async (currentPassword: string, password: string): Promise<boolean> => {
+    if (this.busy || this.authState !== "authenticated") return false;
+    const generation = this.generation;
+    const authVersion = ++this.authVersion;
+    this.authLoading = false;
+    this.mutation = "password";
+    try {
+      const auth = await api.auth.changePassword(currentPassword, password);
+      if (generation !== this.generation || authVersion !== this.authVersion) return false;
+      if (auth.state !== "authenticated") throw new ApiError("Unexpected password reply");
+      // Rotation keeps the same app/poll lifecycle and onboarding in flight.
+      this.auth = auth;
+      this.authState = auth.state;
+      setCsrfToken(auth.csrf_token);
+      this.authError = "";
+      return true;
+    } catch (error) {
+      if (generation !== this.generation || authVersion !== this.authVersion) return false;
+      const uncertain = error instanceof ApiError && (error.status === undefined || error.status >= 500);
+      const message = uncertain
+        ? "Результат смены пароля неизвестен. Запрос не повторён автоматически. Обновите страницу; если потребуется вход, попробуйте новый пароль."
+        : this.message(error);
+      if (this.handleAuthError(error) || uncertain) this.authError = message;
+      throw new Error(message);
+    } finally {
+      if (generation === this.generation && authVersion === this.authVersion) this.mutation = null;
     }
   };
 
@@ -449,12 +487,13 @@ export class RouterState {
 
   testRouting = async (value: string): Promise<RoutingTest> => {
     const generation = this.generation;
+    const authVersion = this.authVersion;
     try {
       const result = await api.routing.test(value);
-      if (generation !== this.generation) throw new Error("Request superseded");
+      if (generation !== this.generation || authVersion !== this.authVersion) throw new Error("Request superseded");
       return result;
     } catch (error) {
-      if (generation === this.generation) this.handleAuthError(error);
+      if (generation === this.generation && authVersion === this.authVersion) this.handleAuthError(error);
       throw error;
     }
   };

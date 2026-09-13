@@ -7,6 +7,29 @@ use wireguard_status::PeerStatus;
 use crate::stats::{HistoryPoint, LiveStats};
 
 pub(crate) const AP_DOMAIN: &str = "wifi.gofro.net";
+pub(crate) const PANEL_VIRTUAL_IP: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 0);
+
+#[derive(Clone, Copy)]
+pub(crate) struct PanelPorts {
+    pub(crate) http: u16,
+    pub(crate) https: u16,
+}
+
+impl PanelPorts {
+    pub(crate) fn validate(self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.http != 0 && self.https != 0,
+            "HTTP and HTTPS listener ports must be nonzero"
+        );
+        anyhow::ensure!(
+            ![443, 8443].contains(&self.http)
+                && ![80, 8081].contains(&self.https)
+                && self.http != self.https,
+            "HTTP and HTTPS listener ports must not overlap each other or the opposite protocol's panel ports"
+        );
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct LanContext {
@@ -278,6 +301,28 @@ pub(crate) enum UpdateResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panel_ports_reject_zero_and_overlapping_protocol_roles() {
+        for (http, https) in [(8081, 8443), (80, 443), (9081, 9443), (8444, 8082)] {
+            assert!(PanelPorts { http, https }.validate().is_ok());
+        }
+        for (http, https) in [
+            (0, 8443),
+            (8081, 0),
+            (443, 9443),
+            (8443, 9443),
+            (9081, 80),
+            (9081, 8081),
+            (9081, 9081),
+            (443, 80),
+        ] {
+            assert!(
+                PanelPorts { http, https }.validate().is_err(),
+                "{http}/{https}"
+            );
+        }
+    }
 
     #[test]
     fn legacy_profiles_are_imported_and_status_omits_secrets() {

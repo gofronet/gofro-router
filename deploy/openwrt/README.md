@@ -4,9 +4,10 @@ Gofro installs on official OpenWrt 25.12 without replacing the firmware. It is
 not tied to a router vendor or model: the bootstrap selects a signed static
 bundle from OpenWrt's `DISTRIB_ARCH`.
 
-This describes the unreleased VPN-only integration on the unchanged v0.5.15
-base, not the published v0.5.15 installer. The download links select the latest
-published release; they do not install unshipped workspace changes.
+This describes the next signed VPN-only candidate, v0.5.17. The installed
+signed v0.5.16 candidate remains the immutable, pinned baseline; new changes
+require a new candidate artifact. Published Latest remains v0.5.15. The download
+links select that published release, not unshipped workspace changes.
 
 Release bundles cover these OpenWrt package ABIs:
 
@@ -46,10 +47,24 @@ Successful installation prints a one-time setup code and its 15-minute expiry.
 Use the code to create the administrator and add a VPN profile or VPS from the
 Gofro panel. It does not create a setup SSID or change network configuration.
 
-Gofro serves its panel on `https://<LAN-address>:8443`; port `8081` redirects to
-HTTPS. LuCI keeps its normal ports `80` and `443`. For example,
-`192.168.0.1` remains configured in OpenWrt; Gofro never forces `10.203.1.1` or
-any other LAN address.
+In v0.5.17, open bare `wifi.gofro.net` from LAN to reach Gofro. Clients must use
+the router's local LAN resolver; external DNS/DoH does not provide this access.
+Local DNS answers with VIP `198.18.0.0`, reserved outside FakeDNS lease
+allocation, with TTL 30 seconds. Clients with an old cached DNS answer must
+wait out its previous TTL or flush their DNS cache and resolve the name again.
+
+LAN-only TCP traffic to VIP ports `80`/`8081` is redirected to the existing
+LAN `8081` listener; VIP ports `443`/`8443` go to the existing LAN `8443`
+listener. Host/Origin validation strictly accepts the canonical alias
+`wifi.gofro.net` while preserving existing LAN-address validation. This adds
+no LAN IP, network configuration, proxy, listener or dependency. All existing
+panel and LuCI ports stay in place, including LuCI's normal `80` and `443`.
+
+Direct access remains `https://<LAN-address>:8443`; `http://<LAN-address>:8081`
+redirects to it. Use the direct-IP HTTPS fallback when the domain is unavailable,
+especially after an initial reconcile failure: VIP access requires successfully
+installed rules. For example, `192.168.0.1` remains configured in OpenWrt; Gofro
+never forces `10.203.1.1` or any other LAN address.
 
 WAN can be DHCP behind another router or PPPoE. Existing PPPoE credentials and
 MTU stay in OpenWrt and are preserved, as are LAN, DHCP, Wi-Fi and LuCI settings.
@@ -70,6 +85,13 @@ needed in installation commands. The bundle contains the complete GeoSite and
 GeoIP databases.
 
 ## VPN setup
+
+In **Panel -> Change password**, enter the current administrator password and
+the new password twice. The new password requires at least eight Unicode
+characters and at most 128 UTF-8 bytes. A successful change keeps the current
+browser signed in with new session/CSRF cookies and invalidates other sessions.
+If the result cannot be confirmed, check login with the new password before
+retrying; the panel never automatically repeats the password-change request.
 
 The one-time setup window only creates the administrator and configures VPN.
 Network settings are not part of the Gofro UI.

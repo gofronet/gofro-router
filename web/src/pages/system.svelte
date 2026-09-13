@@ -3,6 +3,7 @@
   import { getAppContext } from "../app-context";
   import { appearance, setTheme, type Theme } from "../stores/theme.svelte";
   import Dialog from "../components/dialog.svelte";
+  import ChangePassword from "../components/change-password.svelte";
   const app = getAppContext();
   const status = $derived(app.status);
   const themes: { value: Theme; label: string }[] = [{ value: "light", label: "Светлая" }, { value: "dark", label: "Тёмная" }, { value: "system", label: "Системная" }];
@@ -19,6 +20,7 @@
 <svelte:head><title>Панель · Gofro VPN</title></svelte:head>
 <section class="panel"><div class="panel-head"><h2>Обновления Gofro</h2></div><div class="panel-body"><div class="version">{status.version}</div><button class="btn" type="button" disabled={app.busy || status.update.running} onclick={() => { app.clearActionError(); confirm = true; }}><RefreshCw class={status.update.running ? "icon animate-spin" : "icon"} />{status.update.running ? "Обновляем…" : "Проверить обновления"}</button>{#if updateMessage}<p class="small muted mt-[13px]" role="status">{updateMessage}</p>{/if}</div></section>
 <section class="panel theme-settings"><h2>Оформление</h2><div class="segmented theme-picker" role="group" aria-label="Оформление панели">{#each themes as theme (theme.value)}<button type="button" aria-pressed={appearance.theme === theme.value} onclick={() => setTheme(theme.value)}>{theme.label}</button>{/each}</div></section>
+<ChangePassword />
 <section class="panel"><div class="full-row"><div class="row-main"><h3>Вход в панель</h3></div><button class="btn ghost" type="button" disabled={app.busy} onclick={app.logoutAuth}>Выйти</button></div></section>
 {#if confirm}
   <Dialog title="Проверить и установить обновление?" onclose={() => confirm = false} busy={app.busy}>
