@@ -1,32 +1,126 @@
 #!/bin/sh
 set -eu
-
-DIRECT_MARK=0x10000
-VPN_MARK=0x20000
-MARK_MASK=0x30000
-
-if [ -e /etc/gofro/onboarding-state ]; then
-	/usr/libexec/gofro/onboarding guard
-fi
-
-clear_rules() {
-	while ip rule del pref 90 2>/dev/null; do :; done
-	while ip rule del pref 81 2>/dev/null; do :; done
-	while ip rule del pref 80 2>/dev/null; do :; done
+DIRECT_MARK=0x10000 VPN_MARK=0x20000 MARK_MASK=0x30000
+die() { echo "gofro mode: $*" >&2; exit 1; }
+usage() { echo "Usage: $0 vpn|bypass|check|tunnel-up|tunnel-down LAN_DEVICE LAN_CIDR" >&2; exit 2; }
+[ "$#" = 3 ] || usage
+action=$1
+case "$action" in vpn|bypass|check|tunnel-up|tunnel-down) ;; *) usage ;; esac
+case "$2" in ''|*[!A-Za-z0-9_.-]*|????????????????*) usage ;; esac
+case "$3" in *[!0-9./]*|*/*/*|/*|*/) usage ;; esac
+lan_device=$2; lan_subnet=$3
+valid_subnet() {
+	printf '%s\n' "$1" | awk -F '[./]' '
+	NF != 5 { exit 1 }
+	{ for (i=1; i<=5; i++) if ($i !~ /^(0|[1-9][0-9]*)$/ || $i > (i==5 ? 32 : 255)) exit 1
+	  ip=$1*16777216+$2*65536+$3*256+$4; if (ip % (2^(32-$5))) exit 1 }'
 }
+valid_subnet "$lan_subnet" || usage
 
-lan_interface="$(uci -q get gofro.main.lan_interface || echo br-lan)"
-lan_subnet="$(uci -q get gofro.main.lan_subnet || echo 10.203.1.0/24)"
+# Keep the inode: the kernel releases this lock when its last descriptor closes,
+# including after SIGKILL. Unlinking it would let writers lock different inodes.
+lock=${GOFRO_MODE_LOCK:-/var/lock/gofro-mode.lock}
+command -v flock >/dev/null 2>&1 || die 'flock is required (enabled in standard OpenWrt BusyBox)'
+exec 9>"$lock"
+flock -n 9 || die 'another routing operation is in progress'
 
-clear_rules
-case "${1:-}" in
-	vpn)
-		ip route replace "$lan_subnet" dev "$lan_interface" table 100
-		ip route replace unreachable default table 100 metric 32767
-		ip rule add pref 80 fwmark "$DIRECT_MARK/$MARK_MASK" lookup main
-		ip rule add pref 81 fwmark "$VPN_MARK/$MARK_MASK" lookup 100
-		ip rule add pref 90 from "$lan_subnet" lookup 100
+normalize() { awk '{$1=$1; if (NF) print}'; }
+rules="$(ip -4 -N rule show)" || die 'cannot read IPv4 rules'
+rules="$(printf '%s\n' "$rules" | normalize)"
+routes="$(LC_ALL=C ip -4 -N -o route show table 100 2>&1)" || {
+	# A fresh install has no FIB table yet. No other read failure is safe to ignore.
+	[ "$routes" = 'Error: ipv4: FIB table does not exist.
+Dump terminated' ] || die "cannot read table 100: $routes"
+	routes=
+}
+# Numeric output avoids rt_protos/rt_tables aliases (186 is normally "bgp").
+# iproute2 normally omits the default protocol, boot (3).
+routes="$(printf '%s\n' "$routes" | normalize | sed 's/ proto 3 / /; s/ proto 3$//')"
+# Installer attestation, NOT a user LAN setting. Written only after proving a
+# v0.5.15 installation and snapshotting its old UCI LAN, before replacing it.
+history=${GOFRO_ROUTING_LEGACY:-/etc/gofro/routing-legacy.json}
+old_device=; old_subnet=
+if [ -e "$history" ]; then
+	[ "$(jsonfilter -i "$history" -e '@.version')" = 0.5.15 ] || die 'invalid legacy routing version'
+	old_device="$(jsonfilter -i "$history" -e '@.device')"
+	old_subnet="$(jsonfilter -i "$history" -e '@.subnet')"
+	case "$old_device" in ''|*[!A-Za-z0-9_.-]*|????????????????*) die 'invalid legacy device' ;; esac
+	case "$old_subnet" in ''|*[!0-9./]*|*/*/*|/*|*/) die 'invalid legacy subnet' ;; esac
+	valid_subnet "$old_subnet" || die 'invalid legacy subnet'
+	[ "$old_device" = "$lan_device" ] || die "LAN device change from $old_device to $lan_device requires maintenance; automatic migration is unsupported"
+fi
+for priority in 80 81; do
+	case "$priority" in
+		80) identity='80: from all fwmark 0x10000/0x30000 lookup 254' ;;
+		81) identity='81: from all fwmark 0x20000/0x30000 lookup 100' ;;
+	esac
+	actual="$(printf '%s\n' "$rules" | awk -v p="$priority:" '$1 == p')"
+	[ -z "$actual" ] || [ "$actual" = "$identity" ] || die "foreign rule priority $priority"
+done
+legacy_rule="$(printf '%s\n' "$rules" | awk '$1 == "90:"')"
+remove_legacy_rule=
+if [ -n "$old_subnet" ] && [ "$legacy_rule" = "90: from $old_subnet lookup 100" ]; then
+	remove_legacy_rule=1
+fi
+legacy_routes=
+while IFS= read -r route; do
+	case "$route" in
+		'') continue ;;
+		*' proto 186 '|*' proto 186 '*|*' proto 186') continue ;;
+	esac
+	[ -n "$old_subnet" ] || die 'refusing foreign routes in table 100 (no proven legacy history)'
+	case "$route" in
+		"$old_subnet dev $old_device scope 253"|\
+		'default dev gt0 scope 253 metric 10'|\
+		'7 default metric 32767') legacy_routes=1 ;;
+		*) die "refusing foreign route in table 100: $route" ;;
+	esac
+done <<EOF
+$routes
+EOF
+if [ -n "$legacy_routes$remove_legacy_rule" ]; then
+	guard="$(nft -s list chain inet gofro_guard gofro_guard)" || die 'legacy adoption requires the forwarding guard'
+	guard="$(printf '%s\n' "$guard" | normalize)"
+	[ "$guard" = "table inet gofro_guard {
+chain gofro_guard {
+type filter hook forward priority filter; policy accept;
+iifname \"$old_device\" oifname != \"$old_device\" drop
+}
+}" ] || die 'legacy adoption requires an exact guard on the recorded previous LAN'
+fi
+[ "$action" != check ] || exit 0
+
+ensure_rule() {
+	printf '%s\n' "$rules" | grep -q "^$1:" && return 0
+	priority=$1; shift
+	ip rule add pref "$priority" "$@"
+}
+if [ -n "$legacy_routes" ]; then
+	while IFS= read -r route; do
+		case "$route" in
+			"$old_subnet dev $old_device scope 253") ip route replace "$old_subnet" dev "$old_device" table 100 proto 186 ;;
+			'default dev gt0 scope 253 metric 10') ip route replace default dev gt0 table 100 metric 10 proto 186 ;;
+			'7 default metric 32767') ip route replace unreachable default table 100 metric 32767 proto 186 ;;
+		esac
+	done <<EOF
+$routes
+EOF
+fi
+ensure_rule 80 fwmark "$DIRECT_MARK/$MARK_MASK" lookup 254
+ensure_rule 81 fwmark "$VPN_MARK/$MARK_MASK" lookup 100
+# This permanent fail-closed default protects packets carrying stale VPN marks.
+ip route replace unreachable default table 100 metric 32767 proto 186
+# Remove only the exact former source catch-all. Do not disturb another pref 90 owner.
+[ -z "$remove_legacy_rule" ] || ip rule del pref 90 from "$old_subnet" lookup 100
+if [ -n "$old_subnet" ] && [ "$old_subnet" != "$lan_subnet" ]; then
+	ip route del "$old_subnet" dev "$old_device" table 100 proto 186 2>/dev/null || true
+fi
+case "$action" in
+	vpn) ip route replace "$lan_subnet" dev "$lan_device" table 100 proto 186 ;;
+	bypass)
+		ip route del "$lan_subnet" dev "$lan_device" table 100 proto 186 2>/dev/null || true
+		ip route del default dev gt0 table 100 metric 10 proto 186 2>/dev/null || true
 		;;
-	bypass) ;;
-	*) echo "Usage: $0 vpn|bypass" >&2; exit 2 ;;
+	tunnel-up) ip route replace default dev gt0 table 100 metric 10 proto 186 ;;
+	tunnel-down) ip route del default dev gt0 table 100 metric 10 proto 186 2>/dev/null || true ;;
 esac

@@ -3,47 +3,46 @@ use std::{fs, path::Path, process::Command, sync::atomic::Ordering};
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
-    body::Body,
     extract::State,
-    http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
+    http::{HeaderMap, StatusCode, Uri, header},
     middleware,
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::{any, get, post},
 };
 use serde::Serialize;
-use tracing::{error, warn};
+use tracing::error;
 use wireguard_status::wireguard_peers;
 
 use crate::{
     AppState, auth, controller, dataplane,
     model::{
-        AP_ADDRESS, AP_DOMAIN, AgentStatus, ApInput, ApStatus, ModeInput, ProfileInput, RouterInfo,
-        RoutingConfig, RoutingStatus, RoutingTestInput, RoutingTestResult, ServerKeyInput,
-        ServerStatus, ServerUpdate, UpdateInput, UpdateResult, UpdateStatus,
+        AgentStatus, ModeInput, ProfileInput, RoutingConfig, RoutingStatus, RoutingTestInput,
+        RoutingTestResult, ServerKeyInput, ServerStatus, ServerUpdate, UpdateInput, UpdateResult,
+        UpdateStatus,
     },
     network::service_active,
-    onboarding, stats, wifi,
+    onboarding, stats,
 };
 
-const UI: &str = include_str!("../../../assets/index.html");
-const UI_JS: &[u8] = include_bytes!("../../../assets/app.js");
-const UI_JS_GZIP: &[u8] = include_bytes!("../../../assets/app.js.gz");
-const UI_JS_HASH: &str = include_str!("../../../assets/app.js.sha256");
-const UI_CSS: &[u8] = include_bytes!("../../../assets/app.css");
-const UI_CSS_GZIP: &[u8] = include_bytes!("../../../assets/app.css.gz");
-const UI_CSS_HASH: &str = include_str!("../../../assets/app.css.sha256");
-const UI_CHART: &[u8] = include_bytes!("../../../assets/chart.js");
-const UI_CHART_GZIP: &[u8] = include_bytes!("../../../assets/chart.js.gz");
-const UI_CHART_HASH: &str = include_str!("../../../assets/chart.js.sha256");
+mod assets;
+mod managed;
+
 const UPDATE_LOCK: &str = "/tmp/gofro-update.lock";
 const UPDATE_RESULT: &str = "/tmp/gofro/update-result";
 const UPDATE_TRIGGER: &str = "/tmp/gofro/update-request";
 const UPDATE_COMMAND: &str = "/usr/libexec/gofro/update";
-const SERVICE_COMMAND: &str = "/usr/libexec/gofro/service";
 
 #[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<OperationOutcome>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OperationOutcome {
+    Committed,
 }
 
 struct ApiError(anyhow::Error);
@@ -55,6 +54,10 @@ impl IntoResponse for ApiError {
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorBody {
                 error: self.0.to_string(),
+                outcome: self
+                    .0
+                    .is::<crate::managed::CommittedRefreshFailed>()
+                    .then_some(OperationOutcome::Committed),
             }),
         )
             .into_response()
@@ -63,10 +66,10 @@ impl IntoResponse for ApiError {
 
 pub(crate) fn secure_router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(index))
-        .route("/app.js", get(javascript))
-        .route("/app.css", get(stylesheet))
-        .route("/chart.js", get(chart))
+        .route("/", get(assets::index))
+        .route("/app.js", get(assets::javascript))
+        .route("/app.css", get(assets::stylesheet))
+        .route("/chart.js", get(assets::chart))
         .route("/api/auth/status", get(auth::status))
         .route("/api/auth/setup", post(auth::setup))
         .route("/api/auth/login", post(auth::login))
@@ -81,41 +84,72 @@ fn private_router() -> Router<AppState> {
     Router::new()
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/onboarding", get(onboarding_status))
-        .route("/api/onboarding/wifi", post(onboarding_wifi))
         .route("/api/onboarding/complete", post(onboarding_complete))
         .route("/api/status", get(status))
         .route("/api/update", post(start_update))
-        .route("/api/reboot", post(start_reboot))
+        .route("/api/reboot", post(network_managed_by_openwrt))
         .route("/api/mode", post(set_mode))
         .route(
             "/api/servers",
             axum::routing::put(update_server).delete(delete_server),
         )
         .route("/api/servers/import", post(import_server))
-        .route("/api/servers/probe", post(probe_server))
-        .route("/api/servers/bootstrap", post(bootstrap_server))
-        .route("/api/servers/check", post(check_managed_server))
-        .route("/api/servers/update-managed", post(update_managed_server))
-        .route("/api/servers/create-profile", post(create_managed_profile))
-        .route("/api/servers/management", post(managed_server_status))
-        .route("/api/servers/restart", post(restart_managed_server))
+        .route("/api/servers/probe", post(managed::probe_server))
+        .route("/api/servers/bootstrap", post(managed::bootstrap_server))
+        .route("/api/servers/check", post(managed::check_managed_server))
+        .route(
+            "/api/servers/update-managed",
+            post(managed::update_managed_server),
+        )
+        .route(
+            "/api/servers/create-profile",
+            post(managed::create_managed_profile),
+        )
+        .route(
+            "/api/servers/management",
+            post(managed::managed_server_status),
+        )
+        .route(
+            "/api/servers/restart",
+            post(managed::restart_managed_server),
+        )
         .route(
             "/api/servers/friends",
-            post(create_friend).put(rename_friend).delete(revoke_friend),
+            post(managed::create_friend)
+                .put(managed::rename_friend)
+                .delete(managed::revoke_friend),
         )
-        .route("/api/servers/friends/profile", post(friend_profile))
+        .route(
+            "/api/servers/friends/profile",
+            post(managed::friend_profile),
+        )
         .route("/api/servers/select", post(select_server))
-        .route("/api/ap", post(update_ap))
+        .route("/api/ap", post(network_managed_by_openwrt))
+        .route("/api/onboarding/wifi", post(network_managed_by_openwrt))
         .route("/api/routing", post(update_routing))
         .route("/api/routing/test", post(test_routing))
 }
 
-pub(crate) fn redirect_router() -> Router {
-    Router::new().fallback(any(redirect))
+pub(crate) fn redirect_router(state: AppState) -> Router {
+    Router::new().fallback(any(redirect)).with_state(state)
 }
 
-async fn redirect(uri: Uri) -> Response {
-    let location = format!("https://wifi.gofro.net{uri}");
+async fn redirect(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Response {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    if !matches!(host, Some(value) if value == format!("{}:8081", state.lan.address) || value == format!("{}:8081", crate::model::AP_DOMAIN))
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let location = format!(
+        "https://{}:{}{}",
+        state.lan.address,
+        state.https_listen.port(),
+        uri.path_and_query()
+            .map(|value| value.as_str())
+            .unwrap_or("/")
+    );
     (
         StatusCode::TEMPORARY_REDIRECT,
         [(header::LOCATION, location)],
@@ -126,173 +160,48 @@ async fn redirect(uri: Uri) -> Response {
 #[derive(Serialize)]
 struct Health {
     version: &'static str,
+    degraded: bool,
     dns_active: bool,
     dataplane_active: bool,
     vpn_enabled: bool,
     tunnel_active: bool,
     handshake_age_seconds: Option<u64>,
 }
+
+impl IntoResponse for Health {
+    fn into_response(self) -> Response {
+        let status = if self.degraded {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::OK
+        };
+        (status, Json(self)).into_response()
+    }
+}
 pub(crate) fn health_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .with_state(state)
 }
-async fn health(State(state): State<AppState>) -> Result<Json<Health>, ApiError> {
+async fn health(State(state): State<AppState>) -> Result<Health, ApiError> {
     let status = load_status(&state).map_err(ApiError)?;
-    Ok(Json(Health {
+    Ok(Health {
         version: status.version,
+        degraded: status.routing.degraded,
         dns_active: status.routing.dns_active,
         dataplane_active: status.routing.dataplane_active,
         vpn_enabled: status.vpn_enabled,
         tunnel_active: status.tunnel_active,
         handshake_age_seconds: status.peer.and_then(|peer| peer.handshake_age_seconds),
-    }))
-}
-
-async fn index() -> impl IntoResponse {
-    ([(header::CACHE_CONTROL, "no-store")], Html(UI))
-}
-
-async fn javascript(uri: Uri, headers: HeaderMap) -> Response {
-    asset_response(
-        &uri,
-        &headers,
-        "application/javascript; charset=utf-8",
-        UI_JS_HASH,
-        UI_JS,
-        UI_JS_GZIP,
-    )
-}
-
-async fn stylesheet(uri: Uri, headers: HeaderMap) -> Response {
-    asset_response(
-        &uri,
-        &headers,
-        "text/css; charset=utf-8",
-        UI_CSS_HASH,
-        UI_CSS,
-        UI_CSS_GZIP,
-    )
-}
-
-async fn chart(uri: Uri, headers: HeaderMap) -> Response {
-    asset_response(
-        &uri,
-        &headers,
-        "application/javascript; charset=utf-8",
-        UI_CHART_HASH,
-        UI_CHART,
-        UI_CHART_GZIP,
-    )
-}
-
-fn asset_response(
-    uri: &Uri,
-    headers: &HeaderMap,
-    content_type: &'static str,
-    fingerprint: &str,
-    identity: &'static [u8],
-    gzip: &'static [u8],
-) -> Response {
-    let requested_fingerprint = uri.query().and_then(|query| query.strip_prefix("v="));
-    let stale = requested_fingerprint.is_some_and(|requested| requested != fingerprint);
-    let encoding = preferred_encoding(headers);
-    let compressed = encoding == Some(AssetEncoding::Gzip);
-    let mut response = Response::new(if stale || encoding.is_none() {
-        Body::empty()
-    } else {
-        Body::from(if compressed { gzip } else { identity })
-    });
-    *response.status_mut() = if stale {
-        StatusCode::NOT_FOUND
-    } else if encoding.is_none() {
-        StatusCode::NOT_ACCEPTABLE
-    } else {
-        StatusCode::OK
-    };
-    let response_headers = response.headers_mut();
-    response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    response_headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static(
-            if requested_fingerprint == Some(fingerprint) && encoding.is_some() {
-                "public, max-age=31536000, immutable"
-            } else {
-                "no-store"
-            },
-        ),
-    );
-    response_headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
-    if !stale && encoding.is_some() && compressed {
-        response_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-    }
-    response
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum AssetEncoding {
-    Identity,
-    Gzip,
-}
-
-fn preferred_encoding(headers: &HeaderMap) -> Option<AssetEncoding> {
-    if !headers.contains_key(header::ACCEPT_ENCODING) {
-        return Some(AssetEncoding::Identity);
-    }
-    let mut gzip_quality: Option<u16> = None;
-    let mut identity_quality: Option<u16> = None;
-    let mut wildcard_quality: Option<u16> = None;
-    for value in headers.get_all(header::ACCEPT_ENCODING) {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        for coding in value.split(',') {
-            let mut parts = coding.split(';');
-            let encoding = parts.next().unwrap_or_default().trim();
-            let mut quality = 1000;
-            for parameter in parts {
-                let Some((name, value)) = parameter.split_once('=') else {
-                    continue;
-                };
-                if name.trim().eq_ignore_ascii_case("q") {
-                    quality = parse_quality(value.trim()).unwrap_or(0);
-                }
-            }
-            if encoding.eq_ignore_ascii_case("gzip") {
-                gzip_quality = Some(gzip_quality.unwrap_or(0).max(quality));
-            } else if encoding.eq_ignore_ascii_case("identity") {
-                identity_quality = Some(identity_quality.unwrap_or(0).max(quality));
-            } else if encoding == "*" {
-                wildcard_quality = Some(wildcard_quality.unwrap_or(0).max(quality));
-            }
-        }
-    }
-    let gzip_quality = gzip_quality.or(wildcard_quality).unwrap_or(0);
-    let identity_quality =
-        identity_quality.unwrap_or_else(|| if wildcard_quality == Some(0) { 0 } else { 1000 });
-    if gzip_quality == 0 && identity_quality == 0 {
-        None
-    } else if gzip_quality >= identity_quality {
-        Some(AssetEncoding::Gzip)
-    } else {
-        Some(AssetEncoding::Identity)
-    }
-}
-
-fn parse_quality(value: &str) -> Option<u16> {
-    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
-    if fraction.len() > 3 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    match whole {
-        "0" => Some(fraction.parse().unwrap_or(0) * 10_u16.pow(3 - fraction.len() as u32)),
-        "1" if fraction.bytes().all(|byte| byte == b'0') => Some(1000),
-        _ => None,
-    }
+    })
 }
 
 async fn status(State(state): State<AppState>) -> Result<Json<AgentStatus>, ApiError> {
-    run_blocking(state, |_| Ok(())).await
+    tokio::task::spawn_blocking(move || load_status(&state).map(Json))
+        .await
+        .context("status task failed")
+        .map_err(ApiError)?
+        .map_err(ApiError)
 }
 
 async fn onboarding_status(
@@ -304,16 +213,6 @@ async fn onboarding_status(
         .map_err(ApiError)?
         .map_err(|_| ApiError(anyhow!("onboarding unavailable")))
 }
-async fn onboarding_wifi(
-    State(state): State<AppState>,
-    Json(input): Json<onboarding::WifiInput>,
-) -> Response {
-    match tokio::task::spawn_blocking(move || onboarding::submit_wifi(&state, input)).await {
-        Ok(Ok(status)) => Json(status).into_response(),
-        Ok(Err(error)) if error.to_string() == "setup_closed" => onboarding_error("setup_closed"),
-        _ => onboarding_error("onboarding_rejected"),
-    }
-}
 async fn onboarding_complete(
     State(state): State<AppState>,
 ) -> Result<Json<onboarding::Status>, ApiError> {
@@ -323,11 +222,10 @@ async fn onboarding_complete(
         .map_err(ApiError)?
         .map_err(|_| ApiError(anyhow!("onboarding completion rejected")))
 }
-fn onboarding_error(code: &'static str) -> Response {
+async fn network_managed_by_openwrt() -> Response {
     (
-        StatusCode::FORBIDDEN,
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(serde_json::json!({"error": code})),
+        StatusCode::GONE,
+        Json(serde_json::json!({"error":"network_managed_by_openwrt"})),
     )
         .into_response()
 }
@@ -337,46 +235,6 @@ async fn start_update(
     Json(_): Json<UpdateInput>,
 ) -> Result<Json<AgentStatus>, ApiError> {
     run_blocking(state, |_| queue_update()).await
-}
-
-async fn start_reboot() -> Response {
-    if Path::new(UPDATE_LOCK).exists() || Path::new(UPDATE_TRIGGER).exists() {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error":"update_running"})),
-        )
-            .into_response();
-    }
-    match tokio::task::spawn_blocking(|| {
-        Command::new(SERVICE_COMMAND)
-            .args(["reboot", "router"])
-            .status()
-    })
-    .await
-    {
-        Ok(Ok(status)) if status.success() => (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({"rebooting":true})),
-        )
-            .into_response(),
-        Ok(Ok(_status)) if Path::new(UPDATE_LOCK).exists() => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error":"update_running"})),
-        )
-            .into_response(),
-        Ok(Ok(status)) => {
-            warn!(?status, "reboot helper rejected request");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-        Ok(Err(error)) => {
-            warn!(%error, "failed to start reboot helper");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-        Err(error) => {
-            warn!(%error, "reboot task failed");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
 }
 
 async fn set_mode(
@@ -407,248 +265,6 @@ async fn import_server(
     input.name = input.name.trim().to_owned();
     run_blocking(state, move |state| {
         controller::import_server(state, input.name, input.profile)
-    })
-    .await
-}
-
-#[derive(serde::Deserialize)]
-struct ProbeInput {
-    host: String,
-    port: u16,
-}
-#[derive(serde::Deserialize)]
-struct BootstrapInput {
-    name: String,
-    host: String,
-    port: u16,
-    password: String,
-    host_key: String,
-}
-#[derive(Serialize)]
-struct ProbeResult {
-    host: String,
-    port: u16,
-    host_key: String,
-    fingerprint: String,
-}
-#[derive(Serialize)]
-struct ManagedVersion {
-    version: String,
-    update_available: bool,
-}
-#[derive(Serialize)]
-struct CreatedProfile {
-    profile: String,
-}
-
-#[derive(serde::Deserialize)]
-struct CreateFriendInput {
-    public_key: String,
-    name: String,
-}
-
-#[derive(serde::Deserialize)]
-struct RenameFriendInput {
-    public_key: String,
-    peer_key: String,
-    name: String,
-}
-
-#[derive(serde::Deserialize)]
-struct FriendProfileInput {
-    public_key: String,
-    peer_key: String,
-}
-
-#[derive(Serialize)]
-struct FriendProfile {
-    profile: String,
-}
-
-async fn probe_server(Json(input): Json<ProbeInput>) -> Result<Json<ProbeResult>, ApiError> {
-    tokio::task::spawn_blocking(move || {
-        crate::managed::probe(input.host.trim().to_owned(), input.port)
-    })
-    .await
-    .context("probe task failed")
-    .map_err(ApiError)?
-    .map(|probe| {
-        Json(ProbeResult {
-            host: probe.host,
-            port: probe.port,
-            host_key: probe.host_key,
-            fingerprint: probe.fingerprint,
-        })
-    })
-    .map_err(ApiError)
-}
-
-async fn bootstrap_server(
-    State(state): State<AppState>,
-    Json(input): Json<BootstrapInput>,
-) -> Result<Json<AgentStatus>, ApiError> {
-    run_blocking(state, move |state| {
-        crate::managed::bootstrap(
-            state,
-            input.name.trim().to_owned(),
-            input.host.trim().to_owned(),
-            input.port,
-            input.password,
-            input.host_key.trim().to_owned(),
-        )
-    })
-    .await
-}
-
-async fn check_managed_server(
-    State(state): State<AppState>,
-    Json(input): Json<ServerKeyInput>,
-) -> Result<Json<ManagedVersion>, ApiError> {
-    managed_version(state, input.public_key).await
-}
-
-async fn update_managed_server(
-    State(state): State<AppState>,
-    Json(input): Json<ServerKeyInput>,
-) -> Result<Json<ManagedVersion>, ApiError> {
-    tokio::task::spawn_blocking(move || crate::managed::update(&state, input.public_key.trim()))
-        .await
-        .context("managed update task failed")
-        .map_err(ApiError)?
-        .map(|version| {
-            Json(ManagedVersion {
-                version: version.version,
-                update_available: version.update_available,
-            })
-        })
-        .map_err(ApiError)
-}
-
-async fn managed_version(
-    state: AppState,
-    public_key: String,
-) -> Result<Json<ManagedVersion>, ApiError> {
-    tokio::task::spawn_blocking(move || crate::managed::check(&state, public_key.trim()))
-        .await
-        .context("managed check task failed")
-        .map_err(ApiError)?
-        .map(|version| {
-            Json(ManagedVersion {
-                version: version.version,
-                update_available: version.update_available,
-            })
-        })
-        .map_err(ApiError)
-}
-
-async fn create_managed_profile(
-    State(state): State<AppState>,
-    Json(input): Json<ServerKeyInput>,
-) -> Result<Json<CreatedProfile>, ApiError> {
-    tokio::task::spawn_blocking(move || {
-        crate::managed::create_profile(&state, input.public_key.trim())
-    })
-    .await
-    .context("create profile task failed")
-    .map_err(ApiError)?
-    .map(|profile| Json(CreatedProfile { profile }))
-    .map_err(ApiError)
-}
-
-async fn managed_server_status(
-    State(state): State<AppState>,
-    Json(input): Json<ServerKeyInput>,
-) -> Result<Json<wireguard_status::managed::ManagedServerStatus>, ApiError> {
-    managed_status(state, input.public_key).await
-}
-
-async fn restart_managed_server(
-    State(state): State<AppState>,
-    Json(input): Json<ServerKeyInput>,
-) -> Result<Json<wireguard_status::managed::ManagedServerStatus>, ApiError> {
-    tokio::task::spawn_blocking(move || crate::managed::restart(&state, input.public_key.trim()))
-        .await
-        .context("managed restart task failed")
-        .map_err(ApiError)?
-        .map(Json)
-        .map_err(ApiError)
-}
-
-async fn create_friend(
-    State(state): State<AppState>,
-    Json(input): Json<CreateFriendInput>,
-) -> Result<Json<wireguard_status::managed::ManagedServerStatus>, ApiError> {
-    tokio::task::spawn_blocking(move || {
-        crate::managed::create_friend(&state, &input.public_key, &input.name)
-    })
-    .await
-    .context("create friend task failed")
-    .map_err(ApiError)?
-    .map(Json)
-    .map_err(ApiError)
-}
-
-async fn rename_friend(
-    State(state): State<AppState>,
-    Json(input): Json<RenameFriendInput>,
-) -> Result<Json<wireguard_status::managed::ManagedServerStatus>, ApiError> {
-    tokio::task::spawn_blocking(move || {
-        crate::managed::rename_friend(&state, &input.public_key, &input.peer_key, &input.name)
-    })
-    .await
-    .context("rename friend task failed")
-    .map_err(ApiError)?
-    .map(Json)
-    .map_err(ApiError)
-}
-
-async fn revoke_friend(
-    State(state): State<AppState>,
-    Json(input): Json<FriendProfileInput>,
-) -> Result<Json<wireguard_status::managed::ManagedServerStatus>, ApiError> {
-    tokio::task::spawn_blocking(move || {
-        crate::managed::revoke_friend(&state, &input.public_key, &input.peer_key)
-    })
-    .await
-    .context("revoke friend task failed")
-    .map_err(ApiError)?
-    .map(Json)
-    .map_err(ApiError)
-}
-
-async fn friend_profile(
-    State(state): State<AppState>,
-    Json(input): Json<FriendProfileInput>,
-) -> Result<Json<FriendProfile>, ApiError> {
-    tokio::task::spawn_blocking(move || {
-        crate::managed::friend_profile(&state, &input.public_key, &input.peer_key)
-    })
-    .await
-    .context("friend profile task failed")
-    .map_err(ApiError)?
-    .map(|profile| Json(FriendProfile { profile }))
-    .map_err(ApiError)
-}
-
-async fn managed_status(
-    state: AppState,
-    public_key: String,
-) -> Result<Json<wireguard_status::managed::ManagedServerStatus>, ApiError> {
-    tokio::task::spawn_blocking(move || crate::managed::status(&state, public_key.trim()))
-        .await
-        .context("managed status task failed")
-        .map_err(ApiError)?
-        .map(Json)
-        .map_err(ApiError)
-}
-
-async fn update_ap(
-    State(state): State<AppState>,
-    Json(mut input): Json<ApInput>,
-) -> Result<Json<AgentStatus>, ApiError> {
-    input.ssid = input.ssid.trim().to_owned();
-    run_blocking(state, move |state| {
-        controller::update_access_point(state, input)
     })
     .await
 }
@@ -704,7 +320,9 @@ where
 {
     let result = tokio::task::spawn_blocking(move || {
         operation(&state)?;
-        load_status(&state).map(Json)
+        load_status(&state)
+            .map(Json)
+            .context(crate::managed::CommittedRefreshFailed)
     })
     .await
     .context("controller task failed")
@@ -724,18 +342,11 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
     } else {
         None
     };
-    let readings = wifi::devices(&state.wifi_interface);
-    let networks = state
-        .access_points
-        .lock()
-        .map_err(|_| anyhow!("access point lock poisoned"))?
-        .clone();
-    let ap_ssid = networks[0].ssid.clone();
-    let (stats, history, devices) = state
+    let (stats, history) = state
         .stats
         .lock()
         .map_err(|_| anyhow!("statistics lock poisoned"))?
-        .sample(stats::interface_traffic(&state.lan_interface), readings);
+        .sample(stats::interface_traffic(&state.interface).unwrap_or_default());
 
     Ok(AgentStatus {
         version: env!("CARGO_PKG_VERSION"),
@@ -745,16 +356,9 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
         interface: state.interface.clone(),
         active_server_key: config.active_server_key,
         servers: config.servers.iter().map(ServerStatus::from).collect(),
-        ap: ApStatus {
-            ssid: ap_ssid,
-            networks,
-            address: AP_ADDRESS,
-            domain: AP_DOMAIN,
-        },
         peer,
         stats,
         history,
-        devices,
         routing: RoutingStatus {
             config: config.routing,
             dns_active: state.fake_dns.is_active(),
@@ -764,59 +368,7 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
             dataplane_active: dataplane::is_installed(),
             degraded: state.routing_degraded.load(Ordering::Relaxed),
         },
-        router_info: router_info(),
     })
-}
-
-fn router_info() -> RouterInfo {
-    let model = read_small("/tmp/sysinfo/model")
-        .and_then(|value| nonempty(value.trim_matches(['\0', ' ', '\t', '\r', '\n'])))
-        .or_else(|| {
-            read_small("/proc/device-tree/model")
-                .and_then(|value| nonempty(value.trim_matches(['\0', ' ', '\t', '\r', '\n'])))
-        });
-    let openwrt = read_small("/etc/openwrt_release")
-        .and_then(|value| parse_release(&value, "DISTRIB_ID", "DISTRIB_RELEASE"));
-    let os =
-        read_small("/etc/os-release").and_then(|value| parse_release(&value, "NAME", "VERSION_ID"));
-    let (os_name, os_version) = openwrt.or(os).unwrap_or((None, None));
-    RouterInfo {
-        model,
-        os_name,
-        os_version,
-    }
-}
-
-fn read_small(path: &str) -> Option<String> {
-    let metadata = fs::metadata(path).ok()?;
-    (metadata.len() <= 4096)
-        .then(|| fs::read_to_string(path).ok())
-        .flatten()
-}
-
-fn parse_release(
-    value: &str,
-    name_key: &str,
-    version_key: &str,
-) -> Option<(Option<String>, Option<String>)> {
-    let mut name = None;
-    let mut version = None;
-    for line in value.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let value = value.trim().trim_matches(['\'', '"']);
-        if key == name_key {
-            name = nonempty(value)
-        } else if key == version_key {
-            version = nonempty(value)
-        }
-    }
-    (name.is_some() || version.is_some()).then_some((name, version))
-}
-
-fn nonempty(value: &str) -> Option<String> {
-    (!value.is_empty() && !value.chars().any(char::is_control)).then(|| value.to_owned())
 }
 
 fn queue_update() -> Result<()> {
@@ -856,104 +408,80 @@ fn update_status() -> UpdateStatus {
 mod tests {
     use super::*;
 
-    #[test]
-    fn serves_versioned_compressed_assets_with_safe_caching() {
-        let uri = "/app.js?v=current".parse().unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::ACCEPT_ENCODING,
-            HeaderValue::from_static("br, gzip"),
-        );
-        let response = asset_response(
-            &uri,
-            &headers,
-            "application/javascript",
-            "current",
-            b"identity",
-            b"gzip",
-        );
-        assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
-        assert_eq!(
-            response.headers()[header::CACHE_CONTROL],
-            "public, max-age=31536000, immutable"
-        );
-        assert_eq!(response.headers()[header::VARY], "Accept-Encoding");
+    #[tokio::test]
+    async fn committed_write_observation_failure_is_additive_and_never_replayed() {
+        use std::sync::{Arc, atomic::AtomicUsize};
+        let fixture = crate::managed::tests::Fixture::new();
+        let config = fixture.state.config.clone();
+        // Fail load_status before it can inspect any real interface or service.
+        let _ = std::thread::spawn(move || {
+            let _guard = config.lock().unwrap();
+            panic!("poison status configuration for test");
+        })
+        .join();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let committed = writes.clone();
+        let response = run_blocking(fixture.state.clone(), move |_| {
+            committed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .err()
+        .unwrap()
+        .into_response();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["outcome"], "committed");
+        assert!(!body["error"].as_str().unwrap().contains("poisoned"));
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
 
-        headers.insert(
-            header::ACCEPT_ENCODING,
-            HeaderValue::from_static("gzip;q=0, *;q=1"),
-        );
-        let response = asset_response(
-            &"/app.js?v=old".parse().unwrap(),
-            &headers,
-            "application/javascript",
-            "current",
-            b"identity",
-            b"gzip",
-        );
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-
-        headers.insert(
-            header::ACCEPT_ENCODING,
-            HeaderValue::from_static("gzip;q=0.1, identity;q=1"),
-        );
-        let response = asset_response(
-            &uri,
-            &headers,
-            "application/javascript",
-            "current",
-            b"identity",
-            b"gzip",
-        );
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
-
-        headers.insert(
-            header::ACCEPT_ENCODING,
-            HeaderValue::from_static("gzip;q=0, identity;q=0"),
-        );
-        let response = asset_response(
-            &uri,
-            &headers,
-            "application/javascript",
-            "current",
-            b"identity",
-            b"gzip",
-        );
-        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        for response in [
+            run_blocking(fixture.state.clone(), |_| Err(anyhow!("write rejected")))
+                .await
+                .err()
+                .unwrap()
+                .into_response(),
+            status(State(fixture.state.clone()))
+                .await
+                .err()
+                .unwrap()
+                .into_response(),
+        ] {
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(body.get("outcome").is_none());
+        }
     }
 
     #[test]
-    fn parses_release_files_without_executing_them() {
-        assert_eq!(
-            parse_release("NAME=Gofro\nVERSION_ID=1.2\n", "NAME", "VERSION_ID"),
-            Some((Some("Gofro".into()), Some("1.2".into())))
-        );
-        assert_eq!(
-            parse_release(
-                "DISTRIB_ID='OpenWrt'\nDISTRIB_RELEASE=24.10\n",
-                "DISTRIB_ID",
-                "DISTRIB_RELEASE"
-            ),
-            Some((Some("OpenWrt".into()), Some("24.10".into())))
-        );
-        assert_eq!(
-            parse_release("NAME=$EVIL\n", "NAME", "VERSION_ID"),
-            Some((Some("$EVIL".into()), None))
-        );
-    }
-
-    #[test]
-    fn friend_request_bodies_require_only_the_fields_the_route_uses() {
-        let create: CreateFriendInput =
-            serde_json::from_str(r#"{"public_key":"server","name":"Friend"}"#).unwrap();
-        assert_eq!(create.name, "Friend");
-        assert!(
-            serde_json::from_str::<RenameFriendInput>(r#"{"public_key":"server","name":"Friend"}"#)
-                .is_err()
-        );
+    fn degraded_routing_is_not_healthy_even_with_live_services() {
+        for degraded in [false, true] {
+            let health = Health {
+                version: env!("CARGO_PKG_VERSION"),
+                degraded,
+                dns_active: true,
+                dataplane_active: true,
+                vpn_enabled: true,
+                tunnel_active: true,
+                handshake_age_seconds: Some(1),
+            };
+            assert_eq!(serde_json::to_value(&health).unwrap()["degraded"], degraded);
+            assert_eq!(
+                health.into_response().status(),
+                if degraded {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::OK
+                }
+            );
+        }
     }
 }

@@ -154,11 +154,11 @@ impl Store {
         let key = (domain.to_owned(), real);
         let expires = unix_time()? + i64::from(ttl.clamp(30, 3600)) + 300;
         if let Some(lease) = self.leases.get_mut(&key) {
-            lease.expires = expires;
             self.connection.execute(
                 "UPDATE fake_dns SET expires = ?1 WHERE fake = ?2",
                 params![expires, i64::from(u32::from(lease.mapping.fake))],
             )?;
+            lease.expires = expires;
             return Ok((lease.mapping, false));
         }
 
@@ -329,6 +329,27 @@ mod tests {
         assert_eq!(
             store.expired_at(expires + CONNECTION_GRACE_SECONDS),
             vec![mapping]
+        );
+    }
+
+    #[test]
+    fn failed_expiry_delete_preserves_rollback_mapping_and_lease() {
+        let mut store = Store::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let (mapping, _) = store
+            .allocate(
+                "vpn.example",
+                "8.8.8.8".parse().unwrap(),
+                RouteTarget::Vpn,
+                60,
+            )
+            .unwrap();
+        store.connection.execute_batch("CREATE TRIGGER refuse_delete BEFORE DELETE ON fake_dns BEGIN SELECT RAISE(FAIL, 'read only'); END;").unwrap();
+        let expired = store.expired_at(i64::MAX);
+        assert!(store.remove_mappings(&expired).is_err());
+        assert_eq!(store.expired_at(i64::MAX), vec![mapping]);
+        assert_eq!(
+            crate::dataplane::effective_target(expired[0].target, false),
+            RouteTarget::Direct
         );
     }
 }

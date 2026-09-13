@@ -1,45 +1,29 @@
 <script lang="ts">
-  import RouterIcon from "lucide-svelte/icons/router";
   import RefreshCw from "lucide-svelte/icons/refresh-cw";
   import { getAppContext } from "../app-context";
-  import { formatDuration } from "../format";
   import { appearance, setTheme, type Theme } from "../stores/theme.svelte";
   import Dialog from "../components/dialog.svelte";
   const app = getAppContext();
   const status = $derived(app.status);
-  const routerInfo = $derived(status.router_info);
-  const operatingSystem = $derived(routerInfo?.os_name === "OpenWrt" ? routerInfo.os_version || "Не определена" : [routerInfo?.os_name, routerInfo?.os_version].filter(Boolean).join(" ") || "Не определена");
   const themes: { value: Theme; label: string }[] = [{ value: "light", label: "Светлая" }, { value: "dark", label: "Тёмная" }, { value: "system", label: "Системная" }];
-  let confirm = $state<"update" | "reboot" | null>(null);
-  let restarting = $state(false);
-  const updateMessage = $derived(status.update.running ? "Загружаем и устанавливаем обновление. Панель может ненадолго отключиться." : status.update.result === "updated" ? `Установлена версия ${status.version}.` : status.update.result === "current" ? "Установлена последняя версия." : status.update.result === "failed" ? "Не удалось обновить. Проверьте интернет и попробуйте снова." : "");
+  let confirm = $state(false);
+  const updateMessage = $derived(status.update.running ? "Загружаем и устанавливаем обновление. Панель может ненадолго отключиться." : status.update.result === "current" ? "Обновлений нет." : status.update.result === "failed" ? "Не удалось обновить. Проверьте интернет и попробуйте снова." : "");
 
   async function perform() {
     if (app.busy) return;
-    if (confirm === "reboot") {
-      if (await app.rebootRouter()) { confirm = null; restarting = true; }
-    } else {
-      await app.startUpdate();
-      if (!app.actionError) confirm = null;
-    }
+    await app.startUpdate();
+    if (!app.actionError) confirm = false;
   }
 </script>
 
-<svelte:head><title>Система · GofroRouter</title></svelte:head>
-{#if restarting}
-  <section class="panel p-6" role="status"><h2>Роутер перезагружается</h2><p class="support-text">Интернет и Wi-Fi временно отключатся. Дождитесь своей сети и подключитесь заново. После перезагрузки потребуется войти в панель.</p><button class="btn primary mt-5" type="button" onclick={app.initializeAuth}>Проверить подключение</button></section>
-{:else}
-  <div class="system-grid system-summary-grid">
-    <section class="panel"><div class="panel-head"><h2>Домашний роутер</h2><RouterIcon class="icon" /></div><div class="panel-body"><dl class="key-values"><div><dt>Модель роутера</dt><dd>{routerInfo?.model || "Не определена"}</dd></div><div><dt>{routerInfo?.os_name === "OpenWrt" ? "Версия OpenWrt" : "Версия ОС"}</dt><dd>{operatingSystem}</dd></div><div><dt>Без перезагрузки</dt><dd>{formatDuration(status.stats.uptime_seconds)}</dd></div><div><dt>Адрес панели</dt><dd class="mono">{status.ap.domain || "Нет данных"}</dd></div></dl></div></section>
-    <section class="panel"><div class="panel-head"><h2>Обновления</h2></div><div class="panel-body"><div class="version">{status.version}</div><button class="btn" type="button" disabled={app.busy || status.update.running} onclick={() => { app.clearActionError(); confirm = "update"; }}><RefreshCw class={status.update.running ? "icon animate-spin" : "icon"} />{status.update.running ? "Обновляем…" : "Проверить обновления"}</button><p class="small muted mt-[13px]" role="status">{updateMessage}</p></div></section>
-  </div>
-  <section class="panel theme-settings"><h2>Оформление</h2><div class="segmented theme-picker" role="group" aria-label="Оформление панели">{#each themes as theme (theme.value)}<button type="button" aria-pressed={appearance.theme === theme.value} onclick={() => setTheme(theme.value)}>{theme.label}</button>{/each}</div></section>
-  <section class="panel"><div class="full-row"><div class="row-main"><h3>Перезагрузка</h3></div><button class="btn" type="button" disabled={app.busy || status.update.running} onclick={() => { app.clearActionError(); confirm = "reboot"; }}>Перезагрузить</button></div><div class="full-row"><div class="row-main"><h3>Вход в панель</h3></div><button class="btn ghost" type="button" disabled={app.busy} onclick={app.logoutAuth}>Выйти</button></div></section>
-{/if}
+<svelte:head><title>Панель · Gofro VPN</title></svelte:head>
+<section class="panel"><div class="panel-head"><h2>Обновления Gofro</h2></div><div class="panel-body"><div class="version">{status.version}</div><button class="btn" type="button" disabled={app.busy || status.update.running} onclick={() => { app.clearActionError(); confirm = true; }}><RefreshCw class={status.update.running ? "icon animate-spin" : "icon"} />{status.update.running ? "Обновляем…" : "Проверить обновления"}</button>{#if updateMessage}<p class="small muted mt-[13px]" role="status">{updateMessage}</p>{/if}</div></section>
+<section class="panel theme-settings"><h2>Оформление</h2><div class="segmented theme-picker" role="group" aria-label="Оформление панели">{#each themes as theme (theme.value)}<button type="button" aria-pressed={appearance.theme === theme.value} onclick={() => setTheme(theme.value)}>{theme.label}</button>{/each}</div></section>
+<section class="panel"><div class="full-row"><div class="row-main"><h3>Вход в панель</h3></div><button class="btn ghost" type="button" disabled={app.busy} onclick={app.logoutAuth}>Выйти</button></div></section>
 {#if confirm}
-  <Dialog title={confirm === "reboot" ? "Перезагрузить роутер?" : "Проверить и установить обновление?"} onclose={() => confirm = null} busy={app.busy}>
-    <p class="dialog-intro">{confirm === "reboot" ? "Интернет и Wi-Fi временно отключатся. Настройки сохранятся." : "Если доступна новая версия, роутер проверит её подпись и установит обновление. Панель может временно отключиться."}</p>
-    <div class="form-actions"><button class="btn ghost" type="button" disabled={app.busy} onclick={() => confirm = null}>Отмена</button><button class="btn primary" type="button" disabled={app.busy} onclick={perform}>{app.busy ? "Выполняем…" : confirm === "reboot" ? "Перезагрузить" : "Проверить и обновить"}</button></div>
+  <Dialog title="Проверить и установить обновление?" onclose={() => confirm = false} busy={app.busy}>
+    <p class="dialog-intro">Если доступна новая версия, Gofro проверит её подпись и установит обновление. Панель может временно отключиться.</p>
+    <div class="form-actions"><button class="btn ghost" type="button" disabled={app.busy} onclick={() => confirm = false}>Отмена</button><button class="btn primary" type="button" disabled={app.busy} onclick={perform}>{app.busy ? "Выполняем…" : "Проверить и обновить"}</button></div>
     {#if app.actionError}<p class="error" role="alert">{app.actionError}</p>{/if}
   </Dialog>
 {/if}

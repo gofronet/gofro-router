@@ -4,6 +4,7 @@
   import Plus from "lucide-svelte/icons/plus";
   import Search from "lucide-svelte/icons/search";
   import Dialog from "../components/dialog.svelte";
+  import { routingNameInputSchema } from "../api/schemas";
   import type { RouteTarget, RoutingConfig, RoutingTest } from "../domain/models";
   import { getAppContext } from "../app-context";
   import { cloneRules, packRules, reorderRules, type DraftRule } from "./routing-rules";
@@ -27,6 +28,7 @@
   let query = $state("");
   let filter = $state<RouteTarget | "all">("all");
   let editor = $state<Editor>(null);
+  let nameError = $state("");
   let deleting = $state<DraftRule | null>(null);
   let saving = $state(false);
   let saved = $state("");
@@ -53,7 +55,7 @@
     saving = true; saved = "";
     const ok = await app.saveRouting($state.snapshot(config()));
     saving = false;
-    if (ok) { saved = "Сохранено"; return true; }
+    if (ok) { saved = app.actionWarning ? "" : "Сохранено"; return true; }
     draft = previous;
     return false;
   }
@@ -68,7 +70,7 @@
     const previous = defaultTarget; defaultTarget = next;
     if (!(await persist())) defaultTarget = previous;
   }
-  function openNew() { editor = { index: draft.length, rule: { key: key(), kind: "domain", name: "", value: "", matcher: "suffix", target: "vpn", enabled: true } }; }
+  function openNew() { nameError = ""; editor = { index: draft.length, rule: { key: key(), kind: "domain", name: "", value: "", matcher: "suffix", target: "vpn", enabled: true } }; }
   function normalize(rule: DraftRule) {
     if (rule.matcher === "exact" || rule.matcher === "suffix") {
       try { const url = new URL(rule.value.includes("://") ? rule.value : `https://${rule.value}`); rule.value = url.hostname.toLowerCase().replace(/\.$/, ""); } catch { /* Backend returns authoritative validation errors. */ }
@@ -82,14 +84,18 @@
   async function saveEditor(event: SubmitEvent) {
     event.preventDefault();
     if (!editor || saving) return;
+    const parsedName = routingNameInputSchema.safeParse(editor.rule.name);
+    if (!parsedName.success) { nameError = parsedName.error.issues[0].message; return; }
+    nameError = "";
     const previous = $state.snapshot(draft);
     const rule = $state.snapshot(editor.rule); normalize(rule);
+    rule.name = parsedName.data;
     const next = [...draft];
     const oldIndex = next.findIndex((item) => item.key === rule.key);
     if (oldIndex >= 0) next.splice(oldIndex, 1);
     next.splice(Math.max(0, Math.min(editor.index, next.length)), 0, rule);
     draft = next;
-    if (await persist(previous)) editor = null;
+    if (await persist(previous)) closeEditor();
   }
   async function toggle(rule: DraftRule) {
     const previous = $state.snapshot(draft); rule.enabled = !rule.enabled; draft = [...draft]; await persist(previous);
@@ -97,7 +103,7 @@
   async function remove() {
     if (!deleting || saving) return;
     const previous = $state.snapshot(draft); draft = draft.filter((rule) => rule.key !== deleting?.key);
-    if (await persist(previous)) { deleting = null; editor = null; }
+    if (await persist(previous)) { deleting = null; closeEditor(); }
   }
   async function move(from: number, to: number, focusKey = draft[from]?.key) {
     if (saving || reorderDisabled || from === to || to < 0 || to >= draft.length) return;
@@ -134,7 +140,7 @@
     testing = true; testError = ""; testResult = null;
     try { testResult = await app.testRouting(testValue.trim()); } catch (error) { testError = error instanceof Error ? error.message : "Не удалось проверить маршрут"; } finally { testing = false; }
   }
-  function closeEditor() { if (!saving) editor = null; }
+  function closeEditor() { if (!saving) { editor = null; nameError = ""; } }
 </script>
 
 <svelte:head><title>Правила VPN · Gofro Router</title></svelte:head>
@@ -168,7 +174,7 @@
         <button class="switch" type="button" role="switch" aria-checked={rule.enabled} aria-label={`Включить правило ${rule.name}`} disabled={saving || app.busy} onclick={() => toggle(rule)}><span class="switch-track"></span></button>
         <div class="row-main"><h3>{rule.name || "Без названия"}</h3><p>{rule.value || "Значение не указано"}</p></div>
         <span class="tag">{targets.find((target) => target.value === rule.target)?.label}</span>
-        <button class="icon-btn" type="button" aria-label={`Изменить ${rule.name}`} disabled={saving || app.busy} onclick={() => editor = { rule: $state.snapshot(rule), index: ruleIndex }}><MoreHorizontal class="icon" /></button>
+        <button class="icon-btn" type="button" aria-label={`Изменить ${rule.name}`} disabled={saving || app.busy} onclick={() => { nameError = ""; editor = { rule: $state.snapshot(rule), index: ruleIndex }; }}><MoreHorizontal class="icon" /></button>
       </article>
     {:else}<div class="empty"><h3>{draft.length ? "Правила не найдены" : "Правил пока нет"}</h3><p>{draft.length ? "Измените запрос или фильтр." : "Добавьте первое правило."}</p></div>{/each}
   </section>
@@ -199,7 +205,11 @@
 {#if editor}
   {@const activeEditor = editor}
   <Dialog title={draft.some((rule) => rule.key === activeEditor.rule.key) ? "Изменить правило" : "Новое правило"} onclose={closeEditor} busy={saving}>
-    <form onsubmit={saveEditor}><label class="field">Название<input bind:value={activeEditor.rule.name} required maxlength="64" placeholder="Например, рабочий сайт" /></label><label class="field">Для чего<select value={activeEditor.rule.matcher} onchange={(event) => setMatcher(event.currentTarget.value)}><option value="suffix">Сайт целиком</option><option value="exact">Только этот адрес</option><option value="geo_site">Список сайтов</option><option value="cidr">IP-адрес или сеть</option><option value="geo_ip">Страна или список адресов</option></select></label><label class="field">Значение<input bind:value={activeEditor.rule.value} required autocapitalize="off" spellcheck="false" placeholder={activeEditor.rule.matcher === "cidr" ? "192.0.2.0/24" : activeEditor.rule.matcher === "geo_ip" ? "ru" : activeEditor.rule.matcher === "geo_site" ? "category-ru" : "example.com"} /><span class="field-help">{matcherOptions[activeEditor.rule.kind].find((item) => item.value === activeEditor.rule.matcher)?.help}</span></label><label class="field">Как открывать<select bind:value={activeEditor.rule.target}>{#each targets as target (target.value)}<option value={target.value}>{target.label}</option>{/each}</select></label><details class="disclosure" style="padding: 0"><summary>Порядок применения</summary><div class="details-content"><label class="field">Позиция в списке<input type="number" min="1" max={draft.length + (draft.some((rule) => rule.key === activeEditor.rule.key) ? 0 : 1)} value={activeEditor.index + 1} onchange={(event) => activeEditor.index = Number(event.currentTarget.value) - 1} /></label></div></details>{#if app.actionError}<p class="error" role="alert">{app.actionError}</p>{/if}<div class="form-actions">{#if draft.some((rule) => rule.key === activeEditor.rule.key)}<button class="btn ghost danger" type="button" disabled={saving} onclick={() => deleting = activeEditor.rule}>Удалить</button>{:else}<span></span>{/if}<button class="btn primary" type="submit" disabled={saving}>{saving ? "Сохраняем…" : "Сохранить"}</button></div></form>
+    <form onsubmit={saveEditor}>
+      <label class="field">Название<input bind:value={activeEditor.rule.name} required aria-invalid={Boolean(nameError)} aria-describedby={nameError ? "routing-name-help routing-name-error" : "routing-name-help"} placeholder="Например, рабочий сайт" /></label>
+      <span class="field-help" id="routing-name-help">От 1 до 64 символов Unicode без управляющих знаков.</span>
+      {#if nameError}<p class="error" id="routing-name-error" role="alert">{nameError}</p>{/if}
+      <label class="field">Для чего<select value={activeEditor.rule.matcher} onchange={(event) => setMatcher(event.currentTarget.value)}><option value="suffix">Сайт целиком</option><option value="exact">Только этот адрес</option><option value="geo_site">Список сайтов</option><option value="cidr">IP-адрес или сеть</option><option value="geo_ip">Страна или список адресов</option></select></label><label class="field">Значение<input bind:value={activeEditor.rule.value} required autocapitalize="off" spellcheck="false" placeholder={activeEditor.rule.matcher === "cidr" ? "192.0.2.0/24" : activeEditor.rule.matcher === "geo_ip" ? "ru" : activeEditor.rule.matcher === "geo_site" ? "category-ru" : "example.com"} /><span class="field-help">{matcherOptions[activeEditor.rule.kind].find((item) => item.value === activeEditor.rule.matcher)?.help}</span></label><label class="field">Как открывать<select bind:value={activeEditor.rule.target}>{#each targets as target (target.value)}<option value={target.value}>{target.label}</option>{/each}</select></label><details class="disclosure" style="padding: 0"><summary>Порядок применения</summary><div class="details-content"><label class="field">Позиция в списке<input type="number" min="1" max={draft.length + (draft.some((rule) => rule.key === activeEditor.rule.key) ? 0 : 1)} value={activeEditor.index + 1} onchange={(event) => activeEditor.index = Number(event.currentTarget.value) - 1} /></label></div></details>{#if app.actionError}<p class="error" role="alert">{app.actionError}</p>{/if}<div class="form-actions">{#if draft.some((rule) => rule.key === activeEditor.rule.key)}<button class="btn ghost danger" type="button" disabled={saving} onclick={() => deleting = activeEditor.rule}>Удалить</button>{:else}<span></span>{/if}<button class="btn primary" type="submit" disabled={saving}>{saving ? "Сохраняем…" : "Сохранить"}</button></div></form>
   </Dialog>
 {/if}
 

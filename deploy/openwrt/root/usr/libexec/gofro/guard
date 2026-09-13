@@ -1,0 +1,90 @@
+#!/bin/sh
+set -eu
+
+die() { echo "gofro guard: $*" >&2; exit 1; }
+valid_device() {
+	case "$1" in ''|*[!A-Za-z0-9_.-]*|????????????????*) die 'invalid LAN device' ;; esac
+}
+normalize() { awk '{$1=$1; if (NF) print}'; }
+
+[ "$#" = 1 ] || exit 2
+case "$1" in boot|prepare|stop) ;; *) exit 2 ;; esac
+[ "$(id -u)" = 0 ] || die 'root required'
+state=${GOFRO_GUARD_DIR:-/etc/gofro}
+helpers=${GOFRO_HELPERS:-/usr/libexec/gofro}
+# Never nest this lock with mode: release it before invoking mode check.
+exec 9>"${GOFRO_MODE_LOCK:-/var/lock/gofro-mode.lock}"
+flock -n 9 || die 'another routing operation is in progress'
+umask 077
+previous=
+if [ -e "$state/guard-device" ] || [ -L "$state/guard-device" ]; then
+	[ ! -L "$state" ] && [ -d "$state" ] &&
+		[ "$(stat -c '%u:%a' "$state")" = 0:700 ] || die 'unsafe guard state directory'
+	[ ! -L "$state/guard-device" ] && [ -f "$state/guard-device" ] &&
+		[ "$(stat -c '%u:%a' "$state/guard-device")" = 0:600 ] || die 'unsafe guard device file'
+	[ "$(wc -c < "$state/guard-device")" -le 16 ] || die 'invalid guard device file'
+	previous="$(cat "$state/guard-device")"
+	valid_device "$previous"
+fi
+
+arm() {
+	# One atomic replacement, including when the table does not exist yet.
+	script="add table inet gofro_guard
+flush table inet gofro_guard
+add chain inet gofro_guard gofro_guard { type filter hook forward priority filter; policy accept; }
+add rule inet gofro_guard gofro_guard iifname \"$1\" oifname != \"$1\" drop"
+	printf '%s\n' "$script" | nft -c -f - || die 'guard check failed'
+	printf '%s\n' "$script" | nft -f - || die 'cannot arm guard'
+}
+
+# No ubus, UCI, Rust, or address dependency when booting or stopping.
+if [ -n "$previous" ]; then arm "$previous"; fi
+case "$1" in
+	boot) [ -n "$previous" ] || die 'missing validated boot device'; exit 0 ;;
+	prepare)
+		snapshot="$("$helpers/network")" || die 'network validation failed'
+		device="$(printf '%s' "$snapshot" | jsonfilter -e '@.device')"
+		valid_device "$device"
+		[ -z "$previous" ] || [ "$previous" = "$device" ] ||
+			die "LAN device change from $previous to $device requires coordinated maintenance"
+		[ -n "$previous" ] || arm "$device"
+		# Persist only the current network helper's validated identity, never a CLI device.
+		[ ! -L "$state" ] || die 'unsafe guard state directory'
+		mkdir -p "$state"
+		chown 0:0 "$state"
+		chmod 700 "$state"
+		tmp="$(mktemp "$state/guard-device.XXXXXX")"
+		trap 'rm -f "$tmp"' EXIT
+		printf '%s\n' "$device" > "$tmp"
+		chown 0:0 "$tmp"
+		chmod 600 "$tmp"
+		mv -f "$tmp" "$state/guard-device"
+		sync
+		printf '%s\n' "$snapshot"
+		exit 0 ;;
+esac
+
+[ -n "$previous" ] || die 'missing validated boot device; cannot safely stop'
+tables="$(nft list tables)" || die 'cannot inspect nft tables'
+printf '%s\n' "$tables" | grep -qx 'table inet gofro_routing' || exit 0
+table="$(nft -s list table inet gofro_routing)" || die 'cannot inspect routing table'
+printf '%s\n' "$table" | grep -q '^[[:space:]]*chain gofro_dns {' || exit 0
+chain="$(nft -s -y list chain inet gofro_routing gofro_dns)" || die 'cannot inspect DNS chain'
+chain="$(printf '%s\n' "$chain" | normalize)"
+base="table inet gofro_routing {
+chain gofro_dns {
+type nat hook prerouting priority -101; policy accept;"
+rules="iifname \"$previous\" udp dport 53 redirect to :5353
+iifname \"$previous\" tcp dport 53 redirect to :5353"
+end='}
+}'
+[ "$chain" = "$base
+$rules
+$end" ] || [ "$chain" = "$base
+$end" ] || die 'refusing foreign gofro_dns chain'
+script='flush chain inet gofro_routing gofro_dns
+delete chain inet gofro_routing gofro_dns'
+printf '%s\n' "$script" | nft -c -f - || die 'DNS cleanup check failed'
+printf '%s\n' "$script" | nft -f - || die 'DNS cleanup failed'
+# No broad conntrack deletion: only new flows are restored without conntrack-tools.
+echo 'gofro guard: new DNS flows use dnsmasq; existing redirected NAT flows remain until conntrack expiry or client tuple renewal' >&2

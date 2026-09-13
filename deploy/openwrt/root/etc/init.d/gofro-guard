@@ -1,0 +1,14 @@
+#!/bin/sh /etc/rc.common
+# shellcheck disable=SC2034
+
+# Before OpenWrt network (START=20); stop/restart must never clear the guard.
+START=18
+STOP=89
+
+start() {
+	"${GOFRO_HELPERS:-/usr/libexec/gofro}/guard" boot
+}
+
+stop() {
+	"${GOFRO_HELPERS:-/usr/libexec/gofro}/guard" boot
+}

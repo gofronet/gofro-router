@@ -137,35 +137,6 @@ impl RoutingPolicy {
             .unwrap_or(self.effective_fallback())
     }
 
-    pub(crate) fn resolver_target(&self, domain: &str) -> RouteTarget {
-        if self.config.mode == RoutingMode::Rules {
-            for reference in self.rule_refs() {
-                match reference {
-                    RuleRef::Domain { index } => {
-                        if let Some(rule) = self.config.domain_rules.get(index)
-                            && rule.enabled
-                            && self.matches_domain(rule, domain)
-                        {
-                            return rule.target;
-                        }
-                    }
-                    // An earlier enabled IP rule may win once an A record is known.
-                    RuleRef::Ip { index }
-                        if self
-                            .config
-                            .ip_rules
-                            .get(index)
-                            .is_some_and(|rule| rule.enabled) =>
-                    {
-                        break;
-                    }
-                    RuleRef::Ip { .. } => {}
-                }
-            }
-        }
-        self.effective_fallback()
-    }
-
     pub(crate) fn effective_fallback(&self) -> RouteTarget {
         if self.config.mode == RoutingMode::All {
             RouteTarget::Vpn
@@ -393,39 +364,5 @@ mod tests {
             policy.test("example.com").unwrap().scope,
             RoutingTestScope::DomainPreview
         ));
-    }
-
-    #[test]
-    fn resolver_uses_a_domain_rule_only_before_ip_rules() {
-        let mut config = RoutingConfig {
-            domain_rules: vec![DomainRule {
-                name: "Direct domain".into(),
-                enabled: true,
-                matcher: DomainMatch::Exact {
-                    value: "example.com".into(),
-                },
-                target: RouteTarget::Direct,
-            }],
-            ip_rules: vec![IpRule {
-                name: "IP".into(),
-                enabled: true,
-                matcher: IpMatch::Cidr {
-                    value: "1.1.1.0/24".into(),
-                },
-                target: RouteTarget::Vpn,
-            }],
-            default_target: RouteTarget::Vpn,
-            mode: RoutingMode::Rules,
-            rule_order: Some(vec![RuleRef::Domain { index: 0 }, RuleRef::Ip { index: 0 }]),
-        };
-        let policy = RoutingPolicy::compile(config.clone(), Arc::new(GeoData::default())).unwrap();
-        assert_eq!(policy.resolver_target("example.com"), RouteTarget::Direct);
-        config.rule_order = Some(vec![RuleRef::Ip { index: 0 }, RuleRef::Domain { index: 0 }]);
-        let policy = RoutingPolicy::compile(config.clone(), Arc::new(GeoData::default())).unwrap();
-        assert_eq!(policy.resolver_target("example.com"), RouteTarget::Vpn);
-        config.mode = RoutingMode::All;
-        let policy = RoutingPolicy::compile(config, Arc::new(GeoData::default())).unwrap();
-        assert_eq!(policy.resolver_target("example.com"), RouteTarget::Vpn);
-        assert_eq!(policy.test("example.com").unwrap().matched_rule, None);
     }
 }

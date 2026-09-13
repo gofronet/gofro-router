@@ -10,6 +10,7 @@ anyhow.workspace = true
 axum.workspace = true
 axum-server.workspace = true
 clap.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hickory-proto.workspace = true
 idna.workspace = true
 ipnet.workspace = true
@@ -27,3 +28,6 @@ wireguard-status.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["net", "socket", "uio"] }

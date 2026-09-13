@@ -1,0 +1,43 @@
+#!/bin/sh
+# Only OS/procd boundaries are mocked; execute the actual service stop hooks.
+set -eu
+case "$1" in stop) ;; enable|disable) exit 0 ;; *) exit 2 ;; esac
+# shellcheck disable=SC1091
+. "$FS/native-agent"
+GOFRO_GUARD_DIR=$FS/etc/gofro
+GOFRO_HELPERS=$FS/usr/libexec/gofro
+export GOFRO_GUARD_DIR GOFRO_HELPERS
+stat() {
+	case "$2" in '%u:%a') printf '0:700\n' ;; '%u:%a:%h') printf '0:600:1\n' ;; *) exit 2 ;; esac
+}
+flock() {
+	perl -MFcntl=LOCK_EX,LOCK_NB -e '
+		my $flags = LOCK_EX;
+		$flags |= LOCK_NB if $ARGV[0] eq "-n" && shift @ARGV;
+		open(my $lock, ">&=", $ARGV[0]) or die $!;
+		flock($lock, $flags) or exit 1;
+	' -- "$@"
+}
+ubus() {
+	[ "$*" = 'call service list {"name":"gofro-agent"}' ] || exit 2
+	printf 'native:inspect\n' >> "$FS/commands"
+	printf '{}\n' # Cold boot: the service has never registered with procd.
+}
+jsonfilter() {
+	[ "$(cat)" = '{}' ] || exit 2
+	case "$*" in
+		'-t @') printf 'object\n' ;;
+		'-t @["gofro-agent"]'|'-e @["gofro-agent"].instances[*].pid'|'-e @["gofro-agent"].instances[*].running'|'-e @["gofro-agent"].instances[*].term_timeout') return 1 ;;
+		*) exit 2 ;;
+	esac
+}
+procd_kill() {
+	# FD 8 must still exclude another writer even on the guard-less branch.
+	if (exec 7>>"$GOFRO_GUARD_DIR/apply.lock"; flock -n 7); then exit 1; fi
+	printf 'native:kill\n' >> "$FS/commands"
+}
+stop_service
+procd_kill
+service_stopped
+(exec 7>>"$GOFRO_GUARD_DIR/apply.lock"; flock -n 7)
+printf 'native:stopped\n' >> "$FS/commands"

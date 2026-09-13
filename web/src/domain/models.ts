@@ -11,6 +11,7 @@ export type {
   RoutingTest,
   Server,
   ServerProbe,
+  BootstrapStage,
   ServerInput,
   ServerVersion,
   FriendPeer,

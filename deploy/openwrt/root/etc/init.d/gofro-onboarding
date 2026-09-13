@@ -4,11 +4,4 @@
 START=18
 USE_PROCD=1
 
-start_service() {
-	/usr/libexec/gofro/onboarding recover || return 1
-	[ -e /etc/gofro/onboarding-state ] || return 0
-	procd_open_instance
-	procd_set_param command /usr/libexec/gofro/onboarding watch
-	procd_set_param respawn
-	procd_close_instance
-}
+start_service() { return 0; }

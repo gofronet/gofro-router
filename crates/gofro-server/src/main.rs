@@ -4,6 +4,7 @@ use std::{
     fs::{File, OpenOptions},
     io::Write,
     net::Ipv4Addr,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     process::{Command, Stdio},
 };
 
@@ -55,6 +56,13 @@ enum ServerCommand {
         #[arg(long, hide = true)]
         subnet: Option<String>,
     },
+    CreateRouterProfile {
+        endpoint: String,
+    },
+    RemoveRouterPeer {
+        public_key: String,
+    },
+    Capabilities,
     Status,
     ManagedStatus,
     CreateFriend {
@@ -123,7 +131,11 @@ fn main() -> Result<()> {
         } => {
             require_root()?;
             let _lock = mutating_lock()?;
-            add_peer(&args.interface, &public_key, &tunnel_ip, subnet.as_deref())?;
+            if legacy_owner(subnet.as_deref())? {
+                managed::add_router_peer(&args.interface, &public_key, &tunnel_ip)?;
+            } else {
+                add_peer(&args.interface, &public_key, &tunnel_ip)?;
+            }
             println!("peer added: {tunnel_ip} via {}", args.interface);
         }
         ServerCommand::CreateProfile {
@@ -134,6 +146,7 @@ fn main() -> Result<()> {
             require_root()?;
             let _lock = mutating_lock()?;
             validate_endpoint(&endpoint)?;
+            let owner = legacy_owner(subnet.as_deref())?;
             let tunnel_ip = match tunnel_ip {
                 Some(tunnel_ip) => tunnel_ip,
                 None => allocate_tunnel_ip(&run(Command::new("wg").args([
@@ -147,12 +160,11 @@ fn main() -> Result<()> {
             let public_key = run_with_input(Command::new("wg").arg("pubkey"), &private_key)?;
             let server_public_key =
                 run(Command::new("wg").args(["show", &args.interface, "public-key"]))?;
-            add_peer(
-                &args.interface,
-                public_key.trim(),
-                &tunnel_ip,
-                subnet.as_deref(),
-            )?;
+            if owner {
+                managed::add_router_peer(&args.interface, public_key.trim(), &tunnel_ip)?;
+            } else {
+                add_peer(&args.interface, public_key.trim(), &tunnel_ip)?;
+            }
             print!(
                 "{}",
                 format_profile(
@@ -167,20 +179,35 @@ fn main() -> Result<()> {
         ServerCommand::RemovePeer { public_key, subnet } => {
             require_root()?;
             let _lock = mutating_lock()?;
-            let subnet = subnet
-                .as_deref()
-                .map(validate_subnet)
-                .transpose()?
-                .map(|subnet| subnet.to_string());
-            run(Command::new("wg").args(["set", &args.interface, "peer", &public_key, "remove"]))?;
-            if let Some(subnet) = subnet {
-                let _ = Command::new("ip")
-                    .args(["route", "del", &subnet, "dev", &args.interface])
-                    .status();
+            if legacy_owner(subnet.as_deref())? {
+                managed::remove_router_peer(&args.interface, &public_key)?;
+            } else {
+                run(Command::new("wg").args([
+                    "set",
+                    &args.interface,
+                    "peer",
+                    &public_key,
+                    "remove",
+                ]))?;
+                save(&args.interface)?;
             }
-            save(&args.interface)?;
             println!("peer removed: {public_key}");
         }
+        ServerCommand::CreateRouterProfile { endpoint } => {
+            require_root()?;
+            validate_managed_endpoint(&endpoint)?;
+            let _lock = mutating_lock()?;
+            print!(
+                "{}",
+                managed::create_router_profile(&args.interface, &endpoint)?
+            );
+        }
+        ServerCommand::RemoveRouterPeer { public_key } => {
+            require_root()?;
+            let _lock = mutating_lock()?;
+            managed::remove_router_peer(&args.interface, &public_key)?;
+        }
+        ServerCommand::Capabilities => println!("{{\"owner_protocol\":2}}"),
         ServerCommand::Status => {
             println!(
                 "{}",
@@ -252,13 +279,43 @@ fn read_friend_name() -> Result<String> {
 
 fn mutating_lock() -> Result<File> {
     let path = test_path("GOFRO_TEST_LOCK", TUNNEL_LOCK);
+    let create = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if !metadata.is_file()
+                || metadata.uid() != managed::expected_uid()
+                || metadata.mode() & 0o022 != 0
+                || metadata.nlink() != 1
+            {
+                bail!("unsafe server lock");
+            }
+            false
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error).context("failed to inspect server lock"),
+    };
     let lock = OpenOptions::new()
-        .create(true)
+        .create_new(create)
         .append(true)
+        .mode(0o600)
         .open(&path)
         .with_context(|| format!("failed to open {}", path.display()))?;
+    let opened = lock.metadata()?;
+    let named = std::fs::symlink_metadata(&path)?;
+    if !named.is_file()
+        || opened.dev() != named.dev()
+        || opened.ino() != named.ino()
+        || opened.uid() != managed::expected_uid()
+        || opened.mode() & 0o022 != 0
+        || opened.nlink() != 1
+    {
+        bail!("unsafe server lock");
+    }
     lock.lock()
         .with_context(|| format!("failed to lock {}", path.display()))?;
+    let named = std::fs::symlink_metadata(&path)?;
+    if opened.dev() != named.dev() || opened.ino() != named.ino() || !named.is_file() {
+        bail!("server lock changed while locking");
+    }
     Ok(lock)
 }
 
@@ -273,27 +330,12 @@ fn test_path(variable: &str, default: &str) -> std::path::PathBuf {
     }
 }
 
-fn add_peer(
-    interface: &str,
-    public_key: &str,
-    tunnel_ip: &str,
-    subnet: Option<&str>,
-) -> Result<()> {
+fn add_peer(interface: &str, public_key: &str, tunnel_ip: &str) -> Result<()> {
+    wireguard_status::managed::validate_peer_key(public_key)?;
     let tunnel_ip = validate_tunnel_ip(tunnel_ip)?;
-    let subnet = subnet.map(validate_subnet).transpose()?;
-    let routes = subnet.map_or_else(|| vec![tunnel_ip], |subnet| vec![tunnel_ip, subnet]);
-    // ponytail: This root-only admin CLI assumes one operator; add a file lock if automated.
-    ensure_routes_available(interface, public_key, &routes)?;
+    ensure_routes_available(interface, public_key, &[tunnel_ip])?;
     let tunnel_ip = tunnel_ip.to_string();
-    let subnet = subnet.map(|subnet| subnet.to_string());
     let previous_config = run(Command::new("wg").args(["showconf", interface]))?;
-    let route_existed = match subnet.as_deref() {
-        Some(subnet) => !run(Command::new("ip").args(["route", "show", subnet, "dev", interface]))?
-            .trim()
-            .is_empty(),
-        None => false,
-    };
-    let allowed_ips = allowed_ips(&tunnel_ip, subnet.as_deref());
     let result = (|| {
         run(Command::new("wg").args([
             "set",
@@ -301,11 +343,8 @@ fn add_peer(
             "peer",
             public_key,
             "allowed-ips",
-            &allowed_ips,
+            &tunnel_ip,
         ]))?;
-        if let Some(subnet) = subnet.as_deref() {
-            run(Command::new("ip").args(["route", "replace", subnet, "dev", interface]))?;
-        }
         save(interface)
     })();
     if let Err(error) = result {
@@ -314,15 +353,6 @@ fn add_peer(
                 Command::new("wg").args(["setconf", interface, "/dev/stdin"]),
                 &previous_config,
             )?;
-            if let Some(subnet) = subnet.as_deref() {
-                if route_existed {
-                    run(Command::new("ip").args(["route", "replace", subnet, "dev", interface]))?;
-                } else {
-                    let _ = Command::new("ip")
-                        .args(["route", "del", subnet, "dev", interface])
-                        .status();
-                }
-            }
             save(interface)
         })();
         return match rollback {
@@ -333,6 +363,14 @@ fn add_peer(
         };
     }
     Ok(())
+}
+
+fn legacy_owner(subnet: Option<&str>) -> Result<bool> {
+    match subnet {
+        None => Ok(false),
+        Some(CLIENT_SUBNET) => Ok(true),
+        Some(_) => bail!("legacy subnet must be {CLIENT_SUBNET}"),
+    }
 }
 
 fn validate_tunnel_ip(value: &str) -> Result<Ipv4Net> {
@@ -350,6 +388,7 @@ fn validate_tunnel_ip(value: &str) -> Result<Ipv4Net> {
 fn allocate_tunnel_ip(assigned: &str) -> Result<Ipv4Net> {
     let assigned: Vec<_> = assigned
         .split_whitespace()
+        .flat_map(|value| value.split(','))
         .filter_map(|value| value.parse::<Ipv4Net>().ok())
         .collect();
     for host in 2..=254 {
@@ -359,16 +398,6 @@ fn allocate_tunnel_ip(assigned: &str) -> Result<Ipv4Net> {
         }
     }
     bail!("no tunnel IP addresses are available")
-}
-
-fn validate_subnet(value: &str) -> Result<Ipv4Net> {
-    let network = value
-        .parse::<Ipv4Net>()
-        .context("subnet must be an IPv4 network")?;
-    if network.prefix_len() != 24 || network.addr() != Ipv4Addr::new(10, 203, 1, 0) {
-        bail!("subnet must be {CLIENT_SUBNET}");
-    }
-    Ok(network)
 }
 
 fn ensure_routes_available(interface: &str, public_key: &str, routes: &[Ipv4Net]) -> Result<()> {
@@ -384,6 +413,7 @@ fn routes_conflict(assigned: &str, public_key: &str, routes: &[Ipv4Net]) -> bool
         let mut fields = line.split_whitespace();
         if fields.next().is_some_and(|key| key != public_key)
             && fields
+                .flat_map(|value| value.split(','))
                 .filter_map(|value| value.parse::<Ipv4Net>().ok())
                 .any(|existing| {
                     routes.iter().any(|route| {
@@ -395,13 +425,6 @@ fn routes_conflict(assigned: &str, public_key: &str, routes: &[Ipv4Net]) -> bool
         }
     }
     false
-}
-
-fn allowed_ips(tunnel_ip: &str, subnet: Option<&str>) -> String {
-    subnet.map_or_else(
-        || tunnel_ip.to_owned(),
-        |subnet| format!("{tunnel_ip},{subnet}"),
-    )
 }
 
 fn format_profile(
@@ -497,15 +520,8 @@ mod tests {
         assert!(validate_managed_endpoint("vpn.test:8443").is_err());
         assert!(validate_endpoint("vpn.test").is_err());
         assert!(validate_endpoint(&format!("{}:8443", "a".repeat(251))).is_err());
-        assert_eq!(allowed_ips("10.202.0.5/32", None), "10.202.0.5/32");
-        assert_eq!(
-            allowed_ips("10.202.0.2/32", Some("10.203.1.0/24")),
-            "10.202.0.2/32,10.203.1.0/24"
-        );
         assert!(validate_tunnel_ip("10.202.0.254/32").is_ok());
         assert!(validate_tunnel_ip("10.202.0.1/32").is_err());
-        assert!(validate_subnet(CLIENT_SUBNET).is_ok());
-        assert!(validate_subnet("0.0.0.0/0").is_err());
         assert!(matches!(
             Args::try_parse_from([
                 "gofro-router-server",
@@ -541,7 +557,16 @@ mod tests {
             validate_tunnel_ip("10.202.0.3/32").unwrap()
         );
         assert!(allocate_tunnel_ip("one\t10.202.0.0/24").is_err());
+        assert_eq!(
+            allocate_tunnel_ip("one\t10.202.0.2/32,10.203.1.0/24").unwrap(),
+            validate_tunnel_ip("10.202.0.3/32").unwrap()
+        );
         let routes = [validate_tunnel_ip("10.202.0.5/32").unwrap()];
+        assert!(routes_conflict(
+            "other-key\t10.202.0.5/32,10.203.1.0/24\n",
+            "new-key",
+            &routes
+        ));
         assert!(routes_conflict(
             "other-key\t10.202.0.5/32\n",
             "new-key",

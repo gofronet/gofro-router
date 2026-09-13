@@ -8,14 +8,22 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    model::{IpMatch, RouteTarget},
+    model::{IpMatch, LanContext, RouteTarget},
     routing::{LAN_RANGES, RoutingPolicy},
 };
 
 pub(crate) const DIRECT_MARK: u32 = 0x10000;
 pub(crate) const VPN_MARK: u32 = 0x20000;
 pub(crate) const BLOCK_MARK: u32 = 0x30000;
+const GOFRO_MARK_MASK: &str = "0x30000";
+const KEEP_FOREIGN_MARKS: &str = "0xfffcffff";
 const TABLE: &str = "gofro_routing";
+const GUARD_TABLE: &str = "gofro_guard";
+const FAKE_TARGET_SETS: [(RouteTarget, &str); 3] = [
+    (RouteTarget::Direct, "fake_direct"),
+    (RouteTarget::Vpn, "fake_vpn"),
+    (RouteTarget::Block, "fake_block"),
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FakeMapping {
@@ -25,31 +33,69 @@ pub(crate) struct FakeMapping {
 }
 
 pub(crate) fn apply(
-    lan_interface: &str,
+    lan: &LanContext,
+    dns_port: u16,
+    vpn_enabled: bool,
     policy: &RoutingPolicy,
     mappings: &[FakeMapping],
 ) -> Result<()> {
-    run_nft(&render(lan_interface, policy, mappings))
+    run_nft(&render(lan, dns_port, vpn_enabled, policy, mappings))
+}
+
+pub(crate) fn install_guard(lan: &LanContext) -> Result<()> {
+    run_nft(&render_guard(lan))
+}
+
+fn render_guard(lan: &LanContext) -> String {
+    format!(
+        "destroy table inet {GUARD_TABLE}\n\
+         add table inet {GUARD_TABLE}\n\
+         add chain inet {GUARD_TABLE} gofro_guard {{ type filter hook forward priority filter; policy accept; }}\n\
+         add rule inet {GUARD_TABLE} gofro_guard iifname \"{}\" oifname != \"{}\" drop\n",
+        lan.device, lan.device
+    )
+}
+
+pub(crate) fn clear_guard() -> Result<()> {
+    run_nft(&format!("destroy table inet {GUARD_TABLE}\n"))
 }
 
 pub(crate) fn install_mappings(mappings: &[FakeMapping]) -> Result<()> {
+    run_nft(&render_mappings(mappings))
+}
+
+fn render_mappings(mappings: &[FakeMapping]) -> String {
     if mappings.is_empty() {
-        return Ok(());
+        return String::new();
     }
     let real = mappings
         .iter()
         .map(|mapping| format!("{} : {}", mapping.fake, mapping.real))
         .collect::<Vec<_>>()
         .join(", ");
-    let marks = mappings
-        .iter()
-        .map(|mapping| format!("{} : {}", mapping.fake, target_mark(mapping.target)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    run_nft(&format!(
-        "add element inet {TABLE} fake_to_real {{ {real} }}\n\
-         add element inet {TABLE} fake_to_mark {{ {marks} }}\n"
-    ))
+    let mut script = format!("add element inet {TABLE} fake_to_real {{ {real} }}\n");
+    script.push_str(&render_target_elements(mappings, "add"));
+    script
+}
+
+fn render_target_elements(mappings: &[FakeMapping], operation: &str) -> String {
+    let mut script = String::new();
+    for (target, set) in FAKE_TARGET_SETS {
+        let keys = mappings
+            .iter()
+            .filter(|mapping| mapping.target == target)
+            .map(|mapping| mapping.fake.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !keys.is_empty() {
+            writeln!(
+                script,
+                "{operation} element inet {TABLE} {set} {{ {keys} }}"
+            )
+            .unwrap();
+        }
+    }
+    script
 }
 
 pub(crate) fn remove_mappings(mappings: &[FakeMapping]) -> Result<()> {
@@ -61,10 +107,9 @@ pub(crate) fn remove_mappings(mappings: &[FakeMapping]) -> Result<()> {
         .map(|mapping| mapping.fake.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    run_nft(&format!(
-        "delete element inet {TABLE} fake_to_real {{ {keys} }}\n\
-         delete element inet {TABLE} fake_to_mark {{ {keys} }}\n"
-    ))
+    let mut script = format!("delete element inet {TABLE} fake_to_real {{ {keys} }}\n");
+    script.push_str(&render_target_elements(mappings, "delete"));
+    run_nft(&script)
 }
 
 pub(crate) fn is_installed() -> bool {
@@ -80,7 +125,13 @@ fn table_exists() -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn render(lan_interface: &str, policy: &RoutingPolicy, mappings: &[FakeMapping]) -> String {
+fn render(
+    lan: &LanContext,
+    dns_port: u16,
+    vpn_enabled: bool,
+    policy: &RoutingPolicy,
+    mappings: &[FakeMapping],
+) -> String {
     let mut script = String::new();
     writeln!(script, "destroy table inet {TABLE}").unwrap();
     writeln!(script, "add table inet {TABLE}").unwrap();
@@ -89,29 +140,10 @@ fn render(lan_interface: &str, policy: &RoutingPolicy, mappings: &[FakeMapping])
         "add map inet {TABLE} fake_to_real {{ type ipv4_addr : ipv4_addr; }}"
     )
     .unwrap();
-    writeln!(
-        script,
-        "add map inet {TABLE} fake_to_mark {{ type ipv4_addr : mark; }}"
-    )
-    .unwrap();
-    if !mappings.is_empty() {
-        let real = mappings
-            .iter()
-            .map(|mapping| format!("{} : {}", mapping.fake, mapping.real))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let marks = mappings
-            .iter()
-            .map(|mapping| format!("{} : {}", mapping.fake, target_mark(mapping.target)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        writeln!(script, "add element inet {TABLE} fake_to_real {{ {real} }}").unwrap();
-        writeln!(
-            script,
-            "add element inet {TABLE} fake_to_mark {{ {marks} }}"
-        )
-        .unwrap();
+    for (_, set) in FAKE_TARGET_SETS {
+        writeln!(script, "add set inet {TABLE} {set} {{ type ipv4_addr; }}").unwrap();
     }
+    script.push_str(&render_mappings(mappings));
 
     for index in policy.ip_rule_indices() {
         let rule = &policy.config().ip_rules[index];
@@ -147,17 +179,55 @@ fn render(lan_interface: &str, policy: &RoutingPolicy, mappings: &[FakeMapping])
     .unwrap();
     writeln!(
         script,
-        "add rule inet {TABLE} gofro_mark iifname \"{lan_interface}\" meta mark set 0"
+        "add rule inet {TABLE} gofro_mark iifname \"{}\" ct direction reply meta mark set (meta mark & {KEEP_FOREIGN_MARKS}) | {DIRECT_MARK}",
+        lan.device,
     )
     .unwrap();
     writeln!(
         script,
-        "add rule inet {TABLE} gofro_mark iifname \"{lan_interface}\" meta mark set ip daddr map @fake_to_mark"
+        "add rule inet {TABLE} gofro_mark iifname \"{}\" ct direction reply ct mark set (ct mark & {KEEP_FOREIGN_MARKS}) | {DIRECT_MARK}",
+        lan.device,
     )
     .unwrap();
     writeln!(
         script,
-        "add rule inet {TABLE} gofro_mark iifname \"{lan_interface}\" meta mark 0 ip daddr {{ {} }} meta mark set {DIRECT_MARK}",
+        "add rule inet {TABLE} gofro_mark iifname \"{}\" ct direction reply return",
+        lan.device
+    )
+    .unwrap();
+    // Re-evaluate established original-direction packets after every policy change.
+    writeln!(
+        script,
+        "add rule inet {TABLE} gofro_mark iifname \"{}\" meta mark set meta mark & {KEEP_FOREIGN_MARKS}",
+        lan.device,
+    )
+    .unwrap();
+    writeln!(
+        script,
+        "add rule inet {TABLE} gofro_mark iifname \"{}\" fib daddr type local meta mark set (meta mark & {KEEP_FOREIGN_MARKS}) | {DIRECT_MARK}",
+        lan.device,
+    )
+    .unwrap();
+    writeln!(
+        script,
+        "add rule inet {TABLE} gofro_mark iifname \"{}\" ip daddr {} meta mark set (meta mark & {KEEP_FOREIGN_MARKS}) | {DIRECT_MARK}",
+        lan.device, lan.subnet,
+    )
+    .unwrap();
+    // Sets retain policy intent; only the rule's constant mark changes when VPN is off.
+    for (target, set) in FAKE_TARGET_SETS {
+        let mark = target_mark(effective_target(target, vpn_enabled));
+        writeln!(
+            script,
+            "add rule inet {TABLE} gofro_mark iifname \"{}\" meta mark & {GOFRO_MARK_MASK} == 0 ip daddr @{set} meta mark set (meta mark & {KEEP_FOREIGN_MARKS}) | {mark}",
+            lan.device,
+        )
+        .unwrap();
+    }
+    writeln!(
+        script,
+            "add rule inet {TABLE} gofro_mark iifname \"{}\" meta mark & {GOFRO_MARK_MASK} == 0 ip daddr {{ {} }} meta mark set (meta mark & {KEEP_FOREIGN_MARKS}) | {DIRECT_MARK}",
+            lan.device,
         LAN_RANGES.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
     )
     .unwrap();
@@ -170,27 +240,34 @@ fn render(lan_interface: &str, policy: &RoutingPolicy, mappings: &[FakeMapping])
             IpMatch::Cidr { value } => value.clone(),
             IpMatch::GeoIp { .. } => format!("@ip_rule_{index}"),
         };
-        let mark = target_mark(rule.target);
+        let mark = target_mark(effective_target(rule.target, vpn_enabled));
         writeln!(
             script,
-            "add rule inet {TABLE} gofro_mark iifname \"{lan_interface}\" meta mark 0 ip daddr {destination} meta mark set {mark}"
+            "add rule inet {TABLE} gofro_mark iifname \"{}\" meta mark & {GOFRO_MARK_MASK} == 0 ip daddr {destination} meta mark set (meta mark & {KEEP_FOREIGN_MARKS}) | {mark}",
+            lan.device,
         )
         .unwrap();
     }
-    let default_mark = target_mark(policy.effective_fallback());
+    let fallback = policy.effective_fallback();
+    let default_mark = target_mark(effective_target(fallback, vpn_enabled));
     writeln!(
         script,
-        "add rule inet {TABLE} gofro_mark iifname \"{lan_interface}\" meta mark 0 meta mark set {default_mark}"
+        "add rule inet {TABLE} gofro_mark iifname \"{}\" meta mark & {GOFRO_MARK_MASK} == 0 meta mark set (meta mark & {KEEP_FOREIGN_MARKS}) | {default_mark}",
+        lan.device,
     )
     .unwrap();
+    for mark in [DIRECT_MARK, VPN_MARK, BLOCK_MARK] {
+        writeln!(
+            script,
+            "add rule inet {TABLE} gofro_mark iifname \"{}\" meta mark & {GOFRO_MARK_MASK} == {mark} ct mark set (ct mark & {KEEP_FOREIGN_MARKS}) | {mark}",
+            lan.device,
+        )
+        .unwrap();
+    }
     writeln!(
         script,
-        "add rule inet {TABLE} gofro_mark iifname \"{lan_interface}\" ct mark set meta mark"
-    )
-    .unwrap();
-    writeln!(
-        script,
-        "add rule inet {TABLE} gofro_mark iifname \"{lan_interface}\" meta mark {BLOCK_MARK} drop"
+        "add rule inet {TABLE} gofro_mark iifname \"{}\" meta mark & {GOFRO_MARK_MASK} == {BLOCK_MARK} drop",
+        lan.device,
     )
     .unwrap();
     writeln!(
@@ -200,10 +277,48 @@ fn render(lan_interface: &str, policy: &RoutingPolicy, mappings: &[FakeMapping])
     .unwrap();
     writeln!(
         script,
-        "add rule inet {TABLE} gofro_dnat iifname \"{lan_interface}\" dnat ip to ip daddr map @fake_to_real"
+        "add rule inet {TABLE} gofro_dnat iifname \"{}\" dnat ip to ip daddr map @fake_to_real",
+        lan.device,
     )
     .unwrap();
+    writeln!(
+        script,
+        "add chain inet {TABLE} gofro_dns {{ type nat hook prerouting priority -101; policy accept; }}"
+    )
+    .unwrap();
+    writeln!(
+        script,
+        "add rule inet {TABLE} gofro_dns iifname \"{}\" udp dport 53 redirect to :{dns_port}",
+        lan.device,
+    )
+    .unwrap();
+    writeln!(
+        script,
+        "add rule inet {TABLE} gofro_dns iifname \"{}\" tcp dport 53 redirect to :{dns_port}",
+        lan.device,
+    )
+    .unwrap();
+    if vpn_enabled {
+        writeln!(
+            script,
+            "add chain inet {TABLE} gofro_ipv6 {{ type filter hook forward priority filter; policy accept; }}"
+        )
+        .unwrap();
+        writeln!(
+            script,
+            "add rule inet {TABLE} gofro_ipv6 iifname \"{}\" meta nfproto ipv6 drop",
+            lan.device,
+        )
+        .unwrap();
+    }
     script
+}
+
+pub(crate) fn effective_target(target: RouteTarget, vpn_enabled: bool) -> RouteTarget {
+    match target {
+        RouteTarget::Vpn if !vpn_enabled => RouteTarget::Direct,
+        target => target,
+    }
 }
 
 pub(crate) fn target_mark(target: RouteTarget) -> u32 {
@@ -215,6 +330,9 @@ pub(crate) fn target_mark(target: RouteTarget) -> u32 {
 }
 
 fn run_nft(script: &str) -> Result<()> {
+    if script.is_empty() {
+        return Ok(());
+    }
     let mut child = Command::new("nft")
         .args(["-f", "-"])
         .stdin(Stdio::piped())
@@ -239,97 +357,4 @@ fn run_nft(script: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::*;
-    use crate::{
-        geodata::GeoData,
-        model::{IpMatch, IpRule, RoutingConfig, RoutingMode, RuleRef},
-    };
-
-    #[test]
-    fn renders_kernel_only_split_routing() {
-        let policy = RoutingPolicy::compile(
-            RoutingConfig {
-                domain_rules: vec![],
-                ip_rules: vec![IpRule {
-                    name: "Block LAN".into(),
-                    enabled: true,
-                    matcher: IpMatch::Cidr {
-                        value: "10.0.0.0/8".into(),
-                    },
-                    target: RouteTarget::Block,
-                }],
-                default_target: RouteTarget::Vpn,
-                mode: RoutingMode::Rules,
-                rule_order: None,
-            },
-            Arc::new(GeoData::default()),
-        )
-        .unwrap();
-        let script = render(
-            "wlan0",
-            &policy,
-            &[FakeMapping {
-                fake: "198.18.0.1".parse().unwrap(),
-                real: "1.1.1.1".parse().unwrap(),
-                target: RouteTarget::Direct,
-            }],
-        );
-        assert!(script.contains("198.18.0.1 : 1.1.1.1"));
-        assert!(script.contains("198.18.0.1 : 65536"));
-        assert!(script.starts_with("destroy table inet gofro_routing\nadd table"));
-        assert!(script.contains("meta mark set 0"));
-        assert!(script.contains("meta mark 0 meta mark set 131072"));
-        assert!(script.contains("meta mark 196608 drop"));
-        assert!(script.contains("224.0.0.0/4"));
-        assert!(script.contains("255.255.255.255/32"));
-        let local = script.find("127.0.0.0/8").unwrap();
-        let custom = script
-            .find("ip daddr 10.0.0.0/8 meta mark set 196608")
-            .unwrap();
-        assert!(local < custom);
-        assert!(script.contains("add chain inet gofro_routing gofro_mark"));
-        assert!(script.contains("add chain inet gofro_routing gofro_dnat"));
-        assert!(!script.contains("gofro_routing mark"));
-        assert!(script.contains("dnat ip to ip daddr map @fake_to_real"));
-    }
-
-    #[test]
-    fn renders_ip_rules_in_effective_order_and_none_in_all_mode() {
-        let config = RoutingConfig {
-            domain_rules: vec![],
-            ip_rules: vec![
-                IpRule {
-                    name: "First".into(),
-                    enabled: true,
-                    matcher: IpMatch::Cidr {
-                        value: "1.0.0.0/8".into(),
-                    },
-                    target: RouteTarget::Direct,
-                },
-                IpRule {
-                    name: "Second".into(),
-                    enabled: true,
-                    matcher: IpMatch::Cidr {
-                        value: "1.1.0.0/16".into(),
-                    },
-                    target: RouteTarget::Block,
-                },
-            ],
-            default_target: RouteTarget::Direct,
-            mode: RoutingMode::Rules,
-            rule_order: Some(vec![RuleRef::Ip { index: 1 }, RuleRef::Ip { index: 0 }]),
-        };
-        let policy = RoutingPolicy::compile(config.clone(), Arc::new(GeoData::default())).unwrap();
-        let script = render("wlan0", &policy, &[]);
-        assert!(script.find("1.1.0.0/16").unwrap() < script.find("1.0.0.0/8").unwrap());
-        let mut all = config;
-        all.mode = RoutingMode::All;
-        let policy = RoutingPolicy::compile(all, Arc::new(GeoData::default())).unwrap();
-        let script = render("wlan0", &policy, &[]);
-        assert!(!script.contains("1.1.0.0/16"));
-        assert!(script.contains("meta mark 0 meta mark set 131072"));
-    }
-}
+mod tests;

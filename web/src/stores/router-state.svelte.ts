@@ -1,34 +1,29 @@
 import { api, ApiError } from "../api";
 import { clearCsrfToken, setCsrfToken } from "../api/client";
-import { modeService } from "../features/mode/service";
-import { routingService } from "../features/routing/service";
-import { serverService } from "../features/servers/service";
-import { statusService } from "../features/status/service";
-import { wifiService } from "../features/wifi/service";
 import type {
   ProfileInput,
   AuthStatus,
   OnboardingStatus,
-  OnboardingWifiInput,
   RoutingConfig,
   RoutingTest,
   ServerInput,
-  ServerProbe,
+  BootstrapStage,
   ServerVersion,
   ManagedServerStatus,
   Profile,
   Status,
-  WifiBand,
 } from "../domain/models";
+
+const refreshRequired = "Состояние после изменения не подтверждено. Сначала обновите состояние; новая команда не отправлена.";
 
 export class RouterState {
   private currentStatus = $state<Status | null>(null);
   private pollInFlight = false;
   private statusVersion = 0;
   private interval: number | null = null;
-  private onboardingInterval: number | null = null;
   private onboardingInFlight = false;
   private onboardingVersion = 0;
+  private generation = 0;
 
   loading = $state(true);
   authLoading = $state(true);
@@ -39,8 +34,14 @@ export class RouterState {
   onboarding = $state<OnboardingStatus | null>(null);
   pollError = $state("");
   actionError = $state("");
+  actionWarning = $state("");
+  statusUncertain = $state(false);
+  private warningKind = $state("");
   mutation = $state<string | null>(null);
-  reconnectSsid = $state<string | null>(null);
+
+  get warningServerKey(): string | null {
+    return /^(?:update|restart|friend-create|friend-rename|friend-revoke):(.+)$/.exec(this.warningKind)?.[1] ?? null;
+  }
 
   get status(): Status {
     if (!this.currentStatus) throw new Error("Status is not loaded yet");
@@ -56,6 +57,7 @@ export class RouterState {
   }
 
   get connected(): boolean {
+    if (this.statusUncertain) return false;
     const status = this.currentStatus;
     return Boolean(status?.vpn_enabled && status.tunnel_active && status.peer?.handshake_age_seconds != null && status.peer.handshake_age_seconds <= 180);
   }
@@ -63,10 +65,9 @@ export class RouterState {
   private message(error: unknown): string {
     if (!(error instanceof Error)) return "Неизвестная ошибка";
     switch (error.message) {
-      case "password_too_short": return "Пароль администратора должен содержать не менее 12 символов.";
+      case "password_too_short": return "Пароль администратора должен содержать не менее 8 символов.";
       case "password_too_long": return "Пароль слишком длинный. Максимум 128 байт: кириллица занимает больше одного байта на символ.";
-      case "invalid_setup_code": return "Неверный пароль Wi-Fi. Введите текущий пароль сети этого роутера.";
-      case "setup_unavailable": return "Не удалось прочитать пароль Wi-Fi на роутере. Требуется проверка настройки устройства.";
+      case "invalid_setup_code": return "Неверный одноразовый код установки.";
       case "invalid_password": return "Неверный пароль администратора.";
       case "request_rejected": return "Проверка безопасности не пройдена. Обновите страницу и попробуйте снова.";
       case "auth_busy": return "Уже выполняется проверка пароля. Подождите и попробуйте снова.";
@@ -91,18 +92,19 @@ export class RouterState {
 
   private auth = $state<AuthStatus | null>(null);
 
-  get setupMethod(): "local" | "wifi_password" | null {
+  get setupMethod(): "code" | "local" | "wifi_password" | null {
     return this.auth?.state === "setup" ? this.auth.setup_method : null;
   }
 
   get setupWindowSeconds(): number | null {
-    return this.auth?.state === "setup" && this.auth.setup_method === "local"
+    return this.auth?.state === "setup" && (this.auth.setup_method === "code" || this.auth.setup_method === "local")
       ? this.auth.setup_window_seconds
       : null;
   }
 
   private handleAuthError = (error: unknown): boolean => {
     if (!(error instanceof ApiError) || error.status !== 401) return false;
+    this.stop();
     this.onboardingVersion++;
     this.statusVersion++;
     this.currentStatus = null;
@@ -110,7 +112,6 @@ export class RouterState {
     this.authState = "login";
     this.auth = null;
     this.stopPolling();
-    this.stopOnboardingPolling();
     this.onboarding = null;
     return true;
   };
@@ -118,23 +119,32 @@ export class RouterState {
   private mutateResult = async <T>(
     kind: string,
     operation: () => Promise<T>,
+    onCommitted?: () => void,
   ): Promise<T | null> => {
     if (this.busy) return null;
 
     this.statusVersion++;
+    const generation = this.generation;
     this.mutation = kind;
     this.actionError = "";
 
     try {
       const result = await operation();
+      if (generation !== this.generation) return null;
       this.pollError = "";
       return result;
     } catch (error) {
-      this.handleAuthError(error);
+      if (generation !== this.generation || this.handleAuthError(error)) return null;
+      if (error instanceof ApiError && error.outcome === "committed") {
+        this.warningKind = kind;
+        this.actionWarning = "Изменение выполнено, но состояние не удалось обновить. Обновите состояние отдельно; повторять изменение не нужно.";
+        onCommitted?.();
+        return null;
+      }
       this.actionError = this.message(error);
       return null;
     } finally {
-      this.mutation = null;
+      if (generation === this.generation) this.mutation = null;
     }
   };
 
@@ -142,39 +152,58 @@ export class RouterState {
     kind: string,
     operation: () => Promise<Status>,
   ): Promise<boolean> => {
-    const result = await this.mutateResult(kind, operation);
-    if (!result) return false;
+    if (this.busy) return false;
+    const generation = this.generation;
+    let committed = false;
+    const result = await this.mutateResult(kind, operation, () => { committed = true; });
+    if (generation !== this.generation) return false;
+    if (!result) {
+      this.statusUncertain = true;
+      return committed;
+    }
     this.currentStatus = result;
+    this.statusUncertain = false;
+    if (!this.warningServerKey) this.actionWarning = "";
     return true;
   };
 
   refresh = async (): Promise<void> => {
-    if (this.pollInFlight || this.mutation || this.reconnectSsid) return;
+    if (this.pollInFlight || this.mutation) return;
 
     this.pollInFlight = true;
     const version = this.statusVersion;
+    const generation = this.generation;
 
     try {
-      const nextStatus = await statusService.get();
-      if (version === this.statusVersion) {
+      const nextStatus = await api.status.get();
+      if (generation === this.generation && version === this.statusVersion) {
         this.currentStatus = nextStatus;
+        this.statusUncertain = false;
+        if (this.actionError === refreshRequired) this.actionError = "";
         this.pollError = "";
+        if (!this.warningServerKey) this.actionWarning = "";
       }
     } catch (error) {
+      if (generation !== this.generation) return;
       if (this.handleAuthError(error)) return;
       if (version === this.statusVersion) {
         this.pollError = this.message(error);
       }
     } finally {
-      this.loading = false;
-      this.pollInFlight = false;
+      if (generation === this.generation) {
+        this.loading = false;
+        this.pollInFlight = false;
+      }
     }
   };
 
   startPolling(): void {
     if (this.interval !== null) return;
+    const generation = this.generation;
     void this.refresh();
-    this.interval = window.setInterval(this.refresh, 5_000);
+    this.interval = window.setInterval(() => {
+      if (generation === this.generation) void this.refresh();
+    }, 5_000);
   }
 
   stopPolling(): void {
@@ -184,51 +213,41 @@ export class RouterState {
   }
 
   stop(): void {
+    this.generation++;
+    this.statusUncertain = true;
     this.onboardingVersion++;
     this.stopPolling();
-    this.stopOnboardingPolling();
-  }
-
-  private startOnboardingPolling(): void {
-    if (this.onboardingInterval !== null) return;
-    this.onboardingInterval = window.setInterval(() => void this.loadOnboarding(), 5_000);
-  }
-
-  private stopOnboardingPolling(): void {
-    if (this.onboardingInterval === null) return;
-    window.clearInterval(this.onboardingInterval);
-    this.onboardingInterval = null;
+    this.pollInFlight = false;
+    this.onboardingInFlight = false;
+    this.onboardingLoading = false;
+    this.authLoading = false;
+    this.loading = false;
+    this.mutation = null;
+    this.actionWarning = "";
   }
 
   loadOnboarding = async (): Promise<void> => {
     if (this.authState !== "authenticated" || this.onboardingInFlight) return;
     const version = this.onboardingVersion;
+    const generation = this.generation;
     this.onboardingInFlight = true;
     this.onboardingLoading = true;
     try {
       const onboarding = await api.onboarding.get();
-      if (version !== this.onboardingVersion || this.authState !== "authenticated") return;
-      this.onboarding = {
-        ...onboarding,
-        error: onboarding.error === "onboarding_failed"
-          ? "Не удалось применить Wi-Fi. Проверьте настройки и попробуйте снова."
-          : onboarding.error,
-      };
-      if (onboarding.step === "wifi_applying") this.startOnboardingPolling();
-      else {
-        this.stopOnboardingPolling();
-        this.reconnectSsid = null;
-      }
+      if (generation !== this.generation || version !== this.onboardingVersion || this.authState !== "authenticated") return;
+      this.onboarding = onboarding;
       if (onboarding.step !== "complete") this.stopPolling();
-      if (onboarding.step === "server" && !this.hasStatus) await this.refresh();
+      if (onboarding.step === "server" && (!this.hasStatus || this.statusUncertain)) await this.refresh();
+      if (generation !== this.generation) return;
       if (onboarding.step === "complete") this.startPolling();
     } catch (error) {
-      if (version !== this.onboardingVersion || this.authState !== "authenticated") return;
-      this.handleAuthError(error);
+      if (generation !== this.generation || version !== this.onboardingVersion || this.authState !== "authenticated" || this.handleAuthError(error)) return;
       this.actionError = this.message(error);
     } finally {
-      if (version === this.onboardingVersion) this.onboardingLoading = false;
-      this.onboardingInFlight = false;
+      if (generation === this.generation && version === this.onboardingVersion) {
+        this.onboardingLoading = false;
+        this.onboardingInFlight = false;
+      }
     }
   };
 
@@ -237,34 +256,42 @@ export class RouterState {
   };
 
   initializeAuth = async (): Promise<void> => {
+    this.stop();
+    const generation = this.generation;
     this.authLoading = true;
     this.authError = "";
     try {
       const auth = await api.auth.status();
+      if (generation !== this.generation) return;
       this.applyAuth(auth);
       this.loading = auth.state === "authenticated";
       if (auth.state === "authenticated") await this.loadOnboarding();
     } catch (error) {
+      if (generation !== this.generation) return;
       clearCsrfToken();
       this.authState = "login";
       this.auth = null;
       this.authError = this.message(error);
       this.loading = false;
     } finally {
-      this.authLoading = false;
+      if (generation === this.generation) this.authLoading = false;
     }
   };
 
   setupAuth = async (password: string, setupCode?: string): Promise<boolean> => {
+    this.stop();
+    const generation = this.generation;
     this.authError = "";
     try {
       const auth = await api.auth.setup(password, setupCode);
+      if (generation !== this.generation) return false;
       this.applyAuth(auth);
       if (auth.state !== "authenticated") return false;
       this.loading = true;
       await this.loadOnboarding();
-      return true;
+      return generation === this.generation;
     } catch (error) {
+      if (generation !== this.generation) return false;
       this.authError = this.message(error);
       if (error instanceof Error && error.message === "setup_closed") this.setupClosed = true;
       this.handleAuthError(error);
@@ -273,15 +300,19 @@ export class RouterState {
   };
 
   loginAuth = async (password: string): Promise<boolean> => {
+    this.stop();
+    const generation = this.generation;
     this.authError = "";
     try {
       const auth = await api.auth.login(password);
+      if (generation !== this.generation) return false;
       this.applyAuth(auth);
       if (auth.state !== "authenticated") return false;
       this.loading = true;
       await this.loadOnboarding();
-      return true;
+      return generation === this.generation;
     } catch (error) {
+      if (generation !== this.generation) return false;
       this.authError = this.message(error);
       this.handleAuthError(error);
       return false;
@@ -289,171 +320,150 @@ export class RouterState {
   };
 
   logoutAuth = async (): Promise<void> => {
-    try {
-      this.applyAuth(await api.auth.logout());
-    } catch (error) {
-      if (!this.handleAuthError(error)) this.actionError = this.message(error);
-      return;
-    }
+    this.stop();
+    const generation = this.generation;
+    this.authLoading = true;
+    const pending = api.auth.logout();
     this.currentStatus = null;
     this.authState = "login";
     this.auth = null;
-    this.stop();
     this.onboarding = null;
+    this.actionError = "";
+    this.actionWarning = "";
+    this.authError = "";
+    try {
+      const auth = await pending;
+      if (generation !== this.generation) return;
+      this.applyAuth(auth);
+    } catch (error) {
+      if (generation !== this.generation) return;
+      this.authError = this.message(error);
+      this.handleAuthError(error);
+    } finally {
+      if (generation === this.generation) this.authLoading = false;
+    }
+  };
+
+  requireFreshStatus = (): boolean => {
+    if (!this.statusUncertain) return true;
+    this.actionError = refreshRequired;
+    return false;
   };
 
   setMode = async (vpnEnabled: boolean): Promise<boolean> => {
+    if (this.busy) return false;
+    if (!this.requireFreshStatus()) return false;
     if (
       this.currentStatus?.vpn_enabled === vpnEnabled &&
       (!vpnEnabled || this.currentStatus.tunnel_active)
     ) {
       return true;
     }
-    return this.mutate("mode", () => modeService.set(vpnEnabled));
+    return this.mutate("mode", () => api.mode.set(vpnEnabled));
   };
 
   startUpdate = async (): Promise<void> => {
     await this.mutate("update", api.update.start);
   };
 
-  rebootRouter = async (): Promise<boolean> => {
-    const result = await this.mutateResult("reboot", api.reboot.start);
-    if (!result) return false;
-    this.stop();
-    return true;
-  };
-
   importServer = (input: ProfileInput): Promise<boolean> =>
-    this.mutate("import-server", () => serverService.import(input));
+    this.mutate("import-server", () => api.servers.import(input));
 
   updateServer = (
     previousPublicKey: string,
     input: ServerInput,
   ): Promise<boolean> =>
     this.mutate(`edit:${previousPublicKey}`, () =>
-      serverService.update(previousPublicKey, input),
+      api.servers.update(previousPublicKey, input),
     );
 
   selectServer = (publicKey: string): Promise<boolean> => {
+    if (this.busy) return Promise.resolve(false);
+    if (!this.requireFreshStatus()) return Promise.resolve(false);
     if (publicKey === this.currentStatus?.active_server_key) {
       return Promise.resolve(false);
     }
     return this.mutate(`select:${publicKey}`, () =>
-      serverService.select(publicKey),
+      api.servers.select(publicKey),
     );
   };
 
   removeServer = (publicKey: string): Promise<boolean> =>
     this.mutate(`delete:${publicKey}`, () =>
-      serverService.remove(publicKey),
+      api.servers.remove(publicKey),
     );
-
-  probeServer = (host: string, port: number): Promise<ServerProbe | null> =>
-    this.mutateResult("probe-server", () => serverService.probe(host, port));
 
   bootstrapServer = (
     name: string,
     host: string,
     port: number,
     password: string,
-    hostKey: string,
-  ): Promise<boolean> =>
-    this.mutate("bootstrap-server", () =>
-      serverService.bootstrap(name, host, port, password, hostKey),
+    onStage: (stage: BootstrapStage) => void,
+  ): Promise<boolean> => {
+    const generation = this.generation;
+    return this.mutate("bootstrap-server", () =>
+      api.servers.bootstrap(name, host, port, password, stage => {
+        if (generation === this.generation) onStage(stage);
+      }),
     );
+  };
 
   checkServer = (publicKey: string): Promise<ServerVersion | null> =>
-    this.mutateResult(`check:${publicKey}`, () => serverService.check(publicKey));
+    this.mutateResult(`check:${publicKey}`, () => api.servers.check(publicKey));
 
   updateManagedServer = (publicKey: string): Promise<ServerVersion | null> =>
     this.mutateResult(`update:${publicKey}`, () =>
-      serverService.updateManaged(publicKey),
+      api.servers.updateManaged(publicKey),
     );
 
   createFriendProfile = (publicKey: string): Promise<Profile | null> =>
     this.mutateResult(`profile:${publicKey}`, () =>
-      serverService.createProfile(publicKey),
+      api.servers.createProfile(publicKey),
     );
 
-  inspectServer = (publicKey: string): Promise<ManagedServerStatus | null> =>
-    this.mutateResult(`inspect:${publicKey}`, () => serverService.inspect(publicKey));
-
-  restartServer = (publicKey: string): Promise<ManagedServerStatus | null> =>
-    this.mutateResult(`restart:${publicKey}`, () => serverService.restart(publicKey));
-
-  createFriend = (publicKey: string, name: string): Promise<ManagedServerStatus | null> =>
-    this.mutateResult(`friend-create:${publicKey}`, () => serverService.createFriend(publicKey, name));
-
-  renameFriend = (publicKey: string, peerKey: string, name: string): Promise<ManagedServerStatus | null> =>
-    this.mutateResult(`friend-rename:${publicKey}`, () => serverService.renameFriend(publicKey, peerKey, name));
-
-  revokeFriend = (publicKey: string, peerKey: string): Promise<ManagedServerStatus | null> =>
-    this.mutateResult(`friend-revoke:${publicKey}`, () => serverService.revokeFriend(publicKey, peerKey));
-
-  friendProfile = (publicKey: string, peerKey: string): Promise<Profile | null> =>
-    this.mutateResult(`friend-profile:${publicKey}`, () => serverService.friendProfile(publicKey, peerKey));
-
-  saveAp = async (
-    band: WifiBand | undefined,
-    ssid: string,
-    password: string,
-  ): Promise<boolean> => {
-    const saved = await this.mutate(`ap:${band ?? "all"}`, () =>
-      wifiService.save({ band, ssid, password }),
-    );
-    if (saved) this.reconnectSsid = ssid;
-    return saved;
+  inspectServer = async (publicKey: string): Promise<ManagedServerStatus | null> => {
+    const generation = this.generation;
+    const result = await this.mutateResult(`inspect:${publicKey}`, () => api.servers.inspect(publicKey));
+    if (generation !== this.generation) return null;
+    if (result && this.warningServerKey === publicKey) this.actionWarning = "";
+    return result;
   };
 
+  restartServer = (publicKey: string): Promise<ManagedServerStatus | null> =>
+    this.mutateResult(`restart:${publicKey}`, () => api.servers.restart(publicKey));
+
+  createFriend = (publicKey: string, name: string): Promise<ManagedServerStatus | null> =>
+    this.mutateResult(`friend-create:${publicKey}`, () => api.servers.createFriend(publicKey, name));
+
+  renameFriend = (publicKey: string, peerKey: string, name: string): Promise<ManagedServerStatus | null> =>
+    this.mutateResult(`friend-rename:${publicKey}`, () => api.servers.renameFriend(publicKey, peerKey, name));
+
+  revokeFriend = (publicKey: string, peerKey: string): Promise<ManagedServerStatus | null> =>
+    this.mutateResult(`friend-revoke:${publicKey}`, () => api.servers.revokeFriend(publicKey, peerKey));
+
+  friendProfile = (publicKey: string, peerKey: string): Promise<Profile | null> =>
+    this.mutateResult(`friend-profile:${publicKey}`, () => api.servers.friendProfile(publicKey, peerKey));
+
   saveRouting = (input: RoutingConfig): Promise<boolean> =>
-    this.mutate("routing", () => routingService.save(input));
+    this.mutate("routing", () => api.routing.save(input));
 
   testRouting = async (value: string): Promise<RoutingTest> => {
+    const generation = this.generation;
     try {
-      return await routingService.test(value);
+      const result = await api.routing.test(value);
+      if (generation !== this.generation) throw new Error("Request superseded");
+      return result;
     } catch (error) {
-      this.handleAuthError(error);
+      if (generation === this.generation) this.handleAuthError(error);
       throw error;
     }
   };
 
-  resumePolling = async (): Promise<void> => {
-    this.reconnectSsid = null;
-    await this.refresh();
-  };
-
-  saveOnboardingWifi = async (
-    input: OnboardingWifiInput,
-  ): Promise<"saved" | "reconnect" | "error"> => {
-    if (this.busy) return "error";
-    this.stopPolling();
-    this.mutation = "onboarding-wifi";
-    this.actionError = "";
-    try {
-      this.onboarding = await api.onboarding.wifi(input);
-      this.reconnectSsid = input.networks.map((network) => network.ssid).join(", ");
-      this.startOnboardingPolling();
-      return "saved";
-    } catch (error) {
-      if (error instanceof ApiError && error.status === undefined) {
-        this.reconnectSsid = input.networks.map((network) => network.ssid).join(", ");
-        this.startOnboardingPolling();
-        return "reconnect";
-      }
-      this.handleAuthError(error);
-      this.actionError = this.message(error);
-      return "error";
-    } finally {
-      this.mutation = null;
-    }
-  };
-
   completeOnboarding = async (): Promise<boolean> => {
+    const generation = this.generation;
     const result = await this.mutateResult("onboarding-complete", api.onboarding.complete);
-    if (!result) return false;
+    if (generation !== this.generation || !result) return false;
     this.onboarding = result;
-    this.reconnectSsid = null;
-    this.stopOnboardingPolling();
     this.startPolling();
     return true;
   };

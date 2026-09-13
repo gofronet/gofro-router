@@ -1,9 +1,8 @@
-import { http, request } from "./client";
+import { bootstrapStream, http, request, setCsrfToken } from "./client";
 import {
   profileInputSchema,
   profileSchema,
   authStatusSchema,
-  serverProbeSchema,
   serverInputSchema,
   serverVersionSchema,
   managedServerStatusSchema,
@@ -11,39 +10,59 @@ import {
   routingConfigSchema,
   routingTestSchema,
   statusSchema,
-  wifiInputSchema,
   type ProfileInput,
   type Profile,
   type AuthStatus,
-  type ServerProbe,
+  type BootstrapStage,
   type ServerInput,
   type ServerVersion,
   type ManagedServerStatus,
   type RoutingConfig,
   type RoutingTest,
   type Status,
-  type WifiBand,
-  type WifiInput,
   type OnboardingStatus,
-  type OnboardingWifiInput,
   onboardingStatusSchema,
-  onboardingWifiInputSchema,
-  rebootSchema,
 } from "./schemas";
 
 const statusRequest = (factory: () => Promise<{ data: unknown }>) =>
   request(statusSchema, factory);
-const mutation = { timeout: 0 };
+const mutation = { timeout: 5 * 60_000 };
+const authentication = { timeout: 30_000 };
+// SSH commands allow 2 minutes; updates allow 16 minutes plus a version check.
+const inspection = { timeout: 150_000 };
+const managedUpdate = { timeout: 20 * 60_000 };
+
+let pendingAuth: Promise<void> = Promise.resolve();
+let authUnverified = false;
+function authRequest(factory: () => Promise<{ data: unknown }>, readStatus = false): Promise<AuthStatus> {
+  // Generation checks cannot undo Set-Cookie. Finish/abort each transport before
+  // starting another, and use its validated CSRF token for the next request.
+  const result = pendingAuth.then(async () => {
+    if (authUnverified && !readStatus) {
+      const status = await request(authStatusSchema, () => http.get("/auth/status"));
+      setCsrfToken(status.csrf_token);
+      authUnverified = false;
+    }
+    // Headers may change cookies even when the body or HTTP status is an error.
+    authUnverified = true;
+    const auth = await request(authStatusSchema, factory);
+    setCsrfToken(auth.csrf_token);
+    authUnverified = false;
+    return auth;
+  });
+  pendingAuth = result.then(() => {}, () => {});
+  return result;
+}
 
 export const api = {
   auth: {
-    status: (): Promise<AuthStatus> => request(authStatusSchema, () => http.get("/auth/status")),
+    status: (): Promise<AuthStatus> => authRequest(() => http.get("/auth/status"), true),
     setup: (password: string, setupCode?: string): Promise<AuthStatus> =>
-      request(authStatusSchema, () => http.post("/auth/setup", { password, ...(setupCode ? { setup_code: setupCode } : {}) }, mutation)),
+      authRequest(() => http.post("/auth/setup", { password, ...(setupCode ? { setup_code: setupCode } : {}) }, authentication)),
     login: (password: string): Promise<AuthStatus> =>
-      request(authStatusSchema, () => http.post("/auth/login", { password }, mutation)),
+      authRequest(() => http.post("/auth/login", { password }, authentication)),
     logout: (): Promise<AuthStatus> =>
-      request(authStatusSchema, () => http.post("/auth/logout", {}, mutation)),
+      authRequest(() => http.post("/auth/logout", {}, authentication)),
   },
   status: {
     get: (): Promise<Status> => statusRequest(() => http.get("/status")),
@@ -51,9 +70,6 @@ export const api = {
   update: {
     start: (): Promise<Status> =>
       statusRequest(() => http.post("/update", {}, mutation)),
-  },
-  reboot: {
-    start: () => request(rebootSchema, () => http.post("/reboot", {}, mutation)),
   },
   mode: {
     set: (vpnEnabled: boolean): Promise<Status> =>
@@ -87,38 +103,28 @@ export const api = {
           ...mutation,
         }),
       ),
-    probe: (host: string, port: number): Promise<ServerProbe> =>
-      request(serverProbeSchema, () =>
-        http.post("/servers/probe", { host, port }, mutation),
-      ),
     bootstrap: (
       name: string,
       host: string,
       port: number,
       password: string,
-      hostKey: string,
+      onStage: (stage: BootstrapStage) => void,
     ): Promise<Status> =>
-      statusRequest(() =>
-        http.post(
-          "/servers/bootstrap",
-          { name, host, port, password, host_key: hostKey },
-          mutation,
-        ),
-      ),
+      bootstrapStream({ name, host, port, password }, onStage),
     check: (publicKey: string): Promise<ServerVersion> =>
       request(serverVersionSchema, () =>
-        http.post("/servers/check", { public_key: publicKey }, mutation),
+        http.post("/servers/check", { public_key: publicKey }, inspection),
       ),
     updateManaged: (publicKey: string): Promise<ServerVersion> =>
       request(serverVersionSchema, () =>
-        http.post("/servers/update-managed", { public_key: publicKey }, mutation),
+        http.post("/servers/update-managed", { public_key: publicKey }, managedUpdate),
       ),
     createProfile: (publicKey: string): Promise<Profile> =>
       request(profileSchema, () =>
         http.post("/servers/create-profile", { public_key: publicKey }, mutation),
       ),
     inspect: (publicKey: string): Promise<ManagedServerStatus> =>
-      request(managedServerStatusSchema, () => http.post("/servers/management", { public_key: publicKey }, mutation)),
+      request(managedServerStatusSchema, () => http.post("/servers/management", { public_key: publicKey }, inspection)),
     restart: (publicKey: string): Promise<ManagedServerStatus> =>
       request(managedServerStatusSchema, () => http.post("/servers/restart", { public_key: publicKey }, mutation)),
     createFriend: (publicKey: string, name: string): Promise<ManagedServerStatus> =>
@@ -130,19 +136,9 @@ export const api = {
     friendProfile: (publicKey: string, peerKey: string): Promise<Profile> =>
       request(profileSchema, () => http.post("/servers/friends/profile", { public_key: publicKey, peer_key: peerKey }, mutation)),
   },
-  wifi: {
-    save: (input: WifiInput): Promise<Status> => {
-      const body = wifiInputSchema.parse(input);
-      return statusRequest(() => http.post("/ap", body, mutation));
-    },
-  },
   onboarding: {
     get: (): Promise<OnboardingStatus> =>
       request(onboardingStatusSchema, () => http.get("/onboarding")),
-    wifi: (input: OnboardingWifiInput): Promise<OnboardingStatus> =>
-      request(onboardingStatusSchema, () =>
-        http.post("/onboarding/wifi", onboardingWifiInputSchema.parse(input), mutation),
-      ),
     complete: (): Promise<OnboardingStatus> =>
       request(onboardingStatusSchema, () => http.post("/onboarding/complete", {}, mutation)),
   },
@@ -158,7 +154,6 @@ export const api = {
 
 export { ApiError } from "./client";
 export type {
-  Device,
   HistoryPoint,
   DomainRule,
   IpRule,
@@ -170,13 +165,11 @@ export type {
   AuthStatus,
   Server,
   ServerProbe,
+  BootstrapStage,
   ServerInput,
   ServerVersion,
   FriendPeer,
   ManagedServerStatus,
   Status,
-  WifiBand,
-  WifiInput,
   OnboardingStatus,
-  OnboardingWifiInput,
 } from "./schemas";

@@ -9,29 +9,24 @@ recover_update() {
 	current=$app_root/current
 	state_dir=${STATE_DIR:-/etc/gofro}
 	pending=$state_dir/update-previous
-	panel_backup=$state_dir/update-uhttpd
-	uci_command=${UCI_COMMAND:-uci}
-	uhttpd_init=${UHTTPD_INIT:-/etc/init.d/uhttpd}
-	recover_init=${RECOVER_INIT:-/etc/init.d/gofro-recover}
-	rc_d=${RC_D:-/etc/rc.d}
 	if [ ! -s "$pending" ]; then
-		rm -f "$panel_backup" || return 1
 		return 0
 	fi
 
+	# A failed retry must not leave an earlier restoration witness usable by S99.
+	rm -f "$state_dir/update-restored" || return 1
 	IFS= read -r previous < "$pending" || return 1
+	backup="$(sed -n '2p' "$pending")"
 	version=${previous#"$releases/"}
 	case "$version" in ''|*/*|*[!0-9.]*) return 1 ;; esac
 	[ "$previous" = "$releases/$version" ] || return 1
 	[ -d "$previous" ] || return 1
+	[ -d "$backup" ] || return 1
+	# boot is also callable on a live router; native stop handles absent instances.
+	/etc/init.d/gofro-agent stop || return 1
+	/etc/init.d/gofro-relay stop || return 1
+	"$backup/restore" restore "$backup" || return 1
 
-	if [ -s "$panel_backup" ]; then
-		"$uci_command" import uhttpd < "$panel_backup" || return 1
-		"$uci_command" commit uhttpd || return 1
-		"$uhttpd_init" restart || return 1
-		rm -f "$panel_backup" || return 1
-		sync || return 1
-	fi
 	current_tmp=$app_root/current.new.$$
 	version_tmp=$state_dir/version.new
 	rm -f "$current_tmp" "$version_tmp"
@@ -41,16 +36,20 @@ recover_update() {
 	printf '%s\n' "$version" > "$version_tmp" || return 1
 	chmod 644 "$version_tmp" || return 1
 	mv -f "$version_tmp" "$state_dir/version" || return 1
-	sync || return 1
-	rm -f "$pending" || return 1
-	sync || return 1
-	rm -f "$rc_d/S08gofro-recover" || return 1
-	"$recover_init" disable || return 1
-	"$recover_init" enable || return 1
+	# This witnesses persistent installer-state restoration, not runtime reconciliation.
+	printf '%s\n' "$previous" > "$state_dir/update-restored" || return 1
+	/etc/init.d/gofro-agent enable || return 1
+	/etc/init.d/gofro-relay enable || return 1
 	sync
 }
 
 boot() {
-	# Restore the release before networking; uhttpd starts later with the restored config.
-	UHTTPD_INIT=: recover_update
+	# Restore the release before networking.
+	if ! recover_update; then
+		/etc/init.d/gofro-agent stop
+		/etc/init.d/gofro-relay stop
+		/etc/init.d/gofro-agent disable
+		/etc/init.d/gofro-relay disable
+		return 1
+	fi
 }

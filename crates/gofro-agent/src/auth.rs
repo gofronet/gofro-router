@@ -101,7 +101,7 @@ pub(crate) async fn status(
     uri: Uri,
     headers: HeaderMap,
 ) -> Response {
-    if !allowed_host(&uri, &headers) {
+    if !allowed_host(&state, &uri, &headers) {
         return error(StatusCode::FORBIDDEN, "request_rejected");
     }
     let csrf = if state.auth.setup() {
@@ -114,14 +114,7 @@ pub(crate) async fn status(
     match csrf {
         Ok(csrf) => {
             let setup = state.auth.setup();
-            let fresh = if setup {
-                match onboarding::fresh_admin(&state) {
-                    Ok(value) => value,
-                    Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
-                }
-            } else {
-                false
-            };
+            let window = setup.then(|| onboarding::setup_window_seconds(&state));
             reply(
                 if setup {
                     "setup"
@@ -132,8 +125,8 @@ pub(crate) async fn status(
                 },
                 csrf,
                 None,
-                setup.then_some(if fresh { "local" } else { "wifi_password" }),
-                fresh.then(|| onboarding::setup_window_seconds(&state)),
+                setup.then_some("code"),
+                window,
             )
         }
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
@@ -146,7 +139,7 @@ pub(crate) async fn setup(
     headers: HeaderMap,
     Json(input): Json<PasswordInput>,
 ) -> Response {
-    if !preauth(&uri, &headers) {
+    if !preauth(&state, &uri, &headers) {
         return error(StatusCode::FORBIDDEN, "request_rejected");
     }
     if let Some(code) = setup_password_error(&input.password) {
@@ -158,37 +151,25 @@ pub(crate) async fn setup(
     if !state.auth.setup() {
         return error(StatusCode::CONFLICT, "setup_completed");
     }
-    let fresh = match onboarding::fresh_admin(&state) {
-        Ok(value) => value,
-        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+    if onboarding::setup_window_seconds(&state) == 0 {
+        return error(StatusCode::FORBIDDEN, "setup_closed");
+    }
+    let Ok(code) = fs::read_to_string(&state.auth.setup_code) else {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "setup_unavailable");
     };
-    if fresh {
-        if onboarding::setup_window_seconds(&state) == 0 {
-            return error(StatusCode::FORBIDDEN, "setup_closed");
-        }
-    } else {
-        let Ok(code) = fs::read_to_string(&state.auth.setup_code) else {
-            return error(StatusCode::INTERNAL_SERVER_ERROR, "setup_unavailable");
-        };
-        if !input
-            .setup_code
-            .as_deref()
-            .is_some_and(|input| setup_code_matches(input, &code))
-        {
-            return error(StatusCode::FORBIDDEN, "invalid_setup_code");
-        }
+    if !input
+        .setup_code
+        .as_deref()
+        .is_some_and(|input| setup_code_matches(input, &code))
+    {
+        return error(StatusCode::FORBIDDEN, "invalid_setup_code");
     }
     let auth = state.auth.clone();
     let state_for_write = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _hashing = hashing;
         write_record(&auth.password, &input.password)?;
-        if fresh {
-            onboarding::write_wifi(&state_for_write)?;
-        } else {
-            fs::remove_file(&auth.setup_code)?;
-        }
-        Ok::<_, anyhow::Error>(())
+        onboarding::complete_admin(&state_for_write, &auth.setup_code)
     })
     .await;
     if !matches!(result, Ok(Ok(()))) {
@@ -206,7 +187,7 @@ pub(crate) async fn login(
     headers: HeaderMap,
     Json(input): Json<PasswordInput>,
 ) -> Response {
-    if !preauth(&uri, &headers) {
+    if !preauth(&state, &uri, &headers) {
         return error(StatusCode::FORBIDDEN, "request_rejected");
     }
     if password_too_long(&input.password) {
@@ -230,18 +211,22 @@ pub(crate) async fn login(
         }
     }
     let auth = state.auth.clone();
+    let state_for_write = state.clone();
     let verified = tokio::task::spawn_blocking(move || {
-        (
-            read_record(&auth.password)
-                .and_then(|record| verify(&record, &input.password))
-                .unwrap_or(false),
-            hashing,
-        )
+        let valid = read_record(&auth.password)
+            .and_then(|record| verify(&record, &input.password))
+            .unwrap_or(false);
+        let result = if valid {
+            onboarding::complete_admin(&state_for_write, &auth.setup_code).map(|()| true)
+        } else {
+            Ok(false)
+        };
+        (result, hashing)
     })
     .await;
     let (valid, hashing) = match verified {
-        Ok(result) => result,
-        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+        Ok((Ok(valid), hashing)) => (valid, hashing),
+        _ => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     };
     if !valid {
         let Ok(mut inner) = state.auth.inner.lock() else {
@@ -288,7 +273,7 @@ pub(crate) async fn require_auth(
     next: Next,
 ) -> Response {
     let headers = request.headers();
-    if !allowed_host(request.uri(), headers) {
+    if !allowed_host(&state, request.uri(), headers) {
         return error(StatusCode::FORBIDDEN, "request_rejected");
     }
     let Ok((_, csrf)) = session(&state.auth, headers) else {
@@ -297,7 +282,7 @@ pub(crate) async fn require_auth(
     if !matches!(
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
-    ) && (!allowed_origin(headers)
+    ) && (!allowed_origin(&state, headers)
         || !headers
             .get("x-csrf-token")
             .and_then(|v| v.to_str().ok())
@@ -308,17 +293,15 @@ pub(crate) async fn require_auth(
     let Ok(step) = onboarding::step(&state) else {
         return error(StatusCode::FORBIDDEN, "onboarding_required");
     };
-    if matches!(
-        step,
-        onboarding::Step::Admin | onboarding::Step::Wifi | onboarding::Step::WifiApplying
-    ) && !matches!(
-        (request.method(), request.uri().path()),
-        (&Method::GET, "/api/status")
-            | (_, "/api/auth/logout")
-            | (_, "/api/onboarding")
-            | (_, "/api/onboarding/wifi")
-            | (_, "/api/onboarding/complete")
-    ) {
+    if matches!(step, onboarding::Step::Admin)
+        && !matches!(
+            (request.method(), request.uri().path()),
+            (&Method::GET, "/api/status")
+                | (_, "/api/auth/logout")
+                | (_, "/api/onboarding")
+                | (_, "/api/onboarding/complete")
+        )
+    {
         return error(StatusCode::CONFLICT, "onboarding_required");
     }
     next.run(request).await
@@ -338,15 +321,15 @@ fn session(auth: &Auth, headers: &HeaderMap) -> Result<(String, String)> {
         .context("invalid session")?;
     Ok((session.token.clone(), session.csrf.clone()))
 }
-fn preauth(uri: &Uri, headers: &HeaderMap) -> bool {
-    allowed_host(uri, headers)
-        && allowed_origin(headers)
+fn preauth(state: &AppState, uri: &Uri, headers: &HeaderMap) -> bool {
+    allowed_host(state, uri, headers)
+        && allowed_origin(state, headers)
         && cookie(headers, CSRF)
             .zip(headers.get("x-csrf-token").and_then(|v| v.to_str().ok()))
             .is_some_and(|(a, b)| constant_time_eq(&a, b))
 }
 fn setup_password_error(password: &str) -> Option<&'static str> {
-    if password.chars().count() < 12 {
+    if password.chars().count() < 8 {
         Some("password_too_short")
     } else if password_too_long(password) {
         Some("password_too_long")
@@ -357,7 +340,7 @@ fn setup_password_error(password: &str) -> Option<&'static str> {
 fn password_too_long(password: &str) -> bool {
     password.len() > 128
 }
-fn allowed_host(uri: &Uri, headers: &HeaderMap) -> bool {
+fn allowed_host(state: &AppState, uri: &Uri, headers: &HeaderMap) -> bool {
     let authority = uri.authority().map(|value| value.as_str());
     let host = headers
         .get(header::HOST)
@@ -365,16 +348,29 @@ fn allowed_host(uri: &Uri, headers: &HeaderMap) -> bool {
     if authority.is_some() && host.is_some() && authority != host {
         return false;
     }
-    matches!(
-        authority.or(host),
-        Some("wifi.gofro.net") | Some("10.203.1.1")
-    )
+    authority.or(host).is_some_and(|value| {
+        value == format!("{}:{}", state.lan.address, state.https_listen.port())
+            || value == format!("{}:{}", crate::model::AP_DOMAIN, state.https_listen.port())
+    })
 }
-fn allowed_origin(headers: &HeaderMap) -> bool {
-    matches!(
-        headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()),
-        Some("https://wifi.gofro.net") | Some("https://10.203.1.1")
-    )
+fn allowed_origin(state: &AppState, headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|value| {
+            value
+                == format!(
+                    "https://{}:{}",
+                    state.lan.address,
+                    state.https_listen.port()
+                )
+                || value
+                    == format!(
+                        "https://{}:{}",
+                        crate::model::AP_DOMAIN,
+                        state.https_listen.port()
+                    )
+        })
 }
 pub(crate) fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut found = None;
@@ -522,410 +518,4 @@ fn setup_code_matches(input: &str, codes: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        fake_dns::FakeDns,
-        geodata::GeoData,
-        model::{ControllerConfig, RoutingConfig},
-        routing::RoutingPolicy,
-        stats::StatsTracker,
-    };
-    use tower::ServiceExt;
-
-    fn test_state(dir: &std::path::Path, password: PathBuf, setup_code: PathBuf) -> AppState {
-        let geodata = Arc::new(GeoData::default());
-        AppState {
-            interface: "eth0".into(),
-            lan_interface: "eth0".into(),
-            wifi_interface: "wlan0".into(),
-            config_path: dir.join("config.json"),
-            mode_command: dir.join("mode"),
-            management_dir: dir.join("management"),
-            config: Arc::new(Mutex::new(ControllerConfig {
-                vpn_enabled: false,
-                active_server_key: None,
-                servers: vec![],
-                routing: RoutingConfig {
-                    domain_rules: vec![],
-                    ip_rules: vec![],
-                    default_target: crate::model::RouteTarget::Vpn,
-                    mode: crate::model::RoutingMode::Rules,
-                    rule_order: None,
-                },
-            })),
-            access_points: Arc::new(Mutex::new(vec![])),
-            stats: Arc::new(Mutex::new(StatsTracker::default())),
-            routing: Arc::new(std::sync::RwLock::new(
-                RoutingPolicy::compile(
-                    RoutingConfig {
-                        domain_rules: vec![],
-                        ip_rules: vec![],
-                        default_target: crate::model::RouteTarget::Vpn,
-                        mode: crate::model::RoutingMode::Rules,
-                        rule_order: None,
-                    },
-                    Arc::clone(&geodata),
-                )
-                .unwrap(),
-            )),
-            routing_degraded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            geodata,
-            fake_dns: Arc::new(FakeDns::open(&dir.join("routing.sqlite")).unwrap()),
-            auth: Arc::new(Auth::open(password, setup_code).unwrap()),
-            managed_operations: Arc::new(Mutex::new(())),
-        }
-    }
-    fn preauth_headers() -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("wifi.gofro.net"));
-        headers.insert(
-            header::ORIGIN,
-            HeaderValue::from_static("https://wifi.gofro.net"),
-        );
-        headers.insert(
-            header::COOKIE,
-            HeaderValue::from_static("__Host-gofro-csrf=token"),
-        );
-        headers.insert("x-csrf-token", HeaderValue::from_static("token"));
-        headers
-    }
-    async fn setup_response(
-        state: &AppState,
-        uri: &Uri,
-        headers: &HeaderMap,
-        setup_code: Option<&str>,
-        password: &str,
-    ) -> Response {
-        setup(
-            State(state.clone()),
-            uri.clone(),
-            headers.clone(),
-            Json(PasswordInput {
-                setup_code: setup_code.map(str::to_owned),
-                password: password.to_owned(),
-            }),
-        )
-        .await
-    }
-    async fn login_response(
-        state: &AppState,
-        uri: &Uri,
-        headers: &HeaderMap,
-        password: &str,
-    ) -> Response {
-        login(
-            State(state.clone()),
-            uri.clone(),
-            headers.clone(),
-            Json(PasswordInput {
-                setup_code: None,
-                password: password.to_owned(),
-            }),
-        )
-        .await
-    }
-
-    #[test]
-    fn rejects_duplicate_cookies() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::COOKIE,
-            HeaderValue::from_static("__Host-gofro-csrf=a; __Host-gofro-csrf=b"),
-        );
-        assert!(cookie(&headers, CSRF).is_none());
-    }
-    #[test]
-    fn accepts_http2_authority_without_host_header() {
-        assert!(allowed_host(
-            &"https://wifi.gofro.net/api/auth/status".parse().unwrap(),
-            &HeaderMap::new()
-        ));
-    }
-    #[test]
-    fn rejects_conflicting_authority_and_host_header() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("10.203.1.1"));
-        assert!(!allowed_host(
-            &"https://wifi.gofro.net/api/auth/status".parse().unwrap(),
-            &headers
-        ));
-    }
-    #[test]
-    fn accepts_each_migrated_access_point_password() {
-        assert!(setup_code_matches("second", "first\nsecond\n"));
-    }
-    #[test]
-    fn validates_setup_password_character_and_byte_limits() {
-        assert_eq!(
-            setup_password_error(&"a".repeat(11)),
-            Some("password_too_short")
-        );
-        assert_eq!(setup_password_error(&"a".repeat(12)), None);
-        assert_eq!(setup_password_error(&"a".repeat(128)), None);
-        assert_eq!(
-            setup_password_error(&"a".repeat(129)),
-            Some("password_too_long")
-        );
-        assert_eq!(setup_password_error(&"é".repeat(12)), None);
-        assert_eq!(
-            setup_password_error(&"😀".repeat(33)),
-            Some("password_too_long")
-        );
-    }
-    #[test]
-    fn preauth_requires_matching_csrf_token() {
-        let uri: Uri = "https://wifi.gofro.net/api/auth/setup".parse().unwrap();
-        let mut headers = preauth_headers();
-        assert!(preauth(&uri, &headers));
-        headers.insert("x-csrf-token", HeaderValue::from_static("wrong"));
-        assert!(!preauth(&uri, &headers));
-    }
-    #[tokio::test]
-    async fn handlers_enforce_setup_password_and_login_flow() {
-        let dir = std::env::temp_dir().join(format!(
-            "gofro-auth-handler-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&dir).unwrap();
-        let password_path = dir.join("admin-password");
-        let setup_code = dir.join("setup-code");
-        fs::write(&setup_code, "setup-code\n").unwrap();
-        let state = test_state(&dir, password_path.clone(), setup_code);
-        let uri: Uri = "https://wifi.gofro.net/api/auth/setup".parse().unwrap();
-        let mut headers = preauth_headers();
-        let short = setup_response(&state, &uri, &headers, Some("setup-code"), "short").await;
-        assert_eq!(short.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            axum::body::to_bytes(short.into_body(), usize::MAX)
-                .await
-                .unwrap()
-                .as_ref(),
-            br#"{"error":"password_too_short"}"#
-        );
-        assert!(!password_path.exists());
-        let password = "a valid password";
-        assert_eq!(
-            setup_response(&state, &uri, &headers, Some("setup-code"), password)
-                .await
-                .status(),
-            StatusCode::OK
-        );
-        assert!(
-            fs::read_to_string(&password_path)
-                .unwrap()
-                .starts_with("gofro-scrypt-v1$")
-        );
-        assert_eq!(
-            login_response(&state, &uri, &headers, password)
-                .await
-                .status(),
-            StatusCode::OK
-        );
-        assert_eq!(
-            login_response(&state, &uri, &headers, "wrong password")
-                .await
-                .status(),
-            StatusCode::UNAUTHORIZED
-        );
-        headers.insert("x-csrf-token", HeaderValue::from_static("wrong"));
-        assert_eq!(
-            login_response(&state, &uri, &headers, password)
-                .await
-                .status(),
-            StatusCode::FORBIDDEN
-        );
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[tokio::test]
-    async fn reboot_route_rejects_missing_session_and_csrf() {
-        let dir = std::env::temp_dir().join(format!("gofro-reboot-auth-{}", token().unwrap()));
-        fs::create_dir(&dir).unwrap();
-        let state = test_state(&dir, dir.join("admin-password"), dir.join("setup-code"));
-        let request = Request::post("/api/reboot")
-            .header(header::HOST, "wifi.gofro.net")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        assert_eq!(
-            crate::api::secure_router(state.clone())
-                .oneshot(request)
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::UNAUTHORIZED
-        );
-        let (session, csrf) = state.auth.issue().unwrap();
-        let request = Request::post("/api/reboot")
-            .header(header::HOST, "wifi.gofro.net")
-            .header(header::ORIGIN, "https://wifi.gofro.net")
-            .header(header::COOKIE, format!("{SESSION}={session}"))
-            .header("x-csrf-token", format!("wrong-{csrf}"))
-            .body(axum::body::Body::empty())
-            .unwrap();
-        assert_eq!(
-            crate::api::secure_router(state)
-                .oneshot(request)
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::FORBIDDEN
-        );
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[tokio::test]
-    async fn managed_routes_reject_missing_sessions_and_bad_csrf_before_ssh() {
-        let dir = std::env::temp_dir().join(format!("gofro-managed-auth-{}", token().unwrap()));
-        fs::create_dir(&dir).unwrap();
-        let state = test_state(&dir, dir.join("admin-password"), dir.join("setup-code"));
-        for (method, path) in [
-            (Method::POST, "/api/servers/management"),
-            (Method::POST, "/api/servers/restart"),
-            (Method::POST, "/api/servers/friends"),
-            (Method::PUT, "/api/servers/friends"),
-            (Method::DELETE, "/api/servers/friends"),
-            (Method::POST, "/api/servers/friends/profile"),
-        ] {
-            let request = Request::builder()
-                .method(method.clone())
-                .uri(path)
-                .header(header::HOST, "wifi.gofro.net")
-                .body(axum::body::Body::empty())
-                .unwrap();
-            assert_eq!(
-                crate::api::secure_router(state.clone())
-                    .oneshot(request)
-                    .await
-                    .unwrap()
-                    .status(),
-                StatusCode::UNAUTHORIZED
-            );
-            let (session, csrf) = state.auth.issue().unwrap();
-            let request = Request::builder()
-                .method(method)
-                .uri(path)
-                .header(header::HOST, "wifi.gofro.net")
-                .header(header::ORIGIN, "https://wifi.gofro.net")
-                .header(header::COOKIE, format!("{SESSION}={session}"))
-                .header("x-csrf-token", format!("wrong-{csrf}"))
-                .body(axum::body::Body::empty())
-                .unwrap();
-            assert_eq!(
-                crate::api::secure_router(state.clone())
-                    .oneshot(request)
-                    .await
-                    .unwrap()
-                    .status(),
-                StatusCode::FORBIDDEN
-            );
-        }
-        let (session, csrf) = state.auth.issue().unwrap();
-        let request = Request::post("/api/servers/friends")
-            .header(header::HOST, "wifi.gofro.net")
-            .header(header::ORIGIN, "https://wifi.gofro.net")
-            .header(header::COOKIE, format!("{SESSION}={session}"))
-            .header("x-csrf-token", csrf)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(axum::body::Body::from(
-                r#"{"public_key":"Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","name":"Friend"}"#,
-            ))
-            .unwrap();
-        // The body is accepted without peer_key; the unmanaged server is rejected before SSH.
-        assert_eq!(
-            crate::api::secure_router(state.clone())
-                .oneshot(request)
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[tokio::test]
-    async fn incomplete_onboarding_cannot_fall_back_to_a_legacy_code() {
-        let dir = std::env::temp_dir().join(format!("gofro-claim-closed-{}", token().unwrap()));
-        fs::create_dir(&dir).unwrap();
-        let code = dir.join("ap-password");
-        fs::write(&code, "old-wifi-password").unwrap();
-        let password_path = dir.join("admin-password");
-        let state = test_state(&dir, password_path.clone(), code);
-        let uri = "https://wifi.gofro.net/api/auth/setup".parse().unwrap();
-        let marker = dir.join("onboarding-state");
-        for phase in ["wifi\n", "wifi_applying\n", "server\n", "invalid\n"] {
-            fs::write(&marker, phase).unwrap();
-            fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
-            let response = setup_response(
-                &state,
-                &uri,
-                &preauth_headers(),
-                Some("old-wifi-password"),
-                "a valid password",
-            )
-            .await;
-            assert_ne!(response.status(), StatusCode::OK);
-            assert!(!password_path.exists());
-        }
-        fs::write(&marker, "admin\n").unwrap();
-        let response = setup_response(
-            &state,
-            &uri,
-            &preauth_headers(),
-            Some("old-wifi-password"),
-            "a valid password",
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert!(!password_path.exists());
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn fresh_setup_claims_one_admin_and_resumes_wifi() {
-        let dir = std::env::temp_dir().join(format!("gofro-fresh-claim-{}", token().unwrap()));
-        fs::create_dir(&dir).unwrap();
-        let password_path = dir.join("admin-password");
-        let state = test_state(&dir, password_path.clone(), dir.join("no-legacy-code"));
-        let marker = dir.join("onboarding-state");
-        fs::write(&marker, "admin\n").unwrap();
-        fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
-        let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
-        let uptime = fs::read_to_string("/proc/uptime").unwrap();
-        let now: u64 = uptime.split('.').next().unwrap().parse().unwrap();
-        let window = dir.join("onboarding-window");
-        fs::write(&window, format!("{} {}\n", boot.trim(), now + 900)).unwrap();
-        fs::set_permissions(&window, fs::Permissions::from_mode(0o600)).unwrap();
-        let uri = "https://wifi.gofro.net/api/auth/setup".parse().unwrap();
-        let headers = preauth_headers();
-        let password = "a fresh admin password";
-        let (first, second) = tokio::join!(
-            setup_response(&state, &uri, &headers, None, password),
-            setup_response(&state, &uri, &headers, None, password),
-        );
-        assert_eq!(
-            [first.status(), second.status()]
-                .iter()
-                .filter(|status| **status == StatusCode::OK)
-                .count(),
-            1
-        );
-        assert!(verify(&read_record(&password_path).unwrap(), password).unwrap());
-        assert_eq!(onboarding::step(&state).unwrap(), onboarding::Step::Wifi);
-        assert_eq!(fs::read_to_string(&marker).unwrap(), "wifi\n");
-        fs::remove_dir_all(dir).unwrap();
-    }
-    #[test]
-    fn verifies_record() {
-        let path = std::env::temp_dir().join("gofro-auth-test");
-        write_record(&path, "a long enough password").unwrap();
-        assert!(verify(&read_record(&path).unwrap(), "a long enough password").unwrap());
-        assert!(!verify(&read_record(&path).unwrap(), "wrong").unwrap());
-        fs::remove_file(path).unwrap();
-    }
-}
+mod tests;

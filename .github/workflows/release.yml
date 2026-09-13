@@ -7,6 +7,11 @@ on:
         description: Semantic version without the v prefix
         required: true
         type: string
+      publish:
+        description: Publish after hardware qualification and exact artifact hash comparison
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -63,32 +68,27 @@ jobs:
           cargo fmt --check
           cargo test --workspace --locked
           cargo clippy --workspace --all-targets --locked -- -D warnings
-          sh -n deploy/openwrt/install.sh \
+          for file in deploy/openwrt/install.sh \
             deploy/openwrt/root/etc/init.d/* \
             deploy/openwrt/root/etc/hotplug.d/iface/* \
             deploy/openwrt/root/usr/libexec/gofro/* \
             deploy/openwrt/root/usr/sbin/* \
-            deploy/openwrt/tests/*.sh
-          sh -n deploy/raspios/install.sh \
-            deploy/raspios/root/usr/libexec/gofro/* \
-            deploy/raspios/root/usr/sbin/* \
-            deploy/raspios/tests/*.sh
+            deploy/openwrt/tests/*.sh deploy/openwrt/tests/fixtures/*; do
+            sh -n "$file"
+          done
           shellcheck -s sh deploy/openwrt/install.sh \
             deploy/openwrt/root/etc/init.d/* \
             deploy/openwrt/root/etc/hotplug.d/iface/* \
             deploy/openwrt/root/usr/libexec/gofro/* \
             deploy/openwrt/root/usr/sbin/* \
-            deploy/openwrt/tests/*.sh
-          shellcheck -s sh deploy/raspios/install.sh \
-            deploy/raspios/root/usr/libexec/gofro/* \
-            deploy/raspios/root/usr/sbin/* \
-            deploy/raspios/tests/*.sh
-          cmp deploy/openwrt/update-public.pem deploy/raspios/update-public.pem
+            deploy/openwrt/tests/*.sh deploy/openwrt/tests/fixtures/*
           cmp deploy/openwrt/update-public.pem deploy/server/update-public.pem
           sh deploy/openwrt/tests/mode.sh
           sh deploy/openwrt/tests/service.sh
           sh deploy/openwrt/tests/health.sh
           sh deploy/openwrt/tests/hotplug.sh
+          sh deploy/openwrt/tests/guard.sh
+          sh deploy/openwrt/tests/network.sh
           sh deploy/openwrt/tests/transaction.sh
           sh deploy/openwrt/tests/tunnel.sh
           sh deploy/openwrt/tests/update.sh
@@ -96,21 +96,33 @@ jobs:
           sh deploy/openwrt/tests/wifi.sh
           sh deploy/openwrt/tests/onboarding.sh
           sh deploy/openwrt/tests/install-output.sh
-          sh deploy/raspios/tests/health.sh
-          sh deploy/raspios/tests/mode.sh
-          sh deploy/raspios/tests/service.sh
-          sh deploy/raspios/tests/network.sh
-          sh deploy/raspios/tests/recover.sh
-          sh deploy/raspios/tests/transaction.sh
-          sh deploy/raspios/tests/tunnel.sh
-          sh deploy/raspios/tests/update.sh
-          sh deploy/raspios/tests/version.sh
-          sh deploy/raspios/tests/wifi.sh
-          sh deploy/raspios/tests/onboarding.sh
-          bash -n deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install
+          for file in deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install deploy/server/tests/*.sh; do
+            bash -n "$file"
+          done
           shellcheck -s bash deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install deploy/server/tests/*.sh
           bash deploy/server/tests/version.sh
           bash deploy/server/tests/managed.sh
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends iproute2 nftables python3
+          cargo build --locked -p gofro-agent --bin gofro-agent
+          FIXTURES=$(mktemp -d)
+          export FIXTURES
+          trap 'rm -rf "$FIXTURES"' EXIT
+          bash deploy/openwrt/tests/dataplane-netns.sh
+          sudo -n docker build -t gofro-mode-test - <<'EOF'
+          FROM debian:trixie-slim
+          RUN apt-get update && apt-get install -y --no-install-recommends iproute2 nftables python3
+          EOF
+          sudo -n docker run --rm --network none --cap-add NET_ADMIN --user 0:0 \
+            -v "$GITHUB_WORKSPACE:/src:ro" -w /src gofro-mode-test \
+            sh deploy/openwrt/tests/mode-netns.sh --run
+          # Nested ip netns needs mount/setns privileges, never host networking.
+          sudo -n docker run --rm --network none --user 0:0 \
+            --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN \
+            --security-opt apparmor=unconfined \
+            -v "$GITHUB_WORKSPACE:/src:ro" -v "$FIXTURES:/fixtures:ro" \
+            -e AGENT_BIN=/src/target/debug/gofro-agent -e FIXTURES=/fixtures \
+            -w /src gofro-mode-test sh deploy/openwrt/tests/dns-netns.sh
 
       - name: Build web UI
         working-directory: web
@@ -353,11 +365,9 @@ jobs:
           i586-unknown-linux-musl i586-openwrt-linux-musl gofro-router-manifest-i586-openwrt-linux-musl.json openwrt
           riscv64gc-unknown-linux-musl riscv64-openwrt-linux-musl gofro-router-manifest-riscv64-openwrt-linux-musl.json openwrt
           x86_64-unknown-linux-musl x86_64-openwrt-linux-musl gofro-router-manifest-x86_64-openwrt-linux-musl.json openwrt
-          aarch64-unknown-linux-musl aarch64-raspios-linux-musl gofro-router-manifest-aarch64-raspios-linux-musl.json raspios
           x86_64-unknown-linux-musl x86_64-server-linux-musl gofro-router-manifest-x86_64-server-linux-musl.json server
           EOF
           install -m 755 deploy/openwrt/root/usr/sbin/gofro-update "$DIST/gofro-install"
-          install -m 755 deploy/raspios/root/usr/sbin/gofro-update "$DIST/gofro-install-raspios"
           install -m 755 deploy/server/gofro-server-install "$DIST/gofro-server-install"
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
@@ -367,14 +377,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish:
-    name: Sign and publish
+  sign:
+    name: Sign candidate
     needs: package
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: release
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -439,8 +447,56 @@ jobs:
             validate "$(jq -r .target "$manifest")" "$(basename "$manifest")"
           done
           test -s "$DIST/gofro-install"
-          test -s "$DIST/gofro-install-raspios"
           test -s "$DIST/gofro-server-install"
+
+      - name: Record candidate inventory
+        working-directory: ${{ runner.temp }}/dist
+        run: |
+          set -euo pipefail
+          archives=(gofro-router-*.tar.gz)
+          manifests=(gofro-router-manifest*.json)
+          signatures=(gofro-router-manifest*.json.sig)
+          files=(*)
+          [[ ${#archives[@]} == 9 && ${#manifests[@]} == 9 && ${#signatures[@]} == 9 && ${#files[@]} == 29 ]]
+          sha256sum -- "${files[@]}" | jq -Rn \
+            --arg version "$VERSION" --arg commit "$GITHUB_SHA" \
+            --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" '
+              {version: $version, commit: $commit, run_id: $run_id, run_attempt: $run_attempt,
+               assets: [inputs | capture("^(?<sha256>[0-9a-f]{64})  (?<name>.+)$")]}
+            ' > "$RUNNER_TEMP/release-metadata.json"
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: signed-release-v${{ inputs.version }}-${{ github.sha }}
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+          retention-days: 30
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: signed-release-metadata-v${{ inputs.version }}-${{ github.sha }}
+          path: ${{ runner.temp }}/release-metadata.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish qualified candidate
+    if: inputs.publish == true
+    needs: sign
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: signed-release-v${{ inputs.version }}-${{ github.sha }}
+          path: ${{ runner.temp }}/dist
 
       - name: Create release tag
         env:
@@ -467,7 +523,7 @@ jobs:
           TAG=v$VERSION
           ASSETS=("$DIST"/gofro-router-*.tar.gz "$DIST"/gofro-router-manifest*.json \
             "$DIST"/gofro-router-manifest*.json.sig "$DIST/gofro-install" \
-            "$DIST/gofro-install-raspios" "$DIST/gofro-server-install")
+            "$DIST/gofro-server-install")
           if STATE=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             [[ $STATE == true ]] || { echo 'published release already exists' >&2; exit 1; }
             gh release delete "$TAG" --yes
