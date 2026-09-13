@@ -18,10 +18,10 @@ flock -n 9 || die 'another routing operation is in progress'
 umask 077
 previous=
 if [ -e "$state/guard-device" ] || [ -L "$state/guard-device" ]; then
-	[ ! -L "$state" ] && [ -d "$state" ] &&
-		[ "$(stat -c '%u:%a' "$state")" = 0:700 ] || die 'unsafe guard state directory'
-	[ ! -L "$state/guard-device" ] && [ -f "$state/guard-device" ] &&
-		[ "$(stat -c '%u:%a' "$state/guard-device")" = 0:600 ] || die 'unsafe guard device file'
+	if [ -L "$state" ] || [ ! -d "$state" ] ||
+		[ "$(stat -c '%u:%a' "$state")" != 0:700 ]; then die 'unsafe guard state directory'; fi
+	if [ -L "$state/guard-device" ] || [ ! -f "$state/guard-device" ] ||
+		[ "$(stat -c '%u:%a' "$state/guard-device")" != 0:600 ]; then die 'unsafe guard device file'; fi
 	[ "$(wc -c < "$state/guard-device")" -le 16 ] || die 'invalid guard device file'
 	previous="$(cat "$state/guard-device")"
 	valid_device "$previous"

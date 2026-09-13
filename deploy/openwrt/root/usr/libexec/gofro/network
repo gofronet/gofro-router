@@ -3,17 +3,25 @@ set -eu
 
 die() { echo "gofro network: $*" >&2; exit 1; }
 
+optional_field() {
+	# Native jsonfilter returns 1 for no matches AND malformed JSON. Validate first.
+	[ "$(printf '%s' "$1" | jsonfilter -t '@' 2>/dev/null)" = object ] || die 'invalid network status JSON'
+	printf '%s' "$1" | jsonfilter -e "$2" 2>/dev/null ||
+		[ "$?" = 1 ] || die "cannot read optional network field $2"
+}
+
 # LAN is the OpenWrt logical LAN. Gofro supports any address/device behind it,
 # never a WAN/PPPoE logical interface selected through its own configuration.
 [ -z "$(uci -q get gofro.main.lan_network 2>/dev/null || true)" ] || die 'lan_network is unsupported; use OpenWrt logical lan'
 status="$(ubus call network.interface.lan status 2>/dev/null)" || die 'cannot read network.interface.lan'
-up="$(printf '%s' "$status" | jsonfilter -e '@.up' 2>/dev/null)"
-proto="$(printf '%s' "$status" | jsonfilter -e '@.proto' 2>/dev/null)"
+up="$(printf '%s' "$status" | jsonfilter -e '@.up' 2>/dev/null)" || die 'LAN has no valid up status'
+proto="$(printf '%s' "$status" | jsonfilter -e '@.proto' 2>/dev/null)" || die 'LAN has no valid protocol'
+[ -n "$proto" ] || die 'LAN has no valid protocol'
 [ "$up" = true ] || die 'LAN is not up'
 [ "$proto" != pppoe ] || die 'LAN cannot use PPPoE'
-address="$(printf '%s' "$status" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
-prefix="$(printf '%s' "$status" | jsonfilter -e '@["ipv4-address"][0].mask' 2>/dev/null)"
-device="$(printf '%s' "$status" | jsonfilter -e '@.l3_device' 2>/dev/null)"
+address="$(printf '%s' "$status" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)" || die 'LAN has no valid primary IPv4 address'
+prefix="$(printf '%s' "$status" | jsonfilter -e '@["ipv4-address"][0].mask' 2>/dev/null)" || die 'LAN has no valid IPv4 prefix'
+device="$(printf '%s' "$status" | jsonfilter -e '@.l3_device' 2>/dev/null)" || die 'LAN has no valid l3_device'
 case "$address" in ''|*[!0-9.]*|.*|*..*|*.) die 'LAN has no valid primary IPv4 address' ;; esac
 IFS=. read -r octet1 octet2 octet3 octet4 extra <<EOF
 $address
@@ -24,13 +32,15 @@ for octet in "$octet1" "$octet2" "$octet3" "$octet4"; do
 	[ "$octet" -le 255 ] || die 'LAN has no valid primary IPv4 address'
 done
 case "$prefix" in ''|*[!0-9]*) die 'LAN has no valid IPv4 prefix' ;; esac
-[ "$prefix" -ge 0 ] && [ "$prefix" -le 32 ] || die 'LAN has no valid IPv4 prefix'
+if [ "$prefix" -lt 0 ] || [ "$prefix" -gt 32 ]; then die 'LAN has no valid IPv4 prefix'; fi
 case "$device" in ''|*[!A-Za-z0-9_.-]*|????????????????*) die 'LAN has no valid l3_device' ;; esac
 
 # Compare both configured and live identities: DHCP and down WANs count too.
-lan_devices="$device $(printf '%s' "$status" | jsonfilter -e '@.device') $(uci -q get network.lan.device || true) $(uci -q get network.lan.ifname || true)"
+lan_device="$(optional_field "$status" '@.device')" || exit 1
+lan_devices="$device $lan_device $(uci -q get network.lan.device || true) $(uci -q get network.lan.ifname || true)"
 device_status="$(ubus call network.device status "{\"name\":\"$device\"}" 2>/dev/null)" || die 'cannot read LAN device membership'
-lan_devices="$lan_devices $(printf '%s' "$device_status" | jsonfilter -e '@["bridge-members"][*]')"
+members="$(optional_field "$device_status" '@["bridge-members"][*]')" || exit 1
+lan_devices="$lan_devices $members"
 case " $lan_devices " in *' @wan '*|*' @wan6 '*) die 'LAN aliases WAN' ;; esac
 wan_known=
 for wan in wan wan6; do
@@ -38,13 +48,16 @@ for wan in wan wan6; do
 		[ -z "$(uci -q get "network.$wan" || true)" ] || die "cannot establish $wan device identity"
 		continue
 	}
-	wan_devices="$(printf '%s' "$wan_status" | jsonfilter -e '@.l3_device' -e '@.device') $(uci -q get "network.$wan.device" || true) $(uci -q get "network.$wan.ifname" || true)"
+	wan_l3="$(optional_field "$wan_status" '@.l3_device')" || exit 1
+	wan_device="$(optional_field "$wan_status" '@.device')" || exit 1
+	wan_devices="$wan_l3 $wan_device $(uci -q get "network.$wan.device" || true) $(uci -q get "network.$wan.ifname" || true)"
 	[ -n "$(printf '%s' "$wan_devices" | tr -d '[:space:]')" ] || die "cannot establish $wan device identity"
 	wan_members=
 	for candidate in $wan_devices; do
 		case "$candidate" in @*) continue ;; *[!A-Za-z0-9_.-]*|????????????????*) die "$wan has an invalid device identity" ;; esac
 		device_status="$(ubus call network.device status "{\"name\":\"$candidate\"}" 2>/dev/null)" || die "cannot read $wan device membership"
-		wan_members="$wan_members $(printf '%s' "$device_status" | jsonfilter -e '@["bridge-members"][*]')"
+		members="$(optional_field "$device_status" '@["bridge-members"][*]')" || exit 1
+		wan_members="$wan_members $members"
 	done
 	for candidate in $wan_devices $wan_members; do
 		case "$candidate" in
@@ -84,7 +97,7 @@ for section in $(printf '%s\n' "$firewall" | sed -n 's/^firewall\.\([^=]*\)=zone
 	[ "$members" = lan ] || die 'LAN firewall zone is not exclusive to logical lan'
 	[ -z "$(uci -q get "firewall.$section.device" || true)$(uci -q get "firewall.$section.subnet" || true)" ] || die 'LAN firewall zone has ambiguous device/subnet membership'
 	zone="$(uci -q get "firewall.$section.name" || true)"
-	[ "$zone" != wan ] && [ "$zone" != wan6 ] || die 'LAN uses a WAN firewall zone'
+	if [ "$zone" = wan ] || [ "$zone" = wan6 ]; then die 'LAN uses a WAN firewall zone'; fi
 done
 case "$zone" in ''|*[!A-Za-z0-9_.-]*|????????????????*) die 'LAN has no valid firewall zone' ;; esac
 count=0

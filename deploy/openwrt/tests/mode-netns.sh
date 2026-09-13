@@ -1,7 +1,7 @@
 #!/bin/sh
 # Run only in a disposable Docker container with --network none --cap-add NET_ADMIN.
 set -eu
-[ "${1:-}" = --run ] && [ -e /.dockerenv ] || { echo 'requires disposable Docker --network none' >&2; exit 2; }
+if [ "${1:-}" != --run ] || [ ! -e /.dockerenv ]; then echo 'requires disposable Docker --network none' >&2; exit 2; fi
 if [ "$(ip -o link show up | wc -l)" -ne 1 ] || ! ip link show lo up >/dev/null; then
 	echo 'requires an empty network namespace' >&2; exit 2
 fi

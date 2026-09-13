@@ -413,6 +413,23 @@ fi
 
 release=$RELEASES/$VERSION
 pending=
+if [ ! -s "$PENDING" ]; then
+	# Read-only history/network preflight does not require stat.
+	[ "$mode" != update ] || preflight_routing_history
+	[ "$mode" != install ] || [ ! -e /etc/gofro/routing-legacy.json ] || die 'fresh installation cannot adopt legacy routing history'
+fi
+# Install security-validation dependencies before activation OR pending recovery.
+# OpenWrt does not ship stat by default; guard/transaction/service require it.
+if [ "$mode" = install ]; then
+	apk update
+	apk add ca-bundle coreutils-stat dnsmasq firewall4 ip-full jsonfilter kmod-wireguard \
+		openssl-util openssh-client openssh-client-utils openssh-keygen sshpass uclient-fetch uhttpd wireguard-tools
+else
+	[ -n "$previous" ] || die 'Gofro is not installed'
+	apk update
+	apk add coreutils-stat openssh-client openssh-client-utils openssh-keygen sshpass
+fi
+
 if [ -s "$PENDING" ]; then
 	[ "$mode" = update ] || die 'a pending update must be recovered before installing'
 	read_pending || die 'pending update is invalid'
@@ -424,19 +441,7 @@ if [ -s "$PENDING" ]; then
 	ROLLBACK=
 	die 'pending update was rolled back; retry the update'
 fi
-[ "$mode" != update ] || preflight_routing_history
-[ "$mode" != install ] || [ ! -e /etc/gofro/routing-legacy.json ] || die 'fresh installation cannot adopt legacy routing history'
 prune_releases "$previous" "$pending"
-
-if [ "$mode" = install ]; then
-	apk update
-	apk add ca-bundle dnsmasq firewall4 ip-full jsonfilter kmod-wireguard \
-		openssl-util openssh-client openssh-client-utils openssh-keygen sshpass uclient-fetch uhttpd wireguard-tools
-else
-	[ -n "$previous" ] || die 'Gofro is not installed'
-	apk update
-	apk add openssh-client openssh-client-utils openssh-keygen sshpass
-fi
 
 [ "$previous" = "$release" ] || enough_space || die 'not enough persistent space for this release'
 

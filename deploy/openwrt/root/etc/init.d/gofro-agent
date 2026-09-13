@@ -20,10 +20,10 @@ gofro_apply_lock() {
 	if [ ! -e "$state" ]; then
 		(umask 077; mkdir -p "$state") || gofro_fail 'cannot create state directory'
 	fi
-	[ -d "$state" ] && [ "$(stat -c '%u:%a' "$state")" = 0:700 ] || gofro_fail 'unsafe state directory'
+	if [ ! -d "$state" ] || [ "$(stat -c '%u:%a' "$state")" != 0:700 ]; then gofro_fail 'unsafe state directory'; fi
 	ancestor=$state
 	while :; do
-		[ ! -L "$ancestor" ] && [ -d "$ancestor" ] || gofro_fail 'unsafe apply lock ancestor'
+		if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then gofro_fail 'unsafe apply lock ancestor'; fi
 		case "$(stat -c '%u:%a' "$ancestor")" in
 			0:*[2367][0-7]|0:*[2367]) gofro_fail 'writable apply lock ancestor' ;;
 			0:*) ;; *) gofro_fail 'non-root apply lock ancestor' ;;
@@ -35,8 +35,8 @@ gofro_apply_lock() {
 		# Never replace/unlink the inode also locked by the Rust controller.
 		(umask 077; set -C; : > "$state/apply.lock") || gofro_fail 'cannot create apply lock'
 	fi
-	[ ! -L "$state/apply.lock" ] && [ -f "$state/apply.lock" ] &&
-		[ "$(stat -c '%u:%a:%h' "$state/apply.lock")" = 0:600:1 ] || gofro_fail 'unsafe apply lock'
+	if [ -L "$state/apply.lock" ] || [ ! -f "$state/apply.lock" ] ||
+		[ "$(stat -c '%u:%a:%h' "$state/apply.lock")" != 0:600:1 ]; then gofro_fail 'unsafe apply lock'; fi
 	exec 8>>"$state/apply.lock" || gofro_fail 'cannot open apply lock'
 	# Order: procd lifecycle lock -> apply (8) -> helper's mode lock (9).
 	flock 8 || gofro_fail 'cannot acquire apply lock'
@@ -120,7 +120,7 @@ gofro_capture_instances() {
 	case "$values" in *[!0-9[:space:]]*) gofro_fail 'invalid termination timeout' ;; esac
 	for timeout in $values; do
 		case "$timeout" in 0[0-9]*) gofro_fail 'invalid termination timeout' ;; esac
-		[ "${#timeout}" -le 3 ] && [ "$timeout" -le 300 ] || gofro_fail 'invalid termination timeout'
+		if [ "${#timeout}" -gt 3 ] || [ "$timeout" -gt 300 ]; then gofro_fail 'invalid termination timeout'; fi
 		[ "$timeout" -le "$gofro_stop_wait" ] || gofro_stop_wait=$timeout
 	done
 	# No PIDs alone is not proof: a registered instance may be awaiting respawn.

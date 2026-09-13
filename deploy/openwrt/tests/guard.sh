@@ -6,7 +6,7 @@ TMP="$(mktemp -d)"
 TMP="$(CDPATH='' cd "$TMP" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
 export TEST_ROOT="$TMP" GOFRO_HELPERS="$TMP/bin" GOFRO_GUARD_DIR="$TMP/state" GOFRO_MODE_LOCK="$TMP/lock"
-mkdir "$TMP/bin"
+env mkdir "$TMP/bin"
 cp "$ROOT/deploy/openwrt/root/usr/libexec/gofro/guard" "$TMP/bin/guard"
 cat > "$TMP/bin/stub" <<'EOF'
 #!/bin/sh
@@ -168,7 +168,7 @@ procd_kill() {
 	if [ "${TEST_POST_QUERY_FAIL:-0}" = 1 ]; then TEST_UBUS_FAIL=1; export TEST_UBUS_FAIL; fi
 }
 kill() {
-	[ "$#" = 2 ] && [ "$1" = -0 ] || exit 1
+	if [ "$#" != 2 ] || [ "$1" != -0 ]; then exit 1; fi
 	case "$2" in 101|102) ;; *) exit 1 ;; esac
 	printf 'probe:%s\n' "$2" >> "$TMP/log"
 	[ -e "$TMP/pid.$2" ]

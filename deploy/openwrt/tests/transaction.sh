@@ -17,6 +17,8 @@ export FS
 
 guard_untouched() {
 	[ ! -e "$FS/early-tls" ] || return 1
+	# Every fresh fixture starts like native OpenWrt: no stat until apk installs it.
+	[ ! -e "$FS/early-stat" ] || return 1
 	if [ -e "$FS/expected-guard" ]; then cmp "$FS/expected-guard" "$FS/runtime-guard" || return 1
 	else [ ! -e "$FS/runtime-guard" ] || return 1; fi
 	if grep '^nft:' "$FS/commands" | grep -Ev '^nft:(list tables|-s list chain inet gofro_guard gofro_guard|-c -f -|-f -)$'; then
@@ -179,6 +181,13 @@ restored() {
 BASE_PATH=$PATH
 REAL_HASH="$(command -v sha256sum || command -v shasum)"; export REAL_HASH
 REAL_STAT="$(command -v stat)"; export REAL_STAT
+for install_mode in install update; do
+	if [ "$install_mode" = install ]; then fresh missing-stat-install; else upgrade missing-stat-update; fi
+	FAIL_MATCH='apk:update'; export FAIL_MATCH
+	if [ "$install_mode" = install ]; then fails sh "$FS/bundle/install.sh"; else fails sh "$FS/bundle/install.sh" --update; fi
+	[ ! -e "$FS/stat-installed" ]
+	if grep -Eq '^stat:|^uci:(set|add_list|del_list|commit)|^gofro-agent:(stop|restart)' "$FS/commands"; then exit 1; fi
+done
 upgrade interrupted-before-guard-prepare
 copy_script "$SOURCE/root/etc/init.d/gofro-agent" "$FS/native-agent"
 cp "$SOURCE/tests/fixtures/native-stop" "$FS/bundle/root/etc/init.d/gofro-agent"
@@ -410,6 +419,8 @@ for recovery in boot installer updater; do
 		sh "$FS/etc/rc.d/S08gofro-recover" boot
 		fails sh "$FS/etc/rc.d/S99gofro-finalize" boot
 	elif [ "$recovery" = installer ]; then
+		# An interrupted installation may need to install stat before recovery validates files.
+		rm "$FS/stat-installed"
 		fails sh "$FS/bundle/install.sh" --update
 		grep -q 'runtime guard retained; forwarding may be blocked' "$FS/output"
 	else

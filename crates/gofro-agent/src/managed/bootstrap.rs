@@ -362,10 +362,11 @@ mod tests {
         let installer = "printf '%s\\n' \"$*\" >> \"$FIXTURE/installs\"; printf 'secret installer output\\n'; [ ! -f \"$FIXTURE/upgrade\" ] || touch \"$FIXTURE/compatible\"; exit 0";
         let script = bootstrap_script("restricted public key")
             .replace(&shell_quote(SERVER_INSTALLER), &shell_quote(installer))
-            .replace("/usr/local/", &format!("{}/usr/local/", root.display()))
-            .replace("/etc/", &format!("{}/etc/", root.display()))
-            .replace("/root/", &format!("{}/root/", root.display()))
-            .replace("/tmp/gofro", &format!("{}/tmp/gofro", root.display()));
+            // Expand the fixture root in the shell so /tmp/gofro cannot rewrite it again.
+            .replace("/usr/local/", "\"$FIXTURE\"/usr/local/")
+            .replace("/etc/", "\"$FIXTURE\"/etc/")
+            .replace("/root/", "\"$FIXTURE\"/root/")
+            .replace("/tmp/gofro", "\"$FIXTURE\"/tmp/gofro");
         let run = || {
             let mut command = Command::new("bash");
             command

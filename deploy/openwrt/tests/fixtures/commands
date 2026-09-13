@@ -56,9 +56,13 @@ uci)
 	esac
 	;;
 id) printf '0\n' ;;
-apk|sync|sleep|logger) : ;;
+apk)
+	case " $* " in *' coreutils-stat '*) [ "$1" = add ]; : > "$FS/stat-installed" ;; esac
+	;;
+sync|sleep|logger) : ;;
 chown) case "$*" in "0:0 $FS/etc/gofro"|"0:0 $FS/etc/gofro/guard-device."*) : ;; *) exit 2 ;; esac ;;
 stat)
+	[ -e "$FS/stat-installed" ] || { : > "$FS/early-stat"; echo 'stat: not installed' >&2; exit 127; }
 	[ "$1:$2" = '-c:%u:%a' ]
 	permissions="$("$REAL_STAT" -c '%a' "$3" 2>/dev/null)" || permissions="$("$REAL_STAT" -f '%Lp' "$3")"
 	printf '0:%s\n' "$permissions" # Root UID is mocked; the file's actual mode is checked.

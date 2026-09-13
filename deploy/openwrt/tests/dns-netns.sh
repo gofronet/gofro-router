@@ -5,9 +5,9 @@ set -eu
 # agent as AGENT_BIN and emit_netns_fixtures output as FIXTURES, both read-only.
 # Mount the repository read-only too, for the real guard helper.
 ROOT="$(CDPATH='' cd "$(dirname "$0")/../../.." && pwd)"
-[ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] && [ -f /.dockerenv ] || {
+if [ "$(uname -s)" != Linux ] || [ "$(id -u)" != 0 ] || [ ! -f /.dockerenv ]; then
 	printf '%s\n' 'BLOCKED: requires a disposable root Linux Docker container' >&2; exit 1;
-}
+fi
 for command in ip nft python3; do command -v "$command" >/dev/null; done
 [ -x "${AGENT_BIN:?mount the production agent read-only}" ]
 [ -s "${FIXTURES:?mount real rendered fixtures read-only}/routing.nft" ]
