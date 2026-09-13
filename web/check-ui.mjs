@@ -14,6 +14,13 @@ const otherKey = key(21);
 const profile = `[Interface]\nPrivateKey = ${key(22)}\nAddress = 10.66.0.3/32\n\n[Peer]\nPublicKey = ${serverKey}\nEndpoint = 198.51.100.1:51820\nAllowedIPs = 0.0.0.0/0\n`;
 const mime = { "index.html": "text/html", "app.js": "text/javascript", "chart.js": "text/javascript", "app.css": "text/css" };
 const peers = () => [{ public_key: key(0), name: "Аня", revoked: false, can_share: true }, { public_key: key(10), name: "Старый доступ", revoked: true, can_share: false }];
+const pickedMac = "02:ab:cd:ef:01:23";
+const manualMac = "02:ab:cd:ef:01:24";
+const offlineMac = "02:ab:cd:ef:01:25";
+const inventory = () => ({ discovery: "complete", devices: [
+  { mac: pickedMac, name: "Ноутбук", addresses: ["192.168.1.20", "2001:db8::20"] },
+  { mac: "02:ab:cd:ef:01:26", name: "Телефон", addresses: ["192.168.1.21"] },
+] });
 function status() {
   return { version: "v9.9.9", update: { running: false, result: null }, vpn_enabled: true, tunnel_active: true, interface: "wg0", active_server_key: serverKey, servers: [{ name: "Test VPS", endpoint: "198.51.100.1:51820", public_key: serverKey, managed: true }, { name: "Imported VPN", endpoint: "198.51.100.2:51820", public_key: otherKey, managed: false }], peer: { public_key: serverKey, endpoint: "198.51.100.1:51820", allowed_ips: ["0.0.0.0/0"], latest_handshake: 1, handshake_age_seconds: 1, rx_bytes: 1024, tx_bytes: 512, persistent_keepalive: null }, stats: { rx_bps: 1200, tx_bps: 800 }, history: [{ timestamp: 1, rx_bps: 1200, tx_bps: 800 }], routing: { config: { mode: "rules", rule_order: null, domain_rules: [], ip_rules: [], default_target: "direct" }, dns_active: true, fake_ips: 0, geosite_loaded: true, geoip_loaded: true, dataplane_active: true, degraded: false } };
 }
@@ -30,6 +37,7 @@ let screenshots = 0;
 
 async function open(browser, path = "/#/", width = 1440, setup = false, theme = "dark") {
   const state = { auth: setup ? { state: "setup", csrf_token: "setup-csrf", setup_method: "code", setup_window_seconds: 900 } : { state: "authenticated", csrf_token: "csrf" }, step: setup ? "admin" : "complete", peers: peers(), status: status(), fail: null, requests: [], expectedErrors: 0, nextPeer: 1, adminPassword };
+  state.inventory = inventory();
   const context = await browser.newContext({ viewport: { width, height: width < 920 ? 844 : 1000 }, colorScheme: theme, reducedMotion: "no-preference", serviceWorkers: "block" });
   const errors = [];
   const consoleErrors = [];
@@ -99,11 +107,22 @@ async function open(browser, path = "/#/", width = 1440, setup = false, theme = 
         assert.ok(Array.from(body.password).length >= 8 && Buffer.byteLength(body.password) <= 128);
         if (state.fail?.error === "password_change_uncertain") state.auth = { state: "authenticated", csrf_token: "uncertain-csrf" };
       }
+      if (endpoint === "POST /api/device-exclusions") {
+        assert.deepEqual(Object.keys(body).sort(), ["excluded", "mac"]);
+        assert.match(body.mac, /^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/);
+        assert.equal(parseInt(body.mac.slice(0, 2), 16) & 1, 0);
+        assert.notEqual(body.mac, "00:00:00:00:00:00");
+        assert.equal(typeof body.excluded, "boolean");
+        if (state.fail?.endpoint !== endpoint || state.fail.outcome === "committed") {
+          const saved = state.status.device_exclusions ?? [];
+          state.status.device_exclusions = body.excluded ? [...new Set([...saved, body.mac])] : saved.filter(mac => mac !== body.mac);
+        }
+      }
       if (state.fail?.endpoint === endpoint) {
         const failure = state.fail;
-        state.fail = null;
+        if (!failure.keep) state.fail = null;
         state.expectedErrors++;
-        return await route.fulfill(json({ error: failure.error ?? "mock_failure" }, failure.status ?? 500));
+        return await route.fulfill(json({ error: failure.error ?? "mock_failure", ...(failure.outcome ? { outcome: failure.outcome } : {}) }, failure.status ?? 500));
       }
       const onboarding = () => ({ step: state.step, networks: [], setup_window_seconds: state.step === "admin" ? 900 : null, error: null });
       const managed = () => ({ version: "v1", peers: state.peers });
@@ -113,7 +132,7 @@ async function open(browser, path = "/#/", width = 1440, setup = false, theme = 
         return await route.fulfill(json(state.auth));
       }
       if (endpoint === "POST /api/auth/login") {
-        assert.deepEqual(body, { password: state.passwordBody.password });
+        assert.deepEqual(body, { password: state.passwordBody?.password ?? state.adminPassword });
         state.auth = { state: "authenticated", csrf_token: "login-csrf" };
         return await route.fulfill(json(state.auth));
       }
@@ -134,6 +153,8 @@ async function open(browser, path = "/#/", width = 1440, setup = false, theme = 
         return await route.fulfill(json(onboarding()));
       }
       if (endpoint === "GET /api/status") return await route.fulfill(json(state.status));
+      if (endpoint === "GET /api/lan-devices") return await route.fulfill(json(state.inventory));
+      if (endpoint === "POST /api/device-exclusions") return await route.fulfill(json(state.status));
       if (endpoint === "POST /api/mode") {
         assert.equal(typeof body.vpn_enabled, "boolean");
         state.status.vpn_enabled = body.vpn_enabled; state.status.tunnel_active = body.vpn_enabled;
@@ -166,7 +187,7 @@ async function open(browser, path = "/#/", width = 1440, setup = false, theme = 
         if (endpoint === "POST /api/servers/friends/profile") { assert.ok(peer.can_share); return await route.fulfill(json({ profile })); }
       }
       if (endpoint === "POST /api/update") { state.status.update.result = "current"; return await route.fulfill(json(state.status)); }
-      if (endpoint === "POST /api/routing") { state.status.routing.config = body; return await route.fulfill(json(state.status)); }
+      if (endpoint === "POST /api/routing") { assert.equal(Object.hasOwn(body, "device_exclusions"), false); state.status.routing.config = body; return await route.fulfill(json(state.status)); }
       if (endpoint === "POST /api/routing/test") return await route.fulfill(json({ value: body.value, target: "direct", matched_rule: null, scope: "domain_preview" }));
       throw new Error(`unexpected request ${endpoint}`);
     } catch (error) { errors.push(error.message); await route.abort(); }
@@ -354,6 +375,186 @@ async function passwordChecks(browser) {
   }
 }
 
+const devicePosts = state => state.requests.filter(req => req.endpoint === "POST /api/device-exclusions");
+const devicePanel = page => page.locator('section[aria-labelledby="device-exclusions-title"]');
+const deviceSwitch = (page, name = "Ноутбук") => devicePanel(page).getByRole("switch", { name: `Напрямую: ${name}`, exact: true });
+async function checked(page, name, value) {
+  await devicePanel(page).locator(`[role="switch"][aria-label="Напрямую: ${name}"][aria-checked="${value}"]`).waitFor();
+}
+async function addDevice(page, mac) {
+  await page.getByLabel("MAC устройства", { exact: true }).fill(mac);
+  await page.getByRole("button", { name: "Добавить напрямую", exact: true }).click();
+}
+async function refreshDevices(page) {
+  await page.getByRole("button", { name: "Обновить список устройств", exact: true }).click();
+  await page.getByRole("button", { name: "Обновить список устройств", exact: true }).waitFor();
+}
+async function deviceChecks(browser) {
+  const baseline = passed;
+  for (const width of [1440, 390, 320]) {
+    const theme = width === 320 ? "light" : "dark";
+    let test = await open(browser, "/#/routing", width, false, theme);
+    let { page, state } = test;
+    await checked(page, "Ноутбук", false);
+    assert.equal(Object.hasOwn(state.status, "device_exclusions"), false, "legacy status omits exclusions");
+    assert.equal(await devicePanel(page).locator(".count").innerText(), "0/256", "missing status field defaults to []");
+    const copy = await devicePanel(page).innerText();
+    assert.match(copy, /все VPN-, блокирующие и DNS-правила Gofro обходятся/);
+    assert.match(copy, /IPv6 тоже работает напрямую/);
+    await deviceSwitch(page).click();
+    await checked(page, "Ноутбук", true);
+    await checked(page, "Телефон", false);
+    assert.deepEqual(state.status.device_exclusions, [pickedMac], "only selected MAC is full-direct");
+    assert.deepEqual(devicePosts(state).map(req => req.body), [{ mac: pickedMac, excluded: true }]);
+    state.inventory.devices[0].addresses = ["192.168.1.99", "2001:db8::99"];
+    await refreshDevices(page);
+    await devicePanel(page).getByText("192.168.1.99, 2001:db8::99", { exact: true }).waitFor();
+    await checked(page, "Ноутбук", true);
+    assert.equal(devicePosts(state).length, 1, "DHCP/IP refresh never rewrites the exclusion");
+    await addDevice(page, ` ${manualMac.toUpperCase()} `);
+    await checked(page, manualMac, true);
+    assert.deepEqual(devicePosts(state).at(-1).body, { mac: manualMac, excluded: true });
+    assert.equal(await page.getByLabel("MAC устройства", { exact: true }).inputValue(), "");
+    await page.reload();
+    await checked(page, manualMac, true);
+    await checked(page, "Ноутбук", true);
+    await screenshot(page, `devices-picked-manual-${width}-${theme}`);
+    state.inventory.devices.shift();
+    await refreshDevices(page);
+    await checked(page, pickedMac, true);
+    assert.deepEqual(state.status.device_exclusions, [pickedMac, manualMac], "disappearing discovered device remains saved");
+    await close(test, `devices omitted status defaults [], discovered pick, only selected MAC, IPv6/DNS copy, DHCP same MAC, uppercase manual canonical POST, reload ${width}px`);
+
+    test = await open(browser, "/#/routing", width, false, theme); ({ page, state } = test);
+    await checked(page, "Ноутбук", false);
+    for (const invalid of ["not-a-mac", "02-ab-cd-ef-01-23", "02:gg:cd:ef:01:23", "ff:ff:ff:ff:ff:ff", "01:00:5e:00:00:01", "33:33:00:00:00:01", "00:00:00:00:00:00"]) {
+      await addDevice(page, invalid);
+      await devicePanel(page).getByRole("alert").waitFor();
+      assert.equal(await page.getByLabel("MAC устройства", { exact: true }).getAttribute("aria-invalid"), "true");
+      assert.equal(devicePosts(state).length, 0, `${invalid} refused before POST`);
+    }
+    await screenshot(page, `devices-invalid-${width}-${theme}`);
+    await close(test, `devices invalid syntax, broadcast, IPv4/IPv6 multicast and zero refused without POST ${width}px`);
+
+    test = await open(browser, "/#/routing", width, false, theme); ({ page, state } = test);
+    state.status.device_exclusions = [pickedMac, offlineMac];
+    await page.reload(); await checked(page, "Ноутбук", true); await checked(page, offlineMac, true);
+    await page.clock.install();
+    state.fail = { endpoint: "POST /api/device-exclusions", error: "remove_failed" };
+    await deviceSwitch(page).click();
+    await page.getByRole("alert").filter({ hasText: "remove_failed" }).waitFor();
+    await checked(page, "Ноутбук", true);
+    assert.ok(await deviceSwitch(page).isDisabled(), "failed mutation blocks stale follow-up");
+    assert.deepEqual(state.status.device_exclusions, [pickedMac, offlineMac]);
+    await screenshot(page, `devices-remove-failed-${width}-${theme}`);
+    await page.clock.fastForward(5000);
+    await page.waitForFunction(() => !document.querySelector('[aria-label="Напрямую: Ноутбук"]').disabled);
+    assert.equal(devicePosts(state).length, 1);
+    await deviceSwitch(page).click(); await checked(page, "Ноутбук", false);
+    assert.deepEqual(state.status.device_exclusions, [offlineMac]);
+    assert.deepEqual(devicePosts(state).map(req => req.body), [{ mac: pickedMac, excluded: false }, { mac: pickedMac, excluded: false }]);
+    await close(test, `devices failed removal remains checked, stale blocked, refresh then explicit removal ${width}px`);
+
+    test = await open(browser, "/#/routing", width, false, theme); ({ page, state } = test);
+    await checked(page, "Ноутбук", false); await page.clock.install();
+    state.fail = { endpoint: "POST /api/device-exclusions", outcome: "committed", error: "status_refresh_failed" };
+    await deviceSwitch(page).click();
+    await page.getByText(/Изменение выполнено, но состояние не удалось обновить/).waitFor();
+    assert.deepEqual(state.status.device_exclusions, [pickedMac], "backend committed despite refresh error");
+    assert.ok(await deviceSwitch(page).isDisabled());
+    assert.ok(await page.getByRole("button", { name: "Добавить напрямую", exact: true }).isDisabled());
+    await page.getByLabel("MAC устройства", { exact: true }).fill(manualMac);
+    await devicePanel(page).locator("form").evaluate(form => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    state.fail = { endpoint: "GET /api/status", keep: true };
+    await page.clock.fastForward(5000);
+    await page.getByText(/Нет свежих данных/).waitFor();
+    await page.clock.fastForward(5000);
+    assert.equal(devicePosts(state).length, 1, "committed warning never replays POST");
+    assert.ok(await deviceSwitch(page).isDisabled());
+    await screenshot(page, `devices-committed-warning-${width}-${theme}`);
+    state.fail = null;
+    await page.getByRole("button", { name: "Обновить состояние перед изменением", exact: true }).click();
+    await checked(page, "Ноутбук", true);
+    await page.getByText(/Изменение выполнено, но состояние не удалось обновить/).waitFor({ state: "hidden" });
+    assert.equal(devicePosts(state).length, 1);
+    await close(test, `devices committed refresh warning, no replay, stale controls blocked through failed polls, separate GET recovers ${width}px`);
+
+    for (const discovery of ["partial", "unavailable", "error"]) {
+      test = await open(browser, "/#/routing", width, false, theme); ({ page, state } = test);
+      state.status.device_exclusions = [offlineMac];
+      state.inventory = { discovery: discovery === "partial" ? "partial" : "unavailable", devices: [] };
+      if (discovery === "error") state.fail = { endpoint: "GET /api/lan-devices", error: "inventory_failed" };
+      await page.reload(); await checked(page, offlineMac, true);
+      await devicePanel(page).getByText(discovery === "partial" ? /Список устройств неполный/ : /Обнаружение устройств недоступно/).waitFor();
+      if (discovery === "error") await devicePanel(page).getByText("inventory_failed", { exact: true }).waitFor();
+      const before = structuredClone(state.status.routing.config);
+      assert.equal(await page.getByRole("button", { name: "Добавить напрямую", exact: true }).isDisabled(), false);
+      await addDevice(page, manualMac.toUpperCase()); await checked(page, manualMac, true);
+      await checked(page, offlineMac, true);
+      assert.deepEqual(state.status.device_exclusions, [offlineMac, manualMac]);
+      assert.deepEqual(state.status.routing.config, before);
+      assert.equal(state.requests.filter(req => req.endpoint === "POST /api/routing").length, 0);
+      await screenshot(page, `devices-discovery-${discovery}-${width}-${theme}`);
+      await close(test, `devices discovery ${discovery}: offline saved retained, manual usable, config preserved ${width}px`);
+    }
+  }
+
+  let test = await open(browser, "/#/routing", 390);
+  let { page, state } = test;
+  state.status.device_exclusions = [pickedMac, offlineMac];
+  await page.reload(); await checked(page, offlineMac, true);
+  for (const label of ["Весь интернет", "По правилам"]) {
+    await page.getByRole("button", { name: label, exact: true }).click();
+    await page.locator(`button[aria-pressed="true"]`).getByText(label, { exact: true }).waitFor();
+    await page.waitForFunction(() => !document.querySelector('[aria-label="Напрямую: Ноутбук"]').disabled);
+    assert.deepEqual(state.status.device_exclusions, [pickedMac, offlineMac]);
+  }
+  await page.getByRole("button", { name: "Добавить", exact: true }).click();
+  await page.getByLabel("Название", { exact: true }).fill("Exclusion preservation");
+  await page.getByLabel("Значение", { exact: false }).fill("example.com");
+  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  await page.getByRole("switch", { name: "Включить правило Exclusion preservation", exact: true }).click();
+  await page.reload(); await checked(page, offlineMac, true); await checked(page, "Ноутбук", true);
+  assert.equal(state.status.routing.config.domain_rules[0].matcher.value, "example.com");
+  assert.equal(state.status.routing.config.domain_rules[0].enabled, false);
+  assert.deepEqual(state.status.device_exclusions, [pickedMac, offlineMac]);
+  assert.equal(state.requests.filter(req => req.endpoint === "POST /api/routing").length, 4);
+  await page.goto(`${origin}/#/`);
+  await page.getByRole("button", { name: "Отключить VPN", exact: true }).click();
+  await page.getByRole("button", { name: "Отключить", exact: true }).click();
+  await page.getByRole("heading", { name: "VPN отключён", exact: true }).waitFor();
+  await page.goto(`${origin}/#/routing`); await checked(page, "Ноутбук", true);
+  assert.deepEqual(state.status.device_exclusions, [pickedMac, offlineMac]);
+  assert.equal(devicePosts(state).length, 0);
+  await screenshot(page, "devices-rules-mode-preserved-390");
+  await close(test, "devices preserved by ordinary rule pack/save/toggle, routing modes, VPN off and reload");
+
+  for (const session of ["logout", "expiry"]) {
+    test = await open(browser, "/#/routing", 390); ({ page, state } = test);
+    state.status.device_exclusions = [offlineMac];
+    await page.reload(); await checked(page, offlineMac, true);
+    if (session === "logout") {
+      await page.goto(`${origin}/#/system`);
+      await page.getByRole("button", { name: "Выйти", exact: true }).click();
+    } else {
+      state.auth = { state: "login", csrf_token: state.auth.csrf_token };
+      state.fail = { endpoint: "GET /api/status", status: 401, error: "session_expired" };
+    }
+    await page.getByRole("heading", { name: "Вход в панель", exact: true, level: 1 }).waitFor();
+    assert.equal(await devicePanel(page).count(), 0);
+    await page.locator('input[autocomplete="current-password"]').fill(adminPassword);
+    await page.getByRole("button", { name: "Войти", exact: true }).click();
+    await page.locator(".app-main .panel").first().waitFor();
+    await page.goto(`${origin}/#/routing`); await checked(page, offlineMac, true);
+    assert.deepEqual(state.status.device_exclusions, [offlineMac]);
+    assert.equal(devicePosts(state).length, 0);
+    await screenshot(page, `devices-session-${session}-390`);
+    await close(test, `devices ${session}: authenticated UI hidden, login/return renders saved offline exclusions`);
+  }
+  assert.equal(passed - baseline, 24, "all new device scenarios ran");
+}
+
 async function setupAdmin(test, password = adminPassword) {
   test.state.adminPassword = password;
   await test.page.locator('input[autocomplete="one-time-code"]').fill("mock-setup-code");
@@ -441,7 +642,9 @@ try {
       await nav.getByRole("link", { name: label, exact: true }).click();
       await page.getByRole("heading", { name: heading, exact: false }).waitFor();
       assert.equal(await page.locator(".side-bottom").count(), 0);
-      assert.equal(await page.getByText(/Wi-Fi|Устройства|Диагностика|Перезагрузить|DHCP|Температура|Домашний роутер/).count(), 0);
+      assert.equal(await page.getByText(/Wi-Fi|Диагностика|Перезагрузить|Температура|Домашний роутер/).count(), 0);
+      assert.equal(await page.getByRole("heading", { name: /Устройства напрямую/ }).count(), label === "Правила" ? 1 : 0);
+      assert.equal(await page.locator(".sidebar, .mobile-nav").getByText(/Устройства|DHCP/).count(), 0);
       assert.equal(await page.locator(".sidebar").getByText(/192\.168\.|router\.gofro/).count(), 0);
       await screenshot(page, `navigation-${width}-${label}`);
     }
@@ -760,5 +963,7 @@ try {
   }
   assert.equal(passed, 35, "all original browser baselines retained");
   await passwordChecks(browser);
+  assert.equal(passed, 45, "all password/VPS browser baselines retained");
+  await deviceChecks(browser);
   console.log(`PASS: ${passed} browser scenarios; ${screenshots} screenshots; 3 asset hashes/gzip verified. All requests mocked at ${origin}.`);
 } finally { await browser.close(); }

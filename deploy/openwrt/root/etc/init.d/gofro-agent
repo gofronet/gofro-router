@@ -51,7 +51,7 @@ start_service() {
 
 	gofro_apply_lock
 	helpers=${GOFRO_HELPERS:-/usr/libexec/gofro}
-	snapshot="$("$helpers/guard" prepare)" || gofro_fail 'guard preparation failed'
+	snapshot="$(GOFRO_APPLY_LOCK_FD=8 "$helpers/guard" prepare)" || gofro_fail 'guard preparation failed'
 	lan_interface="$(printf '%s' "$snapshot" | jsonfilter -e '@.device')"
 	lan_subnet="$(printf '%s' "$snapshot" | jsonfilter -e '@.subnet')"
 	lan_address="$(printf '%s' "$snapshot" | jsonfilter -e '@.address')"
@@ -151,7 +151,7 @@ stop_service() {
 		# A first-upgrade crash may publish current before ever preparing a guard.
 		gofro_stop_no_guard=1
 	else
-		"${GOFRO_HELPERS:-/usr/libexec/gofro}/guard" stop || gofro_fail 'stop guard failed; not killing agent'
+		GOFRO_APPLY_LOCK_FD=8 "${GOFRO_HELPERS:-/usr/libexec/gofro}/guard" stop || gofro_fail 'stop guard failed; not killing agent'
 	fi
 	# FD 8 survives this return and rc.common's asynchronous procd_kill.
 }
@@ -177,7 +177,7 @@ service_stopped() {
 	done
 	identity=${GOFRO_GUARD_DIR:-/etc/gofro}/guard-device
 	if [ "$gofro_stop_no_guard" != 1 ] || [ -e "$identity" ] || [ -L "$identity" ]; then
-		"${GOFRO_HELPERS:-/usr/libexec/gofro}/guard" boot || gofro_fail 'post-stop guard failed'
+		GOFRO_APPLY_LOCK_FD=8 "${GOFRO_HELPERS:-/usr/libexec/gofro}/guard" boot || gofro_fail 'post-stop guard failed'
 	fi
 	exec 8>&-
 }

@@ -4,7 +4,7 @@ Gofro installs on official OpenWrt 25.12 without replacing the firmware. It is
 not tied to a router vendor or model: the bootstrap selects a signed static
 bundle from OpenWrt's `DISTRIB_ARCH`.
 
-This describes the next signed VPN-only candidate, v0.5.17. The installed
+This describes the next VPN-only candidate, v0.5.18. The installed
 signed v0.5.16 candidate remains the immutable, pinned baseline; new changes
 require a new candidate artifact. Published Latest remains v0.5.15. The download
 links select that published release, not unshipped workspace changes.
@@ -47,10 +47,11 @@ Successful installation prints a one-time setup code and its 15-minute expiry.
 Use the code to create the administrator and add a VPN profile or VPS from the
 Gofro panel. It does not create a setup SSID or change network configuration.
 
-In v0.5.17, open bare `wifi.gofro.net` from LAN to reach Gofro. Clients must use
+Open bare `wifi.gofro.net` from LAN to reach Gofro. Clients must use
 the router's local LAN resolver; external DNS/DoH does not provide this access.
 Local DNS answers with VIP `198.18.0.0`, reserved outside FakeDNS lease
-allocation, with TTL 30 seconds. Clients with an old cached DNS answer must
+allocation. Gofro DNS uses TTL 30 seconds; native dnsmasq uses its local-record
+TTL. Clients with an old cached DNS answer must
 wait out its previous TTL or flush their DNS cache and resolve the name again.
 
 LAN-only TCP traffic to VIP ports `80`/`8081` is redirected to the existing
@@ -68,10 +69,26 @@ never forces `10.203.1.1` or any other LAN address.
 
 WAN can be DHCP behind another router or PPPoE. Existing PPPoE credentials and
 MTU stay in OpenWrt and are preserved, as are LAN, DHCP, Wi-Fi and LuCI settings.
-Gofro intercepts LAN TCP/UDP DNS for both IPv4 and IPv6 from port 53 to 5353.
+Gofro intercepts non-excluded LAN TCP/UDP DNS for both IPv4 and IPv6 from port 53 to 5353.
 Its dual-stack DNS sockets use `SO_BINDTODEVICE` on the validated LAN device;
 resolution delegates to native OpenWrt dnsmasq at the LAN IPv4 address on port
-53. It does not replace the system resolver.
+53. It does not replace the system resolver. Fully excluded devices use native
+DNS and direct forwarding in every VPN mode, including while the guard is armed.
+The exclusion is the device's current LAN MAC, including private/randomized
+unicast MACs; changing that MAC requires updating the exclusion.
+
+Native panel DNS is the owned UCI section `dhcp.gofro_panel=hostrecord`, with
+`name=wifi.gofro.net`, `ip=198.18.0.0`, and `instance=<LAN dnsmasq section ID>`.
+OpenWrt 25.12's `dhcp_hostrecord_add` renders `--host-record=name,ip` and
+`filter_dnsmasq` supports `instance` (including anonymous `cfg...` IDs).
+Preflight selects one enabled port-53 instance serving logical LAN, honoring
+`dhcp.lan.instance`; ambiguous, address-bound, or conflicting configurations
+are refused before mutation. The installer neither changes global forwarders
+nor leases. Activation reloads dnsmasq even when the owned record already
+matches: a previous attempt may have committed successfully but failed reload.
+Read-only preflight does not reload. Update rollback restores the exact section,
+including absence and option/list types; restoring an existing owned record
+also retries activation when its disk state already matches.
 
 An existing v15 LAN at `10.203.1.0/24` is not automatically renumbered. Change
 it in OpenWrt. Legacy route adoption requires installer-recorded, attested
@@ -100,17 +117,105 @@ Network settings are not part of the Gofro UI.
 
 `gofro-guard` boots at `START=18`, before OpenWrt network/WAN startup. It uses
 the persisted root-owned `/etc/gofro/guard-device` (`0600`, directory `0700`),
-without needing ubus or a LAN address. Forwarding remains blocked until a
-compatible agent completes a full reconcile. Stopping the agent rearms the
-guard and removes the owned DNS redirect: new DNS flows immediately use native
-DNS, but existing redirected NAT flows may need conntrack expiry or a new
-client tuple. Stopping the service is not a way to bypass VPN policy.
+without needing ubus or a LAN address for enforcement. It reads the committed
+controller exclusions, synchronizes both owned nft sets atomically, and blocks
+all other LAN egress until a compatible agent completes a full reconcile.
+Stopping the agent rearms the guard, removes only the exactly recognized DNS
+redirect chain, and cleans up owned DNS conntrack flows. Stopping the service
+is not a way to bypass VPN policy for non-excluded devices.
+
+DNS cleanup runs after enforcement is published. Its legacy-flow cleanup uses
+current LAN addresses (IPv4 and IPv6, including link-local, ULA and GUA), never
+client discovery/ARP. At early boot, a successful validated `ip -j link show`
+dump can prove the LAN device is absent. Marked-flow cleanup still runs; only
+address-based legacy cleanup is deferred until the device exists. Thus START=8
+pending recovery can finish before LAN creation with the guard armed. Genuine
+netlink/cleanup errors fail the operation rather than masquerading as zero
+matches. No whole-conntrack flush is used.
 
 Address renumbering on the same LAN device is supported. Manual LAN device or
 zone reassignment requires coordinated maintenance with forwarding kept
 blocked, not just editing Gofro state. Normal fw4 reload preserves Gofro's
 owned tables; `fw4 stop` or flushing the entire ruleset removes protection and
 also requires coordinated maintenance before WAN forwarding resumes.
+
+### v18 shell/core contract
+
+- `/etc/gofro/controller.json` has **top-level** `device_exclusions: [canonicalMAC]`.
+  A missing file/member means `[]`; explicit null is invalid. Maximum 256
+  strings, six lowercase colon-separated octets, nonzero and unicast. Locally
+  administered/private MACs are valid. Shell strictly parses one root-owned
+  regular `0600` file with trusted ancestors; `.new`/crash files are ignored.
+  There is no separate MAC snapshot. Invalid configuration arms an empty-list
+  fail-closed guard, clears both exclusion sets, and returns failure.
+- Core always creates `inet gofro_routing`'s `device_exclusions` set with
+  `type ether_addr`, even when empty. Shell owns the corresponding set in
+  `inet gofro_guard`. When routing exists, set contents and guard-chain changes
+  are one atomic nft transaction; FakeDNS mappings and other routing objects
+  are retained. Empty-list chain shape remains exactly the v15 LAN-to-non-LAN
+  drop. Nonempty adds `ether saddr != @device_exclusions` to that drop.
+- Lock order is persistent `/etc/gofro/apply.lock` on **FD8**, then mode lock
+  on **FD9**. This fences config read through set/guard publication and cleanup.
+  Standalone boot/prepare/stop acquires FD8. New procd explicitly passes
+  `GOFRO_APPLY_LOCK_FD=8`; old v17 procd inherits FD8 without that marker.
+  Guard detects either case before opening its own FD8, verifies device/inode against
+  the trusted lock file and runs `flock -n 8` on that inherited descriptor.
+  It never reopens/acquires a second descriptor under procd's held lock.
+  Wrong-inode descriptors are refused; an unlocked matching descriptor must
+  acquire the lock, and a competing writer causes refusal before publication.
+- Core's owned DNS chain is either the old two LAN UDP/TCP port-53 redirects
+  to `5353`, or exactly `iifname "LAN" ether saddr @device_exclusions return`
+  followed by those two redirects. Stop also accepts an empty chain. Extra,
+  reordered, wrong-device, wrong-port or differently scoped rules are foreign.
+- Core alone sets stable conntrack bit **`0x40000000`**, preserving other bits,
+  only for original-direction LAN TCP/UDP original-destination-port-53 flows,
+  **before exclusion return**, including native/excluded DNS. Router-generated
+  and non-LAN DNS must not acquire this ownership bit.
+- Core calls **`/usr/libexec/gofro/dns-flows cleanup LAN_DEVICE DNS_PORT`** after
+  committed exclusion changes and full reconcile, while holding apply.lock,
+  after publishing the current sets/rules and before clearing the guard.
+  Failure means committed intent remains saved, the guard remains armed with
+  validated exclusions, and the operation/health reports degraded failure.
+  Startup shell sync invokes the same idempotent helper before fallible Rust
+  initialization. The helper itself does not acquire the caller's lock.
+- Cleanup uses native `conntrack -D` separately for IPv4/IPv6 and UDP/TCP,
+  original dport 53 and mark `0x40000000/0x40000000`. Legacy unmarked cleanup
+  additionally requires DNAT, exact current LAN reply-source address and
+  reply-source port `DNS_PORT`. The mutable VPN mark alone is never ownership.
+  Exit 1 succeeds only with the exact native single-line zero-deleted diagnostic;
+  other errors propagate. Both fresh and update dependency installation add
+  `conntrack` and strict-parser `jq` before security calls. OpenWrt's
+  `conntrack -> libnetfilter-conntrack -> kmod-nf-conntrack-netlink` dependency
+  pulls matching kernel netlink support through apk, without manual modules.
+
+### Isolated checks
+
+`tests/transaction.sh` retains the installer/recovery failure and crash suite;
+`tests/guard.sh` exercises procd lifecycle fencing with fake system commands.
+`tests/panel.sh` runs native UCI against temporary config/delta directories and
+a fake reload command. `tests/exclusions-netns.sh` exercises actual nft,
+conntrack and dual-stack packets in disposable Linux network namespaces.
+`tests/lifecycle-netns.sh` reads the exact v17 init from git commit `5132a7a`
+and exercises it with the new guard, pending START=8 recovery before LAN exists,
+and a committed-record reload failure/retry against native dnsmasq.
+`tests/dns-netns.sh` retains all existing production-agent DNS, panel/LuCI and
+VIP checks and verifies the new shell-owned sets independently.
+
+Build `tests/Dockerfile` as `gofro-exclusions-test:local`; it pins native UCI,
+jsonfilter and libubox to OpenWrt 25.12's source revisions. Run with Docker context `desktop-linux`,
+`--network none`, and the repository mounted **read-only** at `/repo`:
+
+```sh
+docker --context desktop-linux run --rm --network none --privileged \
+  -v "$PWD:/repo:ro" -w /repo gofro-exclusions-test:local \
+  sh deploy/openwrt/tests/exclusions-netns.sh
+docker --context desktop-linux run --rm --network none \
+  -v "$PWD:/repo:ro" -w /repo gofro-exclusions-test:local \
+  sh deploy/openwrt/tests/panel.sh
+```
+
+The existing production DNS suite additionally takes read-only `FIXTURES` and
+`AGENT_BIN` mounts. Tests do not contact a router or use host networking.
 
 ## VPS
 

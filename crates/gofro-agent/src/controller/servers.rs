@@ -192,6 +192,7 @@ mod tests {
             }),
         };
         let config = ControllerConfig {
+            device_exclusions: vec![],
             vpn_enabled: true,
             active_server_key: Some(old.public_key.clone()),
             servers: vec![old],

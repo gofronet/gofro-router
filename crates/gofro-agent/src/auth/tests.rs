@@ -24,6 +24,7 @@ fn test_state(dir: &std::path::Path, password: PathBuf, setup_code: PathBuf) -> 
         mode_command: dir.join("mode"),
         management_dir: dir.join("management"),
         config: Arc::new(Mutex::new(ControllerConfig {
+            device_exclusions: vec![],
             vpn_enabled: false,
             active_server_key: None,
             servers: vec![],
@@ -567,6 +568,18 @@ async fn reboot_route_rejects_missing_session_and_csrf() {
     let dir = std::env::temp_dir().join(format!("gofro-reboot-auth-{}", token().unwrap()));
     fs::create_dir(&dir).unwrap();
     let state = test_state(&dir, dir.join("admin-password"), dir.join("setup-code"));
+    let inventory = Request::get("/api/lan-devices")
+        .header(header::HOST, "wifi.gofro.net:8443")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert_eq!(
+        crate::api::secure_router(state.clone())
+            .oneshot(inventory)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
     let request = Request::post("/api/reboot")
         .header(header::HOST, "wifi.gofro.net:8443")
         .body(axum::body::Body::empty())
@@ -606,6 +619,7 @@ async fn managed_routes_reject_missing_sessions_and_bad_csrf_before_ssh() {
     // Missing JSON keeps a guard regression from reaching SSH, while the exact
     // auth errors below prove rejection happens before body extraction.
     for (method, path) in [
+        (Method::POST, "/api/device-exclusions"),
         (Method::POST, "/api/servers/probe"),
         (Method::POST, "/api/servers/bootstrap"),
         (Method::POST, "/api/servers/check"),

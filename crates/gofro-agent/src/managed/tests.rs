@@ -23,6 +23,7 @@ impl Fixture {
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
         let geodata = Arc::new(crate::geodata::GeoData::default());
         let config = ControllerConfig {
+            device_exclusions: vec![],
             vpn_enabled: false,
             active_server_key: None,
             servers: vec![],
@@ -227,6 +228,7 @@ fn validates_typed_managed_status_and_upgrade_guidance() {
 fn unmanaged_servers_are_rejected_before_ssh() {
     let key = "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=";
     let config = ControllerConfig {
+        device_exclusions: vec![],
         vpn_enabled: false,
         active_server_key: None,
         servers: vec![crate::model::ServerProfile {

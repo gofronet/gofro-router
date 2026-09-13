@@ -20,6 +20,10 @@ use std::{
 // Thread-local operation runner: no PATH changes, services, nft or WireGuard.
 #[derive(Default)]
 struct Runner {
+    kernel_guard: Vec<crate::model::MacAddress>,
+    kernel_routing: Vec<crate::model::MacAddress>,
+    publish_expected: Option<Vec<crate::model::MacAddress>>,
+    policy_exclusions: Vec<Vec<crate::model::MacAddress>>,
     calls: Vec<&'static str>,
     failures: VecDeque<&'static str>,
     guarded: bool,
@@ -27,6 +31,245 @@ struct Runner {
     apply_lock: Option<std::path::PathBuf>,
 }
 thread_local! { static RUNNER: RefCell<Option<Runner>> = const { RefCell::new(None) }; }
+
+pub(super) fn record_kernel_exclusions(step: &str, exclusions: &[crate::model::MacAddress]) {
+    RUNNER.with_borrow_mut(|runner| {
+        if let Some(runner) = runner {
+            if matches!(step, "guard" | "publish") {
+                runner.kernel_guard = exclusions.to_vec();
+            }
+            if matches!(step, "policy" | "publish") {
+                runner.kernel_routing = exclusions.to_vec();
+            }
+        }
+    });
+}
+
+#[test]
+fn committed_removal_repairs_publication_or_independently_revokes_guard_membership() {
+    if run_in_child() {
+        return;
+    }
+    for (postrename, failures) in [
+        (false, vec!["publish"]),
+        (false, vec!["publish", "publish"]),
+        (true, vec![]),
+        (true, vec!["publish"]),
+        (true, vec!["sync"]),
+    ] {
+        let fixture = Fixture::new();
+        let state = &fixture.0;
+        let a = "02:aa:bb:cc:dd:01".parse().unwrap();
+        let b = "02:aa:bb:cc:dd:02".parse().unwrap();
+        update_device_exclusion(state, a, true).unwrap();
+        update_device_exclusion(state, b, true).unwrap();
+        RUNNER.with_borrow_mut(|runner| {
+            let r = runner.as_mut().unwrap();
+            assert_eq!(r.kernel_routing, [a, b]);
+            r.calls.clear();
+            r.failures.extend(failures.clone());
+            r.publish_expected = Some(vec![b]);
+        });
+        if postrename {
+            crate::config::FAIL_SYNC.with(|failure| failure.set(Some("parent")));
+        }
+        let error = update_device_exclusion(state, a, false).unwrap_err();
+        assert!(error.is::<crate::managed::CommittedRefreshFailed>());
+        assert_eq!(error.is::<crate::config::PublishedSaveError>(), postrename);
+        assert_eq!(
+            crate::config::load(&state.config_path)
+                .unwrap()
+                .device_exclusions,
+            [b]
+        );
+        assert_eq!(state.config.lock().unwrap().device_exclusions, [b]);
+        RUNNER.with_borrow(|runner| {
+            let r = runner.as_ref().unwrap();
+            assert!(r.guarded);
+            assert_eq!(
+                r.kernel_guard,
+                [b],
+                "removed MAC retains forwarding exemption"
+            );
+            let repaired = failures.len() < if postrename { 1 } else { 2 };
+            assert_eq!(
+                r.kernel_routing,
+                if repaired { vec![b] } else { vec![a, b] }
+            );
+            if !repaired {
+                assert_eq!(r.calls.last(), Some(&"guard"));
+            }
+        });
+        assert!(state.routing_degraded.load(Ordering::Relaxed));
+    }
+}
+
+pub(super) fn record_policy_exclusions(exclusions: &[crate::model::MacAddress]) {
+    RUNNER.with_borrow_mut(|runner| {
+        if let Some(runner) = runner {
+            runner.policy_exclusions.push(exclusions.to_vec());
+        }
+    });
+}
+
+#[test]
+fn exclusions_commit_before_publication_and_keep_latest_list() {
+    if run_in_child() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let state = &fixture.0;
+    let a = "02:aa:bb:cc:dd:01".parse().unwrap();
+    let b = "02:aa:bb:cc:dd:02".parse().unwrap();
+    for (mac, excluded, expected, frozen) in [
+        (a, true, vec![a], vec![]),
+        (b, true, vec![a, b], vec![a]),
+        (a, false, vec![b], vec![a, b]),
+        (b, false, vec![], vec![b]),
+    ] {
+        RUNNER.with_borrow_mut(|runner| {
+            let r = runner.as_mut().unwrap();
+            r.calls.clear();
+            r.policy_exclusions.clear();
+            r.publish_expected = Some(expected.clone());
+        });
+        update_device_exclusion(state, mac, excluded).unwrap();
+        assert_eq!(
+            crate::config::load(&state.config_path)
+                .unwrap()
+                .device_exclusions,
+            expected
+        );
+        RUNNER.with_borrow(|runner| {
+            let r = runner.as_ref().unwrap();
+            assert_eq!(
+                r.calls,
+                ["guard", "policy", "publish", "dns-cleanup", "clear"]
+            );
+            assert_eq!(r.policy_exclusions, [frozen]);
+        });
+    }
+    RUNNER.with_borrow_mut(|runner| runner.as_mut().unwrap().publish_expected = Some(vec![a]));
+    update_device_exclusion(state, a, true).unwrap();
+    RUNNER.with_borrow_mut(|runner| runner.as_mut().unwrap().calls.clear());
+    mutate(state, "routing").unwrap();
+    assert_eq!(
+        crate::config::load(&state.config_path)
+            .unwrap()
+            .device_exclusions,
+        [a]
+    );
+    RUNNER.with_borrow(|runner| {
+        assert_eq!(runner.as_ref().unwrap().calls, ["guard", "policy", "clear"])
+    });
+}
+
+#[test]
+fn exclusion_publish_and_cleanup_failures_are_committed_and_full_retry_repairs() {
+    if run_in_child() {
+        return;
+    }
+    for step in ["publish", "dns-cleanup"] {
+        let fixture = Fixture::new();
+        let state = &fixture.0;
+        let mac = "02:aa:bb:cc:dd:01".parse().unwrap();
+        RUNNER.with_borrow_mut(|runner| runner.as_mut().unwrap().failures.push_back(step));
+        let error = update_device_exclusion(state, mac, true).unwrap_err();
+        assert!(error.is::<crate::managed::CommittedRefreshFailed>());
+        assert_eq!(
+            crate::config::load(&state.config_path)
+                .unwrap()
+                .device_exclusions,
+            [mac]
+        );
+        assert_eq!(state.config.lock().unwrap().device_exclusions, [mac]);
+        assert!(state.routing_degraded.load(Ordering::Relaxed));
+        RUNNER.with_borrow(|runner| assert!(runner.as_ref().unwrap().guarded));
+        reconcile(state).unwrap();
+        assert!(!state.routing_degraded.load(Ordering::Relaxed));
+    }
+}
+
+#[test]
+fn sync_failure_distinguishes_unpublished_and_published_configuration() {
+    if run_in_child() {
+        return;
+    }
+    for stage in ["file", "parent"] {
+        let fixture = Fixture::new();
+        let state = &fixture.0;
+        let mac = "02:aa:bb:cc:dd:01".parse().unwrap();
+        crate::config::FAIL_SYNC.with(|failure| failure.set(Some(stage)));
+        let error = update_device_exclusion(state, mac, true).unwrap_err();
+        let published = stage == "parent";
+        assert_eq!(
+            error.is::<crate::managed::CommittedRefreshFailed>(),
+            published
+        );
+        let expected = if published { vec![mac] } else { vec![] };
+        assert_eq!(
+            crate::config::load(&state.config_path)
+                .unwrap()
+                .device_exclusions,
+            expected
+        );
+        assert_eq!(state.config.lock().unwrap().device_exclusions, expected);
+        assert_eq!(state.routing_degraded.load(Ordering::Relaxed), published);
+        RUNNER.with_borrow(|runner| {
+            let r = runner.as_ref().unwrap();
+            assert_eq!(r.guarded, published);
+            assert_eq!(r.calls.contains(&"publish"), published);
+            assert_eq!(r.kernel_routing.contains(&mac), published);
+            assert_eq!(r.kernel_guard.contains(&mac), published);
+            assert_eq!(r.policy_exclusions.len(), if published { 1 } else { 2 });
+        });
+    }
+}
+
+#[test]
+fn network_rollback_failure_still_restores_old_policy() {
+    if run_in_child() {
+        return;
+    }
+    let fixture = Fixture::new();
+    RUNNER.with_borrow_mut(|runner| {
+        runner
+            .as_mut()
+            .unwrap()
+            .failures
+            .extend(["network", "network"])
+    });
+    assert!(mutate(&fixture.0, "edit").is_err());
+    RUNNER.with_borrow(|runner| {
+        assert_eq!(
+            runner.as_ref().unwrap().calls,
+            ["snapshot", "guard", "network", "network", "policy"]
+        )
+    });
+    assert!(fixture.0.routing_degraded.load(Ordering::Relaxed));
+}
+
+#[test]
+fn mutation_limit_rejects_before_any_effect_and_duplicate_add_is_idempotent() {
+    if run_in_child() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let state = &fixture.0;
+    state.config.lock().unwrap().device_exclusions = (0..256)
+        .map(|n| format!("02:00:00:00:00:{n:02x}").parse().unwrap())
+        .collect();
+    save(&state.config_path, &state.config.lock().unwrap()).unwrap();
+    let before = fs::read(&state.config_path).unwrap();
+    assert!(update_device_exclusion(state, "02:00:00:00:01:00".parse().unwrap(), true).is_err());
+    assert_eq!(fs::read(&state.config_path).unwrap(), before);
+    RUNNER.with_borrow(|runner| assert!(runner.as_ref().unwrap().calls.is_empty()));
+    update_device_exclusion(state, "02:00:00:00:00:01".parse().unwrap(), true).unwrap();
+    assert_eq!(state.config.lock().unwrap().device_exclusions.len(), 256);
+    RUNNER.with_borrow(|runner| {
+        assert_eq!(runner.as_ref().unwrap().calls, ["guard", "policy", "clear"])
+    });
+}
 
 fn run_in_child() -> bool {
     let thread = std::thread::current();
@@ -54,6 +297,22 @@ fn run_in_child() -> bool {
 pub(super) fn run_external(step: &'static str) -> Option<Result<()>> {
     RUNNER.with_borrow_mut(|runner| {
         let runner = runner.as_mut()?;
+        if step == "publish"
+            && let Some(expected) = &runner.publish_expected
+        {
+            let path = runner
+                .apply_lock
+                .as_ref()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("config.json");
+            assert_eq!(
+                &crate::config::load(&path).unwrap().device_exclusions,
+                expected,
+                "publish before configuration commit"
+            );
+        }
         if let Some(path) = &runner.apply_lock {
             let file = fs::OpenOptions::new()
                 .read(true)
@@ -72,13 +331,15 @@ pub(super) fn run_external(step: &'static str) -> Option<Result<()>> {
                 bail!("injected {step} failure");
             }
             match step {
-                "guard" => runner.guarded = true,
+                "guard" | "publish" => runner.guarded = true,
                 "clear" => {
                     assert!(runner.guarded);
                     runner.guarded = false;
                 }
-                "network" | "select-peer" | "policy" | "retire" => assert!(runner.guarded),
-                "snapshot" => {}
+                "network" | "select-peer" | "policy" | "retire" | "dns-cleanup" => {
+                    assert!(runner.guarded)
+                }
+                "snapshot" | "sync" => {}
                 _ => panic!("unexpected external operation: {step}"),
             }
             Ok(())
@@ -104,6 +365,7 @@ impl Fixture {
         let geodata = Arc::new(GeoData::default());
         let first = server('A');
         let config = ControllerConfig {
+            device_exclusions: vec![],
             vpn_enabled: true,
             active_server_key: Some(first.public_key.clone()),
             servers: vec![first, server('B')],
@@ -303,7 +565,14 @@ fn failed_rollback_blocks_all_partial_requests_until_full_reconcile() {
             let runner = runner.as_ref().unwrap();
             assert_eq!(
                 runner.calls,
-                ["guard", "policy", "network", "retire", "clear"]
+                [
+                    "guard",
+                    "policy",
+                    "dns-cleanup",
+                    "network",
+                    "retire",
+                    "clear"
+                ]
             );
             assert!(!runner.guarded);
         });
@@ -365,7 +634,7 @@ fn full_reconcile_publishes_saved_policy_before_network_and_stops_on_policy_fail
                     assert_eq!(
                         runner.calls,
                         if failure == "network" {
-                            vec!["guard", "policy", "network"]
+                            vec!["guard", "policy", "dns-cleanup", "network"]
                         } else {
                             vec!["guard", "policy"]
                         }
@@ -518,7 +787,10 @@ fn history_removal_error_keeps_guard_and_blocks_partial_requests() {
     assert!(state.routing_degraded.load(Ordering::Relaxed));
     RUNNER.with_borrow(|runner| {
         let runner = runner.as_ref().unwrap();
-        assert_eq!(runner.calls, ["guard", "policy", "network", "retire"]);
+        assert_eq!(
+            runner.calls,
+            ["guard", "policy", "dns-cleanup", "network", "retire"]
+        );
         assert!(runner.guarded);
     });
     assert!(mutate(state, "same-mode").is_err());
@@ -591,7 +863,10 @@ esac
         assert!(state.routing_degraded.load(Ordering::Relaxed));
         RUNNER.with_borrow(|runner| {
             let runner = runner.as_ref().unwrap();
-            assert_eq!(runner.calls, ["guard", "policy", "network", "select-peer"]);
+            assert_eq!(
+                runner.calls,
+                ["guard", "policy", "dns-cleanup", "network", "select-peer"]
+            );
             assert!(runner.guarded);
         });
         assert!(mutate(state, "same-mode").is_err());

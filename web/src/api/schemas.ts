@@ -113,6 +113,16 @@ export const deviceSchema = z.object({
 });
 
 export const routeTargetSchema = z.enum(["direct", "vpn", "block"]);
+export const macSchema = z.string().trim().toLowerCase()
+  .regex(/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/, "Введите MAC в формате 02:ab:cd:ef:01:23.")
+  .refine(value => value !== "00:00:00:00:00:00" && (Number.parseInt(value.slice(0, 2), 16) & 1) === 0,
+    "Нужен индивидуальный MAC устройства, не нулевой, multicast или broadcast.");
+export const deviceExclusionsSchema = z.array(macSchema).max(256);
+export const deviceExclusionInputSchema = z.object({ mac: macSchema, excluded: z.boolean() });
+export const lanDevicesSchema = z.object({
+  devices: z.array(z.object({ mac: macSchema, name: z.string().nullable(), addresses: z.array(z.string()) })),
+  discovery: z.enum(["complete", "partial", "unavailable"]),
+});
 // Rust str::trim uses Unicode White_Space, unlike JavaScript trim (NEL/BOM differ).
 export const routingNameInputSchema = z.string()
   .transform(value => value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, ""))
@@ -176,6 +186,7 @@ const apStatusSchema = z.object({
   }));
 
 export const statusSchema = z.object({
+  device_exclusions: deviceExclusionsSchema.default([]),
   version: z.string(),
   router_info: z.object({
     model: z.string().nullable(),
@@ -265,6 +276,9 @@ export type OnboardingWifiInput = z.infer<typeof onboardingWifiInputSchema>;
 export type HistoryPoint = z.infer<typeof historyPointSchema>;
 export type Device = z.infer<typeof deviceSchema>;
 export type Status = z.infer<typeof statusSchema>;
+export type DeviceExclusionInput = z.infer<typeof deviceExclusionInputSchema>;
+export type LanDevices = z.infer<typeof lanDevicesSchema>;
+export type Mac = z.infer<typeof macSchema>;
 export type ServerInput = z.infer<typeof serverInputSchema>;
 export type ProfileInput = z.infer<typeof profileInputSchema>;
 export type WifiInput = z.infer<typeof wifiInputSchema>;

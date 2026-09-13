@@ -5,6 +5,7 @@ mod auth;
 mod config;
 mod controller;
 mod dataplane;
+mod devices;
 mod fake_dns;
 mod geodata;
 mod managed;
@@ -157,8 +158,20 @@ async fn main() -> Result<()> {
         bail!("DNS must listen on the LAN address and use local DNS port 53");
     }
     // Keep forwarding closed even if configuration, TLS or listener setup fails.
-    dataplane::install_guard(&lan).context("failed to protect LAN forwarding")?;
-    let config = config::load(&args.config)?;
+    let startup_apply = network::lock_apply_path(&args.config)?;
+    let config = match config::load_committed(&args.config) {
+        Ok(config) => config,
+        Err(error) => {
+            dataplane::install_guard(&lan, &[]).context("failed to protect LAN forwarding")?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = config::sync_committed(&args.config) {
+        dataplane::install_guard(&lan, &[])?;
+        return Err(error);
+    }
+    dataplane::synchronize_startup(&lan, &config.device_exclusions)?;
+    network::cleanup_dns_flows_on(&lan.device, dns_listen.port())?;
     let geodata = Arc::new(GeoData::load(&args.geosite, &args.geoip)?);
     let routing = RoutingPolicy::compile(config.routing.clone(), Arc::clone(&geodata))?;
     let fake_dns = Arc::new(FakeDns::open(&args.routing_state)?);
@@ -205,9 +218,10 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to bind {}", args.https_listen))?;
     let tls_config =
         axum_server::tls_openssl::OpenSSLConfig::from_pem_file(&args.tls_cert, &args.tls_key)?;
-    if let Err(error) = controller::reconcile(&state) {
+    if let Err(error) = controller::reconcile_locked(&state, &startup_apply) {
         error!(%error, "network recovery failed; forwarding remains guarded, panel available for diagnostics");
     }
+    drop(startup_apply);
     info!(health = %args.listen, https = %args.https_listen, tls_fingerprint, "Gofro agent started");
 
     let http = async {
@@ -282,6 +296,31 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_dns_recovery_precedes_fallible_initialization_under_apply_lock() {
+        let main = include_str!("main.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let lock = main
+            .find("let startup_apply = network::lock_apply_path")
+            .unwrap();
+        let publish = main.find("dataplane::synchronize_startup(&lan").unwrap();
+        let cleanup = main
+            .find("network::cleanup_dns_flows_on(&lan.device")
+            .unwrap();
+        let geodata = main.find("let geodata = Arc::new(GeoData::load").unwrap();
+        let tls = main.find("let tls_fingerprint = tls::ensure").unwrap();
+        let unlock = main.find("drop(startup_apply)").unwrap();
+        assert!(
+            lock < publish
+                && publish < cleanup
+                && cleanup < geodata
+                && geodata < tls
+                && tls < unlock
+        );
+    }
 
     #[test]
     fn lan_requires_a_usable_non_reserved_host() {

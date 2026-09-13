@@ -20,8 +20,11 @@ const LEGACY_TUNNEL_ADDRESS: &str = "10.202.0.2/32";
 const DEVICE_PRIVATE_KEY: &str = "/etc/wireguard/client.key";
 
 pub(crate) fn lock_apply(state: &AppState) -> Result<File> {
-    let parent = state
-        .config_path
+    lock_apply_path(&state.config_path)
+}
+
+pub(crate) fn lock_apply_path(config_path: &Path) -> Result<File> {
+    let parent = config_path
         .parent()
         .context("configuration path has no parent")?;
     let directory =
@@ -62,6 +65,23 @@ pub(crate) fn lock_apply(state: &AppState) -> Result<File> {
         Err(TryLockError::WouldBlock) => bail!("network lifecycle operation is in progress"),
         Err(TryLockError::Error(error)) => Err(error).context("failed to acquire apply lock"),
     }
+}
+
+pub(crate) fn cleanup_dns_flows(state: &AppState) -> Result<()> {
+    cleanup_dns_flows_on(&state.lan.device, state.dns_listen.port())
+}
+
+pub(crate) fn cleanup_dns_flows_on(lan_device: &str, dns_port: u16) -> Result<()> {
+    cleanup_dns_flows_with(
+        Path::new("/usr/libexec/gofro/dns-flows"),
+        lan_device,
+        dns_port,
+    )
+}
+
+fn cleanup_dns_flows_with(command: &Path, lan_device: &str, dns_port: u16) -> Result<()> {
+    run(Command::new(command).args(["cleanup", lan_device, &dns_port.to_string()]))?;
+    Ok(())
 }
 
 pub(crate) struct Snapshot {
@@ -396,6 +416,20 @@ pub(crate) fn retire_legacy_routing(state: &AppState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dns_flow_helper_receives_only_cleanup_lan_and_port_and_propagates_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("gofro-dns-helper-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let helper = directory.join("dns-flows");
+        fs::write(&helper, "#!/bin/sh\n[ \"$#\" = 3 ] && [ \"$1\" = cleanup ] && [ \"$2\" = br-home ] && [ \"$3\" = 5353 ]\n").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        cleanup_dns_flows_with(&helper, "br-home", 5353).unwrap();
+        assert!(cleanup_dns_flows_with(&helper, "br-home", 53).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn restores_saved_credentials_atomically_including_absent_files() {

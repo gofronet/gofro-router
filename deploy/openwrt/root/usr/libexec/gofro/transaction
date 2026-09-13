@@ -3,6 +3,66 @@ set -eu
 
 state_dir=${STATE_DIR:-/etc/gofro}
 
+panel_section() {
+	exported="$(uci export dhcp)" || return 1
+	printf '%s\n' "$exported" | awk '
+		$1 == "config" {active = ($3 == "\047gofro_panel\047" || $3 == "gofro_panel")}
+		active && NF {print}'
+}
+
+panel_check() {
+	# OpenWrt 25.12 filter_dnsmasq applies hostrecord.instance to the real
+	# section ID, including anonymous cfg IDs (uci -X), not @dnsmasq[0].
+	config="$(uci -X show dhcp)" || return 1
+	changes="$(uci changes dhcp)" || return 1
+	if [ -n "$(printf '%s\n' "$changes" | sed '/^dhcp\.gofro_panel[.=]/d; /^$/d')" ]; then
+		echo 'gofro panel: commit or revert pending DHCP changes first' >&2; return 1
+	fi
+	hint="$(uci -q get dhcp.lan.instance || true)"
+	instance=
+	for section in $(printf '%s\n' "$config" | sed -n 's/^dhcp\.\([A-Za-z0-9_]*\)=dnsmasq$/\1/p'); do
+		[ -z "$hint" ] || [ "$hint" = "$section" ] || continue
+		case "$(uci -q get "dhcp.$section.disabled" || true)" in ''|0) ;; *) continue ;; esac
+		case "$(uci -q get "dhcp.$section.port" || true)" in ''|53) ;; *) continue ;; esac
+		interfaces="$(uci -q get "dhcp.$section.interface" || true)"
+		case " $interfaces " in '  '|*' lan '*) ;; *) continue ;; esac
+		case " $(uci -q get "dhcp.$section.notinterface" || true) " in *' lan '*) continue ;; esac
+		[ -z "$(uci -q get "dhcp.$section.listen_address" || true)" ] || continue
+		[ -z "$instance" ] || { echo 'gofro panel: ambiguous LAN dnsmasq instance' >&2; return 1; }
+		instance=$section
+	done
+	[ -n "$instance" ] || { echo 'gofro panel: no unambiguous LAN dnsmasq instance' >&2; return 1; }
+	expected="dhcp.gofro_panel=hostrecord
+dhcp.gofro_panel.ip='198.18.0.0'
+dhcp.gofro_panel.name='wifi.gofro.net'
+dhcp.gofro_panel.instance='$instance'"
+	actual="$(printf '%s\n' "$config" | sed -n '/^dhcp\.gofro_panel[.=]/p')"
+	if [ -n "$actual" ] && [ "$(printf '%s\n' "$actual" | LC_ALL=C sort)" != "$(printf '%s\n' "$expected" | LC_ALL=C sort)" ]; then
+		echo 'gofro panel: conflicting dhcp.gofro_panel section' >&2; return 1
+	fi
+}
+
+panel_apply() {
+	panel_check || return 1
+	if [ -n "$actual" ]; then
+		if [ -n "$changes" ]; then uci commit dhcp || return 1; fi
+		# Matching disk state is not proof of activation: the previous attempt
+		# may have died after commit or failed its reload. Retry activation.
+		/etc/init.d/dnsmasq reload
+		return
+	fi
+	# One UCI invocation publishes a complete section even if setup is killed.
+	uci -m import dhcp <<EOF || return 1
+package dhcp
+config hostrecord 'gofro_panel'
+	option name 'wifi.gofro.net'
+	option ip '198.18.0.0'
+	option instance '$instance'
+EOF
+	uci commit dhcp || return 1
+	/etc/init.d/dnsmasq reload
+}
+
 save_option() {
 	if value="$(uci -q get "$1" 2>/dev/null)"; then
 		printf '%s' 1 > "$2.present"; printf '%s\n' "$value" > "$2"
@@ -22,10 +82,12 @@ restore_option() {
 
 snapshot() {
 	[ "${GOFRO_INTERFACE:-gt0}" = gt0 ] || return 1
+	panel_check || return 1
 	dir=$1; tmp=$1.new.$$
 	[ ! -e "$dir" ] || return 1
 	rm -rf "$tmp"; umask 077; mkdir -p "$tmp" || return 1
 	cp "$0" "$tmp/restore"; chmod 700 "$tmp/restore"
+	panel_section > "$tmp/panel-section" || return 1
 	printf '%s\n' "${GOFRO_INTERFACE:-gt0}" > "$tmp/interface"
 	printf '%s\n' "${GOFRO_LEGACY_DNS:-0}" > "$tmp/legacy-dns"
 	save_option "network.${GOFRO_INTERFACE:-gt0}.mtu" "$tmp/network-mtu"
@@ -69,6 +131,23 @@ restore() {
 	fi
 	legacy_dns="$(cat "$dir/legacy-dns")" || return 1
 	case "$legacy_dns" in 0|1) ;; *) return 1 ;; esac
+	# Old journals predate the owned record. New journals restore only this
+	# section, preserving option/list types, quoting and unrelated DHCP state.
+	if [ -f "$dir/panel-section" ]; then
+		current_panel="$(panel_section)" || return 1
+		saved_panel="$(cat "$dir/panel-section")" || return 1
+		if [ "$current_panel" != "$saved_panel" ]; then
+			if uci -q get dhcp.gofro_panel >/dev/null; then uci delete dhcp.gofro_panel || return 1; fi
+			if [ -n "$saved_panel" ]; then
+				{ printf 'package dhcp\n'; printf '%s\n' "$saved_panel"; } | uci -m import dhcp || return 1
+			fi
+			uci commit dhcp || return 1
+			/etc/init.d/dnsmasq reload || return 1
+		elif [ -n "$saved_panel" ]; then
+			# A prior restore can have committed this record but failed reload.
+			/etc/init.d/dnsmasq reload || return 1
+		fi
+	fi
 	restore_option "network.$interface.mtu" "$dir/network-mtu" || return 1
 	restore_option firewall.gofro_vpn.mtu_fix "$dir/firewall-mtu-fix" || return 1
 	restore_option firewall.gofro_vpn.masq "$dir/firewall-masq" || return 1
@@ -101,4 +180,4 @@ attest() {
 	sync
 }
 
-case "${1:-}" in snapshot) snapshot "$2" ;; restore) restore "$2" ;; attest) attest "$2" ;; *) exit 2 ;; esac
+case "${1:-}" in snapshot) snapshot "$2" ;; restore) restore "$2" ;; attest) attest "$2" ;; panel-check) panel_check ;; panel-apply) panel_apply ;; *) exit 2 ;; esac

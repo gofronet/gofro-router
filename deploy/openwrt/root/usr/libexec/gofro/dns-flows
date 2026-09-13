@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+# Caller holds controller apply.lock. This helper never discovers clients.
+die() { echo "gofro dns-flows: $*" >&2; exit 1; }
+[ "$#" = 3 ] && [ "$1" = cleanup ] || exit 2
+device=$2; port=$3
+case "$device" in ''|*[!A-Za-z0-9_.-]*|????????????????*) exit 2 ;; esac
+case "$port" in ''|0*|*[!0-9]*|??????*) exit 2 ;; esac
+[ "$port" -le 65535 ] || exit 2
+export LC_ALL=C
+
+delete_flows() {
+	status=0
+	error="$(conntrack -D "$@" 2>&1 >/dev/null)" || status=$?
+	[ "$status" != 0 ] || return 0
+	# Native conntrack uses 1 for zero matches AND netlink errors. Only this
+	# exact single diagnostic is a successful empty deletion (never hide EPERM).
+	if [ "$status" = 1 ] && printf '%s\n' "$error" | awk '
+		!/^conntrack v[0-9.]+ \(conntrack-tools\): 0 flow entries have been deleted\.$/ {exit 1}
+		END {if (NR != 1) exit 1}'; then return 0; fi
+	die "conntrack deletion failed ($status): $error"
+}
+
+for family in ipv4 ipv6; do
+	for proto in udp tcp; do
+		delete_flows -f "$family" -p "$proto" --orig-port-dst 53 --mark 0x40000000/0x40000000
+	done
+done
+
+# START=8 recovery precedes LAN creation. A successful, validated full link
+# dump proves absence; failed lookups/tools must never become an empty result.
+links="$(ip -j link show)" || die 'cannot inspect network devices'
+present="$(printf '%s' "$links" | jq -r --arg device "$device" '
+	if type == "array" and all(.[]; type == "object" and (.ifname | type) == "string")
+	then any(.[]; .ifname == $device) else error("invalid link dump") end
+')" || die 'invalid network device JSON'
+case "$present" in false) exit 0 ;; true) ;; *) die 'invalid network device result' ;; esac
+
+# Legacy redirects have no stable mark. Restrict them to CURRENT LAN reply
+# addresses, redirected source port, original DNS port, and actual DNAT status.
+for version in 4 6; do
+	json="$(ip -j -"$version" address show dev "$device")" || die 'cannot inspect LAN addresses'
+	[ "$(printf '%s' "$json" | jsonfilter -t '@')" = array ] || die 'invalid LAN address JSON'
+	addresses="$(printf '%s' "$json" | jsonfilter -e '@[*].addr_info[*].local')" || [ "$?" = 1 ] || die 'cannot read LAN addresses'
+	[ "$version" != 4 ] && family=ipv6 || family=ipv4
+	for address in $addresses; do
+		printf '%s\n' "$address" | awk -v version="$version" '
+		version == 4 {
+			n=split($0,a,"."); if(n!=4) exit 1
+			for(i=1;i<=n;i++) if(a[i] !~ /^(0|[1-9][0-9]*)$/ || a[i]>255) exit 1
+			next
+		}
+		{
+			if($0 !~ /^[0-9a-fA-F:]+$/ || $0 ~ /:::/) exit 1
+			s=$0; compressed=sub(/::/,"X",s)
+			if(s ~ /::/) exit 1
+			n=split(s,a,/[X:]/); groups=0
+			for(i=1;i<=n;i++) if(a[i]!="") {if(length(a[i])>4) exit 1; groups++}
+			if(compressed ? groups>=8 : (groups!=8 || $0 ~ /^:|:$/)) exit 1
+		}' || die "invalid LAN address: $address"
+		for proto in udp tcp; do
+			delete_flows -f "$family" -p "$proto" --orig-port-dst 53 --reply-src "$address" --reply-port-src "$port" --dst-nat --mark 0/0x40000000
+		done
+	done
+done

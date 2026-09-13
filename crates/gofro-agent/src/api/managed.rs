@@ -296,6 +296,7 @@ mod tests {
 
     fn bootstrap_status() -> AgentStatus {
         AgentStatus {
+            device_exclusions: vec![],
             version: env!("CARGO_PKG_VERSION"),
             update: UpdateStatus {
                 running: false,

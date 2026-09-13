@@ -16,12 +16,17 @@ printf '%s:%s\n' "$name" "$*" >> "$TEST_ROOT/log"
 case "$name" in
 id) echo 0 ;;
 stat)
+	if [ "$2" = '%d:%i' ]; then
+		if [ "$1" = -Lc ]; then python3 -c 'import os; os.fstat(8)' || exit 1; fi
+		echo 1:8; exit
+	fi
 	case "$3" in
 	*/guard-device) echo "${TEST_FILE_MODE:-0:600}" ;;
 	*/apply.lock) echo "${TEST_APPLY_MODE:-0:600:1}" ;;
 	"$TEST_ROOT") echo "${TEST_ANCESTOR_MODE:-0:700}" ;;
 	*) echo 0:700 ;; esac ;;
 chown|sync) : ;;
+dns-flows) [ "$*" = 'cleanup br-home 5353' ]; [ "${TEST_CLEANUP_FAIL:-0}" = 0 ] ;;
 flock)
 	[ "${TEST_LOCK_FAIL:-0}" = 0 ] || exit 1
 	[ "$*" != 8 ] || [ "${TEST_FENCE_FAIL:-0}" = 0 ] || exit 1
@@ -98,7 +103,7 @@ ip|uci|service) echo "forbidden command: $name" >&2; exit 1 ;;
 esac
 EOF
 chmod +x "$TMP/bin/stub" "$TMP/bin/guard"
-for name in id stat chown sync flock network jsonfilter mode nft ubus ip uci service; do
+for name in id stat chown sync flock network jsonfilter mode nft ubus ip uci service dns-flows; do
 	ln -s stub "$TMP/bin/$name"
 done
 export PATH="$TMP/bin:$PATH"
@@ -278,7 +283,7 @@ cmp "$TMP/dns" "$TMP/owned-dns"
 rc_stop 2> "$TMP/warning"
 [ ! -e "$TMP/dns" ]
 [ -s "$TMP/armed" ]
-grep -q 'existing redirected NAT flows remain' "$TMP/warning"
+grep -q '^dns-flows:cleanup br-home 5353$' "$TMP/log"
 rc_stop
 sed 's/:5353/:9999/g' "$TMP/owned-dns" > "$TMP/dns"
 cp "$TMP/dns" "$TMP/foreign-dns"

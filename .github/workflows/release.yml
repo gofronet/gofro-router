@@ -102,17 +102,26 @@ jobs:
           shellcheck -s bash deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install deploy/server/tests/*.sh
           bash deploy/server/tests/version.sh
           bash deploy/server/tests/managed.sh
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends iproute2 nftables python3
           cargo build --locked -p gofro-agent --bin gofro-agent
           FIXTURES=$(mktemp -d)
           export FIXTURES
           trap 'rm -rf "$FIXTURES"' EXIT
-          bash deploy/openwrt/tests/dataplane-netns.sh
+          bash deploy/openwrt/tests/dataplane-netns.sh --emit-only
+          sudo -n docker build -t gofro-native-test -f deploy/openwrt/tests/Dockerfile deploy/openwrt/tests
           sudo -n docker build -t gofro-mode-test - <<'EOF'
-          FROM debian:trixie-slim
-          RUN apt-get update && apt-get install -y --no-install-recommends iproute2 nftables python3
+          FROM gofro-native-test
+          RUN apt-get update && apt-get install -y --no-install-recommends procps
           EOF
+          # sysctl runs under ip netns exec: mount proc only in that owned namespace.
+          sudo -n docker run --rm --network none --user 0:0 \
+            --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN \
+            --security-opt apparmor=unconfined \
+            -v "$GITHUB_WORKSPACE:/src:ro" -v "$FIXTURES:/fixtures:ro" \
+            -e FIXTURES=/fixtures -w /src gofro-mode-test sh -eu -c '
+              printf "#!/bin/sh\nset -eu\nmount -t proc -o nosuid,nodev,noexec proc /proc\nexec /sbin/sysctl \"\$@\"\n" > /usr/local/bin/sysctl
+              chmod +x /usr/local/bin/sysctl
+              exec sh deploy/openwrt/tests/dataplane-netns.sh --run
+            '
           sudo -n docker run --rm --network none --cap-add NET_ADMIN --user 0:0 \
             -v "$GITHUB_WORKSPACE:/src:ro" -w /src gofro-mode-test \
             sh deploy/openwrt/tests/mode-netns.sh --run
@@ -123,6 +132,19 @@ jobs:
             -v "$GITHUB_WORKSPACE:/src:ro" -v "$FIXTURES:/fixtures:ro" \
             -e AGENT_BIN=/src/target/debug/gofro-agent -e FIXTURES=/fixtures \
             -w /src gofro-mode-test sh deploy/openwrt/tests/dns-netns.sh
+          sudo -n docker run --rm --network none --user 0:0 \
+            --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN \
+            --security-opt apparmor=unconfined \
+            -v "$GITHUB_WORKSPACE:/src:ro" -w /src gofro-mode-test \
+            sh deploy/openwrt/tests/exclusions-netns.sh
+          sudo -n docker run --rm --network none --user 0:0 \
+            --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN \
+            --security-opt apparmor=unconfined \
+            -v "$GITHUB_WORKSPACE:/src:ro" -w /src gofro-mode-test \
+            sh deploy/openwrt/tests/lifecycle-netns.sh
+          sudo -n docker run --rm --network none --user 0:0 \
+            -v "$GITHUB_WORKSPACE:/src:ro" -w /src gofro-mode-test \
+            sh deploy/openwrt/tests/panel.sh
 
       - name: Build web UI
         working-directory: web

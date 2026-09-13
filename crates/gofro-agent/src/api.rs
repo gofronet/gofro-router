@@ -128,6 +128,8 @@ fn private_router() -> Router<AppState> {
         .route("/api/ap", post(network_managed_by_openwrt))
         .route("/api/onboarding/wifi", post(network_managed_by_openwrt))
         .route("/api/routing", post(update_routing))
+        .route("/api/device-exclusions", post(update_device_exclusion))
+        .route("/api/lan-devices", get(lan_devices))
         .route("/api/routing/test", post(test_routing))
 }
 
@@ -287,6 +289,26 @@ async fn update_routing(
     run_blocking(state, move |state| controller::update_routing(state, input)).await
 }
 
+async fn update_device_exclusion(
+    State(state): State<AppState>,
+    Json(input): Json<crate::model::DeviceExclusionInput>,
+) -> Result<Json<AgentStatus>, ApiError> {
+    run_blocking(state, move |state| {
+        controller::update_device_exclusion(state, input.mac, input.excluded)
+    })
+    .await
+}
+
+async fn lan_devices(
+    State(state): State<AppState>,
+) -> Result<Json<crate::devices::LanDeviceInventory>, ApiError> {
+    tokio::task::spawn_blocking(move || crate::devices::list(&state).map(Json))
+        .await
+        .context("LAN inventory task failed")
+        .map_err(ApiError)?
+        .map_err(ApiError)
+}
+
 async fn test_routing(
     State(state): State<AppState>,
     Json(input): Json<RoutingTestInput>,
@@ -360,6 +382,7 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
         .sample(stats::interface_traffic(&state.interface).unwrap_or_default());
 
     Ok(AgentStatus {
+        device_exclusions: config.device_exclusions,
         version: env!("CARGO_PKG_VERSION"),
         update: update_status(),
         vpn_enabled: config.vpn_enabled,

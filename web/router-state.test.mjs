@@ -2,18 +2,25 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { plugin } from "bun";
 import { test } from "bun:test";
-import { compileModule } from "svelte/compiler";
+import { compile, compileModule } from "svelte/compiler";
+import { render } from "svelte/server";
+import { setAppContext } from "./src/app-context.ts";
 import { api, ApiError } from "./src/api/index.ts";
 import { setCsrfToken, clearCsrfToken } from "./src/api/client.ts";
 import { statusSchema } from "./src/api/schemas.ts";
 
 plugin({ name: "svelte-store-test", setup(build) {
+  build.onLoad({ filter: /device-exclusions\.svelte$/ }, async ({ path }) => ({
+    contents: compile(await readFile(path, "utf8"), { filename: path, generate: "server" }).js.code,
+    loader: "js",
+  }));
   build.onLoad({ filter: /router-state\.svelte\.ts$/ }, async ({ path }) => ({
     contents: compileModule(new Bun.Transpiler({ loader: "ts" }).transformSync(await readFile(path, "utf8")), { filename: path, generate: "server" }).js.code,
     loader: "js",
   }));
 } });
 const { RouterState } = await import("./src/stores/router-state.svelte.ts");
+const { default: DeviceExclusions } = await import("./src/components/device-exclusions.svelte");
 const status = statusSchema.parse({
   version: "test", update: { running: false, result: null }, vpn_enabled: false,
   tunnel_active: false, interface: "wg0", active_server_key: null, servers: [], peer: null,
@@ -169,7 +176,7 @@ test("password transport serializes body settlement and resyncs rotated CSRF wit
 });
 
 async function scenario(run) {
-  const original = { status: api.status.get, auth: { ...api.auth }, onboarding: api.onboarding.get, save: api.routing.save, create: api.servers.createFriend, window: globalThis.window };
+  const original = { exclusions: api.deviceExclusions.set, inventory: api.lanDevices.get, status: api.status.get, auth: { ...api.auth }, onboarding: api.onboarding.get, save: api.routing.save, create: api.servers.createFriend, window: globalThis.window };
   const timers = new Map();
   let next = 0;
   globalThis.window = { setInterval(callback) { timers.set(++next, callback); return next; }, clearInterval(id) { timers.delete(id); } };
@@ -182,6 +189,8 @@ async function scenario(run) {
   finally {
     app.stop();
     api.status.get = original.status;
+    api.deviceExclusions.set = original.exclusions;
+    api.lanDevices.get = original.inventory;
     Object.assign(api.auth, original.auth);
     api.onboarding.get = original.onboarding;
     api.routing.save = original.save;
@@ -189,6 +198,126 @@ async function scenario(run) {
     globalThis.window = original.window;
   }
 }
+
+test("device exclusions use authoritative replies, reject stale polls and never replay uncertain writes", () => scenario(async app => {
+  await app.loginAuth("password"); await app.refresh();
+  const mac = "02:ab:cd:ef:01:23";
+  const old = deferred();
+  api.status.get = () => old.promise;
+  const polling = app.refresh();
+  const pending = deferred();
+  let writes = 0;
+  api.deviceExclusions.set = input => { writes++; assert.deepEqual(input, { mac, excluded: true }); return pending.promise; };
+  const writing = app.setDeviceExcluded({ mac: mac.toUpperCase(), excluded: true });
+  assert.deepEqual(app.status.device_exclusions, []);
+  assert.equal(await app.setDeviceExcluded({ mac, excluded: true }), false);
+  pending.resolve({ ...status, device_exclusions: [mac, "02:00:00:00:00:02"] });
+  assert.equal(await writing, true);
+  old.resolve(status); await polling;
+  assert.equal(app.status.device_exclusions.length, 2);
+  assert.equal(writes, 1);
+  for (const failure of [new ApiError("rejected", 400), new ApiError("timeout"), new ApiError("refresh failed", 500, undefined, "committed")]) {
+    api.deviceExclusions.set = async () => { writes++; throw failure; };
+    assert.equal(await app.setDeviceExcluded({ mac, excluded: false }), false);
+    assert.equal(app.status.device_exclusions.length, 2);
+    assert.equal(app.statusUncertain, true);
+    if (failure.outcome === "committed") assert.ok(app.actionWarning);
+    else assert.ok(app.actionError);
+    const count = writes;
+    assert.equal(await app.setDeviceExcluded({ mac, excluded: false }), false);
+    assert.equal(writes, count);
+    api.status.get = async () => ({ ...status, device_exclusions: [mac, "02:00:00:00:00:02"] });
+    await app.refresh();
+  }
+  api.status.get = async () => status;
+  await app.refresh();
+  assert.deepEqual(app.status.device_exclusions, []);
+}));
+
+test("inventory failures preserve exclusions and manual writes; late inventory cannot cross auth rotation", () => scenario(async app => {
+  await app.loginAuth("password"); await app.refresh();
+  const mac = "02:00:00:00:00:01";
+  api.lanDevices.get = async () => { throw new ApiError("source unavailable", 503); };
+  await app.refreshLanDevices();
+  assert.equal(app.lanDevices.discovery, "unavailable");
+  assert.ok(app.inventoryError);
+  assert.equal(app.statusUncertain, false);
+  api.deviceExclusions.set = async () => ({ ...status, device_exclusions: [mac] });
+  assert.equal(await app.setDeviceExcluded({ mac, excluded: true }), true);
+  await app.refreshLanDevices();
+  assert.deepEqual(app.status.device_exclusions, [mac]);
+  const html = render(payload => { setAppContext(app); DeviceExclusions(payload, {}); }).body;
+  assert.match(html, /02:00:00:00:00:01/);
+  assert.match(html, /Обнаружение устройств недоступно/);
+  assert.match(html, /<input[^>]*placeholder="02:ab:cd:ef:01:23"/);
+  assert.match(html, /<button class="btn">Добавить напрямую/);
+  api.lanDevices.get = async () => ({ devices: [], discovery: "partial" });
+  await app.refreshLanDevices();
+  assert.equal(app.lanDevices.discovery, "partial");
+  assert.deepEqual(app.status.device_exclusions, [mac]);
+  for (const fail of [false, true]) {
+    const pending = deferred(); api.lanDevices.get = () => pending.promise;
+    const reading = app.refreshLanDevices();
+    api.auth.changePassword = async () => auth;
+    await app.changePassword("old-password", "new-password");
+    if (fail) pending.reject(new ApiError("old session", 401));
+    else pending.resolve({ devices: [{ mac, name: "Old", addresses: ["192.168.1.2"] }], discovery: "complete" });
+    await reading;
+    assert.equal(app.authState, "authenticated");
+    assert.equal(app.lanDevices.discovery, "partial");
+    assert.equal(app.inventoryLoading, false);
+  }
+  const pending = deferred(); api.deviceExclusions.set = () => pending.promise;
+  const writing = app.setDeviceExcluded({ mac, excluded: false });
+  await app.logoutAuth(); pending.resolve(status);
+  assert.equal(await writing, false);
+  assert.equal(app.hasStatus, false);
+}));
+
+test("device exclusion transport sends a MAC delta and parses authoritative status", async () => {
+  const originalFetch = globalThis.fetch;
+  const mac = "02:ab:cd:ef:01:23";
+  const calls = [];
+  setCsrfToken("test-csrf");
+  globalThis.fetch = async (url, init) => {
+    calls.push(url);
+    if (url === "/api/lan-devices") {
+      assert.equal(init.method, "GET");
+      return Response.json({ devices: [{ mac: mac.toUpperCase(), name: null, addresses: ["192.168.1.2"] }], discovery: "partial" });
+    }
+    assert.equal(url, "/api/device-exclusions");
+    assert.equal(init.method, "POST");
+    assert.equal(new Headers(init.headers).get("X-CSRF-Token"), "test-csrf");
+    assert.deepEqual(JSON.parse(init.body), { mac, excluded: true });
+    return Response.json({ ...status, device_exclusions: [mac, "02:00:00:00:00:02"] });
+  };
+  try {
+    assert.equal((await api.deviceExclusions.set({ mac: mac.toUpperCase(), excluded: true })).device_exclusions.length, 2);
+    assert.equal((await api.lanDevices.get()).devices[0].mac, mac);
+    assert.throws(() => api.deviceExclusions.set({ mac: "ff:ff:ff:ff:ff:ff", excluded: true }));
+    assert.equal(calls.length, 2);
+  } finally { globalThis.fetch = originalFetch; clearCsrfToken(); }
+});
+
+test("device exclusion writes need fresh status and enforce the 256 bound without blocking removal", () => scenario(async app => {
+  const mac = "02:ff:ff:ff:ff:ff";
+  let writes = 0;
+  api.deviceExclusions.set = async () => { writes++; return status; };
+  app.authState = "authenticated";
+  assert.equal(await app.setDeviceExcluded({ mac, excluded: true }), false);
+  await app.refresh();
+  api.status.get = async () => { throw new ApiError("offline"); };
+  await app.refresh();
+  assert.equal(await app.setDeviceExcluded({ mac, excluded: true }), false);
+  const full = Array.from({ length: 256 }, (_, i) => `02:00:00:00:00:${i.toString(16).padStart(2, "0")}`);
+  api.status.get = async () => ({ ...status, device_exclusions: full });
+  await app.refresh();
+  assert.equal(await app.setDeviceExcluded({ mac, excluded: true }), false);
+  assert.match(app.actionError, /256/);
+  assert.equal(writes, 0);
+  assert.equal(await app.setDeviceExcluded({ mac: full[0], excluded: false }), true);
+  assert.equal(writes, 1);
+}));
 
 test("logout invalidates pending status success/error and queued polling callbacks", () => scenario(async (app, timers) => {
   for (const fail of [false, true]) {

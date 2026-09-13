@@ -1,6 +1,10 @@
 import { bootstrapStream, http, request, setCsrfToken } from "./client";
 import {
   profileInputSchema,
+  deviceExclusionInputSchema,
+  lanDevicesSchema,
+  type DeviceExclusionInput,
+  type LanDevices,
   profileSchema,
   authStatusSchema,
   serverInputSchema,
@@ -68,6 +72,15 @@ export const api = {
   },
   status: {
     get: (): Promise<Status> => statusRequest(() => http.get("/status")),
+  },
+  deviceExclusions: {
+    set: (input: DeviceExclusionInput): Promise<Status> => {
+      const body = deviceExclusionInputSchema.parse(input);
+      return statusRequest(() => http.post("/device-exclusions", body, mutation));
+    },
+  },
+  lanDevices: {
+    get: (): Promise<LanDevices> => request(lanDevicesSchema, () => http.get("/lan-devices")),
   },
   update: {
     start: (): Promise<Status> =>
@@ -156,6 +169,9 @@ export const api = {
 
 export { ApiError } from "./client";
 export type {
+  DeviceExclusionInput,
+  LanDevices,
+  Mac,
   HistoryPoint,
   DomainRule,
   IpRule,
