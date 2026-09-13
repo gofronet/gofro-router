@@ -189,6 +189,25 @@ BASE_PATH=$PATH
 REAL_HASH="$(command -v sha256sum || command -v shasum)"; export REAL_HASH
 REAL_STAT="$(command -v stat)"; export REAL_STAT
 for install_mode in install update; do
+	if [ "$install_mode" = install ]; then fresh nonexecutable-preflight-install; else upgrade nonexecutable-preflight-update; fi
+	helper=$FS/bundle/root/usr/libexec/gofro/transaction
+	# Model the signed archive AFTER copy_script's executable fixture default.
+	chmod 644 "$helper"
+	[ ! -x "$helper" ]
+	if [ "$install_mode" = install ]; then sh "$FS/bundle/install.sh" > "$FS/output" 2>&1
+	else sh "$FS/bundle/install.sh" --update > "$FS/output" 2>&1; fi
+	[ "$(cat "$FS/etc/gofro/version")" = 0.5.16 ]
+	[ ! -x "$helper" ]
+	staged=$FS/usr/lib/gofro/releases/0.5.16/usr/libexec/gofro/transaction
+	permissions="$("$REAL_STAT" -c '%a' "$staged" 2>/dev/null)" || permissions="$("$REAL_STAT" -f '%Lp' "$staged")"
+	[ "$permissions" = 755 ]
+	"$FS/usr/libexec/gofro/transaction" panel-check
+	awk '/^uci:-X show dhcp$/ {preflight=1}
+		/^apk:update$/ {if (!preflight) exit 1; checked=1}
+		END {if (!checked) exit 1}' "$FS/commands"
+	printf 'PASS %s: source transaction 0644 preflight succeeds before apk; staged helper is executable 0755\n' "$install_mode"
+done
+for install_mode in install update; do
 	if [ "$install_mode" = install ]; then fresh missing-stat-install; else upgrade missing-stat-update; fi
 	FAIL_MATCH='apk:update'; export FAIL_MATCH
 	if [ "$install_mode" = install ]; then fails sh "$FS/bundle/install.sh"; else fails sh "$FS/bundle/install.sh" --update; fi

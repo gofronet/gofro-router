@@ -402,7 +402,7 @@ done
 mkdir "$LOCK" 2>/dev/null || die 'another installation or update is running'
 LOCKED=1
 STATUS_FILE="$(mktemp /tmp/gofro-status.XXXXXX)"
-"$ROOTFS/usr/libexec/gofro/transaction" panel-check || die 'panel DNS ownership validation failed'
+sh "$ROOTFS/usr/libexec/gofro/transaction" panel-check || die 'panel DNS ownership validation failed'
 [ "$mode" != update ] || [ -s "$PENDING" ] || preflight_legacy_dns
 rm -rf "$RELEASES"/.[0-9]* "$APP_ROOT"/current.new.*
 
