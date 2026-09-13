@@ -6,7 +6,16 @@ START=99
 install_status_healthy() {
 	[ "$(jsonfilter -i "$status_file" -e '@.version' 2>/dev/null)" = "$1" ] || return 1
 	[ "$(jsonfilter -i "$status_file" -e '@.dns_active' 2>/dev/null)" = true ] || return 1
-	[ "$(jsonfilter -i "$status_file" -e '@.dataplane_active' 2>/dev/null)" = true ]
+	[ "$(jsonfilter -i "$status_file" -e '@.dataplane_active' 2>/dev/null)" = true ] || return 1
+	if [ "$1" != 0.5.15 ]; then
+		[ "$(jsonfilter -i "$status_file" -e '@.degraded' 2>/dev/null)" = false ] || return 1
+		[ ! -e "${STATE_DIR:-/etc/gofro}/routing-legacy.json" ] || return 1
+	fi
+	tables="$(nft list tables)" || return 1
+	if printf '%s\n' "$tables" | grep -Eq '^table inet gofro_guard[[:space:]]*$'; then
+		echo 'warning: runtime guard retained; forwarding may be blocked even after restoring the old release' >&2
+		return 1
+	fi
 }
 
 finalize_install() {
@@ -36,6 +45,40 @@ finalize_install() {
 	return 1
 }
 
+finalize_rollback() {
+	state_dir=${STATE_DIR:-/etc/gofro}; pending=$state_dir/update-previous
+	[ -s "$pending" ] || return 0
+	IFS= read -r previous < "$pending" || return 1
+	[ "$(cat "$state_dir/update-restored" 2>/dev/null)" = "$previous" ] || return 1
+	[ "$(readlink "${APP_ROOT:-/usr/lib/gofro}/current")" = "$previous" ] || return 1
+	backup="$(sed -n '2p' "$pending")"
+	[ -d "$backup" ] || return 1
+	version=${previous##*/}
+	/etc/init.d/gofro-agent stop || return 1
+	/etc/init.d/gofro-relay stop || return 1
+	/etc/init.d/gofro-relay start || return 1
+	# start may rearm the guard without replacing an already-running procd instance.
+	/etc/init.d/gofro-agent restart || return 1
+	status_file="$(mktemp /tmp/gofro-rollback-status.XXXXXX)" || return 1
+	count=0
+	while [ "$count" -lt 30 ]; do
+		if uclient-fetch -q -T 2 -O "$status_file" 'http://127.0.0.1:8080/healthz' 2>/dev/null && install_status_healthy "$version"; then
+			# Finalize the installer journal only; polling must never clear a runtime guard.
+			rm -f "$pending" "$status_file" "$state_dir/update-restored" || return 1
+			sync || return 1
+			rm -rf "$backup" || return 1
+			ln -sf /etc/init.d/gofro-finalize "${RC_D:-/etc/rc.d}/S99gofro-finalize" || return 1
+			rm -f "${RC_D:-/etc/rc.d}/S08gofro-recover" || return 1
+			"${RECOVER_INIT:-/etc/init.d/gofro-recover}" disable || return 1
+			"${RECOVER_INIT:-/etc/init.d/gofro-recover}" enable || return 1; sync
+			return 0
+		fi
+		count=$((count + 1)); sleep 1
+	done
+	rm -f "$status_file"; return 1
+}
+
 boot() {
-	finalize_install
+	finalize_install || return 1
+	finalize_rollback
 }

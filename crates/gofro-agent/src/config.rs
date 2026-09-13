@@ -20,6 +20,21 @@ const KEEPALIVE: u16 = 10;
 const MTU: u16 = 1280;
 
 pub(crate) fn validate_server(server: &ServerProfile) -> Result<()> {
+    validate_saved_server(server)?;
+    if server
+        .endpoint
+        .rsplit_once(':')
+        .is_some_and(|(host, _)| host.contains([':', '[', ']']))
+    {
+        bail!(
+            "IPv6 endpoint не поддерживается. Укажите IPv4-адрес или имя сервера с IPv4 в формате host:port."
+        );
+    }
+    Ok(())
+}
+
+// Keep persisted legacy profiles readable without admitting new IPv6 endpoints.
+fn validate_saved_server(server: &ServerProfile) -> Result<()> {
     validate_server_name(&server.name)?;
     validate_emoji(&server.emoji)?;
     validate_endpoint(&server.endpoint)?;
@@ -108,13 +123,6 @@ fn validate_endpoint(endpoint: &str) -> Result<()> {
         .context("endpoint должен иметь формат host:port")?;
     if host.is_empty() || port.parse::<u16>().ok().filter(|port| *port > 0).is_none() {
         bail!("endpoint должен иметь формат host:port");
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_ssid(ssid: &str) -> Result<()> {
-    if ssid.is_empty() || ssid.len() > 32 || ssid.chars().any(char::is_control) {
-        bail!("название Wi-Fi должно содержать от 1 до 32 байт");
     }
     Ok(())
 }
@@ -271,7 +279,7 @@ pub(crate) fn normalize_routing(routing: &mut RoutingConfig) -> Result<()> {
 
 fn normalize_rule_name(name: &mut String) -> Result<()> {
     *name = name.trim().to_owned();
-    if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+    if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
         bail!("название правила должно содержать от 1 до 64 символов");
     }
     Ok(())
@@ -317,7 +325,7 @@ pub(crate) fn load(path: &Path) -> Result<ControllerConfig> {
         serde_json::from_str(&contents).with_context(|| format!("invalid {}", path.display()))?;
     for server in &mut config.servers {
         normalize_server_name(&mut server.name)?;
-        validate_server(server)?;
+        validate_saved_server(server)?;
     }
     normalize_routing(&mut config.routing)?;
     Ok(config)
@@ -374,6 +382,30 @@ mod tests {
             PersistentKeepalive = 10
         "#;
         let server = parse_server_profile("Primary".into(), profile).unwrap();
+        for endpoint in [
+            "[2606:4700:4700::1111]:8443",
+            "2606:4700:4700::1111:8443",
+            "[::ffff:1.1.1.1]:8443",
+            "[fe80::1%eth0]:8443",
+        ] {
+            assert!(
+                parse_server_profile(
+                    "Primary".into(),
+                    &profile.replace("vpn.example.com:8443", endpoint)
+                )
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("IPv4")
+            );
+        }
+        assert!(
+            parse_server_profile(
+                "Primary".into(),
+                &profile.replace("vpn.example.com:8443", "1.1.1.1:8443")
+            )
+            .is_ok()
+        );
         assert_eq!(
             server.client_tunnel_address.as_deref(),
             Some("10.202.0.5/32")
@@ -498,6 +530,54 @@ mod tests {
             IpMatch::Cidr { value } if value == "10.0.0.0/8"
         ));
         assert_eq!(normalize_tag("GEOLOCATION-!CN").unwrap(), "geolocation-!cn");
+    }
+
+    #[test]
+    fn routing_names_count_unicode_scalars_and_trim_before_validation() {
+        for character in ["a", "я", "\u{1f680}"] {
+            let mut name = format!(" \u{85}\u{a0}{}\u{2003}\n", character.repeat(64));
+            normalize_rule_name(&mut name).unwrap();
+            assert_eq!(name, character.repeat(64));
+            assert!(normalize_rule_name(&mut character.repeat(65)).is_err());
+        }
+        for input in [
+            "",
+            " \t\n\u{85}\u{a0}\u{2003}",
+            "a\0b",
+            "a\tb",
+            "a\nb",
+            "a\u{7f}b",
+            "a\u{85}b",
+            "a\u{9f}b",
+        ] {
+            assert!(
+                normalize_rule_name(&mut input.to_owned()).is_err(),
+                "{input:?}"
+            );
+        }
+        for (input, expected) in [
+            (" \tName\n", "Name"),
+            ("a\u{a0}b", "a\u{a0}b"),
+            ("\u{feff}Name\u{feff}", "\u{feff}Name\u{feff}"),
+        ] {
+            let mut name = input.to_owned();
+            normalize_rule_name(&mut name).unwrap();
+            assert_eq!(name, expected);
+        }
+    }
+
+    #[test]
+    fn loads_legacy_ipv6_profiles_without_rewriting_them() {
+        let path =
+            std::env::temp_dir().join(format!("gofro-config-ipv6-{}.json", std::process::id()));
+        let contents = r#"{"vpn_enabled":false,"active_server_key":null,"servers":[{"name":"Legacy","endpoint":"[2606:4700:4700::1111]:8443","public_key":"aq2K6tZ6JqYCpNPLseGJPHceMMxxEdkx5AeRm6cEfSE="}]}"#;
+        fs::write(&path, contents).unwrap();
+        let config = load(&path).unwrap();
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.servers[0].endpoint, "[2606:4700:4700::1111]:8443");
+        assert!(validate_server(&config.servers[0]).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -1,0 +1,286 @@
+#!/bin/sh
+# Commands used only by transaction.sh, with all state confined to its temporary tree.
+set -eu
+name=${0##*/}
+printf '%s:%s\n' "$name" "$*" >> "$FS/commands"
+if [ -e "$FS/stop-fail-after-activation" ] && [ "$(cat "$FS/stop-fail-after-activation")" = "$name:$*" ] &&
+	[ "$(readlink "$FS/usr/lib/gofro/current")" = "$FS/usr/lib/gofro/releases/0.5.16" ]; then
+	exit 1
+fi
+if [ "${KILL_MATCH:-}" = "$name:$*" ]; then
+	kill -KILL "$PPID"
+	exit 1
+fi
+if [ "${FAIL_MATCH:-}" = "$name:$*" ] && { [ "${FAIL_ALWAYS:-0}" = 1 ] || [ ! -e "$FS/failed" ]; }; then
+	: > "$FS/failed"
+	if [ -e "$FS/replacement-guard" ]; then cp "$FS/replacement-guard" "$FS/etc/gofro/guard-device"; fi
+	exit 1
+fi
+case "$name" in
+uci)
+	[ "${1:-}" != -q ] || shift
+	action=$1; shift
+	key=${1:-}; value=${key#*=}; key=${key%%=*}; file=$FS/uci/$key
+	case "$action" in
+	get) [ -f "$file" ] || exit 1; paste -sd ' ' "$file" ;;
+	set) printf '%s\n' "$value" > "$file"; printf option > "$file.type" ;;
+	add_list) printf '%s\n' "$value" >> "$file"; printf list > "$file.type" ;;
+	delete) [ -f "$file" ] || exit 1; rm -f "$file" "$file.type" ;;
+	del_list)
+		[ -f "$file" ] || exit 1
+		awk -v value="$value" '$0 != value' "$file" > "$file.new"
+		mv "$file.new" "$file"
+		[ -s "$file" ] || rm -f "$file" "$file.type"
+		;;
+	export)
+		[ "$key" = dhcp ] || exit 1
+		printf 'package dhcp\nconfig dnsmasq\n'
+		for option in server address noresolv localuse; do
+			file="$FS/uci/dhcp.@dnsmasq[0].$option"
+			[ -f "$file" ] || continue
+			while IFS= read -r value; do
+				printf "\t%s %s '%s'\n" "$(cat "$file.type")" "$option" "$value"
+			done < "$file"
+		done
+		;;
+	batch)
+		while IFS= read -r line; do
+			# The input is the fixture's own quoted UCI export, never router/user input.
+			eval "set -- $line"
+			"$0" "$@" || exit 1
+		done
+		;;
+	commit) : ;;
+	changes) [ ! -e "$FS/uci-changes" ] || cat "$FS/uci-changes" ;;
+	*) exit 2 ;;
+	esac
+	;;
+id) printf '0\n' ;;
+apk)
+	case " $* " in *' coreutils-stat '*) [ "$1" = add ]; : > "$FS/stat-installed" ;; esac
+	;;
+sync|sleep|logger) : ;;
+chown) case "$*" in "0:0 $FS/etc/gofro"|"0:0 $FS/etc/gofro/guard-device."*) : ;; *) exit 2 ;; esac ;;
+stat)
+	[ -e "$FS/stat-installed" ] || { : > "$FS/early-stat"; echo 'stat: not installed' >&2; exit 127; }
+	[ "$1:$2" = '-c:%u:%a' ]
+	permissions="$("$REAL_STAT" -c '%a' "$3" 2>/dev/null)" || permissions="$("$REAL_STAT" -f '%Lp' "$3")"
+	printf '0:%s\n' "$permissions" # Root UID is mocked; the file's actual mode is checked.
+	;;
+flock)
+	# macOS has flock(2), but no flock CLI; retain the actual descriptor-lock semantics.
+	[ "$*" = '-n 9' ]
+	exec perl -MFcntl=LOCK_EX,LOCK_NB -e 'open(my $lock, ">&=", 9) or die $!; flock($lock, LOCK_EX | LOCK_NB) or exit 1;'
+	;;
+nft)
+	case "$*" in
+	'list tables') [ ! -e "$FS/runtime-guard" ] || printf 'table inet gofro_guard\n' ;;
+	'-s list chain inet gofro_guard gofro_guard')
+		[ -e "$FS/runtime-guard" ] || exit 1
+		device=$(cat "$FS/guard-device")
+		[ ! -e "$FS/new-only-guard" ] || device=br-home
+		output_device=$device
+		[ ! -e "$FS/guard-output-device" ] || output_device=$(cat "$FS/guard-output-device")
+		printf 'table inet gofro_guard {\n chain gofro_guard {\n type filter hook forward priority filter; policy accept;\n iifname "%s" oifname != "%s" drop\n }\n}\n' "$device" "$output_device"
+		;;
+	'-c -f -'|'-f -')
+		script=$(cat)
+		device=$(printf '%s\n' "$script" | sed -n 's/^add rule inet gofro_guard gofro_guard iifname "\([^"]*\)".*/\1/p')
+		[ -n "$device" ] || exit 2
+		expected="add table inet gofro_guard
+flush table inet gofro_guard
+add chain inet gofro_guard gofro_guard { type filter hook forward priority filter; policy accept; }
+add rule inet gofro_guard gofro_guard iifname \"$device\" oifname != \"$device\" drop"
+		[ "$script" = "$expected" ] || exit 2
+		if [ "$*" = '-f -' ]; then
+			printf '%s\n' "$device" > "$FS/guard-device"
+			printf 'failed-runtime-reconcile\n' > "$FS/runtime-guard"
+			cp "$FS/runtime-guard" "$FS/expected-guard"
+		fi
+		;;
+	'delete table inet gofro_guard'|'destroy table inet gofro_guard') rm -f "$FS/runtime-guard" ;;
+	*) exit 2 ;;
+	esac
+	;;
+ip)
+	case "$*" in
+	'-4 -N rule show') sed 's/ lookup main$/ lookup 254/' "$FS/rules" ;;
+	'-4 -N -o route show table 100')
+		# Model iproute2 numeric protocol/scope/type output from the fixture's route state.
+		sed 's/ proto boot / proto 3 /g; s/ scope link/ scope 253/g; s/^unreachable /7 /' "$FS/routes"
+		;;
+	'rule add pref '*) printf '%s: from all fwmark %s lookup %s\n' "$4" "$6" "$8" >> "$FS/rules" ;;
+	'rule del pref 90 from '*) awk '$1 != "90:"' "$FS/rules" > "$FS/rules.new"; mv "$FS/rules.new" "$FS/rules" ;;
+	'route replace '*|'route del '*)
+		case "$*" in
+		'route replace unreachable default table 100 metric 32767 proto 186') prefix='unreachable default'; route='unreachable default proto 186 metric 32767' ;;
+		'route replace default dev gt0 table 100 metric 10 proto 186') prefix=default; route='default dev gt0 proto 186 scope link metric 10' ;;
+		'route replace '*) prefix=$3; route="$3 dev $5 proto 186 scope link" ;;
+		'route del '*) prefix=$3; route= ;;
+		esac
+		awk -v prefix="$prefix " 'index($0, prefix) != 1' "$FS/routes" > "$FS/routes.new"
+		[ -z "$route" ] || printf '%s\n' "$route" >> "$FS/routes.new"
+		mv "$FS/routes.new" "$FS/routes"
+		;;
+	*) exit 2 ;;
+	esac
+	;;
+df) printf 'Filesystem 1024-blocks Used Available Capacity Mounted\nfixture 999999 0 999999 0%% /\n' ;;
+mv)
+	if [ "$1" = -fT ]; then
+		shift
+		# BSD mv has no -T. This models the final link, not rename atomicity.
+		rm -f "$2"
+	fi
+	/bin/mv "$@"
+	if [ -e "$FS/kill-after-current" ] && [ "${2:-}" = "$FS/usr/lib/gofro/current" ]; then
+		kill -KILL "$PPID"
+		exit 1
+	fi
+	if [ "${FAIL_AFTER_MATCH:-}" = "$name:$*" ] && [ ! -e "$FS/failed" ]; then
+		: > "$FS/failed"
+		exit 1
+	fi
+	;;
+wg) case "$1" in genkey) printf 'private-key\n' ;; pubkey) printf 'public-key\n' ;; *) exit 2 ;; esac ;;
+openssl)
+	case "$1" in
+	rand) [ "$*" = 'rand -hex 16' ]; printf '0123456789abcdef0123456789abcdef\n' ;;
+	pkeyutl) : ;; # Signature verification is a stub boundary, not a cryptographic test.
+	*) exit 2 ;;
+	esac
+	;;
+sha256sum)
+	if [ "$*" = '-c -' ]; then cat >/dev/null
+	elif [ "${REAL_HASH##*/}" = shasum ]; then "$REAL_HASH" -a 256 "$@"
+	else "$REAL_HASH" "$@"; fi
+	;;
+tar) [ "$1" = -xzf ] && [ "$3" = -C ]; cp -R "$FS/bundle/." "$4/" ;;
+network)
+	device=br-old
+	[ ! -e "$FS/changed-device" ] || device=br-home
+	printf '{"device":"%s","subnet":"192.168.8.0/24","address":"192.168.8.1","zone":"lan"}\n' "$device"
+	;;
+mode) [ "$*" = 'check br-old 192.168.8.0/24' ] ;;
+jsonfilter)
+	manifest=0
+	json_file=
+	case "$*" in *routing-legacy.json*) json_file=$2 ;; esac
+	case "$*" in *gofro-router-manifest*.json*) manifest=1 ;; esac
+	while [ "$1" != -e ]; do shift; done
+	if [ -n "$json_file" ]; then
+		field=${2#@.}
+		sed -n "s/.*\"$field\":\"\([^\"]*\)\".*/\1/p" "$json_file"
+		exit
+	fi
+	if [ "$manifest" = 1 ]; then
+		case "$2" in
+		'@.schema') printf '1\n' ;;
+		'@.version') printf '0.5.16\n' ;;
+		'@.target') printf 'x86_64-openwrt-linux-musl\n' ;;
+		'@.archive') printf 'gofro-router-x86_64-openwrt-linux-musl.tar.gz\n' ;;
+		'@.sha256') printf '%064d\n' 0 ;;
+		*) exit 2 ;;
+		esac
+		exit
+	fi
+	case "$2" in
+	'@.address') printf '192.168.8.1\n' ;;
+	'@.device') if [ -e "$FS/changed-device" ]; then printf 'br-home\n'; else printf 'br-old\n'; fi ;;
+	'@.subnet') printf '192.168.8.0/24\n' ;;
+	'@.zone') printf 'lan\n' ;;
+	'@.version') basename "$(readlink "$FS/usr/lib/gofro/current")" ;;
+	'@.dns_active'|'@.dataplane_active') printf 'true\n' ;;
+	'@.degraded')
+		[ "$(basename "$(readlink "$FS/usr/lib/gofro/current")")" != 0.5.15 ] || exit 1
+		printf '%s\n' "${DEGRADED:-false}"
+		;;
+	'@.vpn_enabled') printf 'false\n' ;;
+	*) exit 2 ;;
+	esac
+	;;
+uclient-fetch)
+	case "$*" in *https://fixture.invalid/*)
+		while [ "$1" != -O ]; do shift; done
+		: > "$2"
+		exit
+		;;
+	esac
+	current=$(basename "$(readlink "$FS/usr/lib/gofro/current")")
+	if [ "$current" = 0.5.16 ]; then [ -L "$FS/etc/rc.d/S18gofro-guard" ] || exit 1; fi
+	[ "${BAD_HEALTH:-}" != "$current" ]
+	[ "${DEGRADED:-false}" = false ] # The real health endpoint returns HTTP 503 otherwise.
+	;;
+gofro-agent|gofro-relay)
+	if [ "${1:-}" = --version ]; then
+		case "$0" in */releases/0.5.15/*) printf '%s 0.5.15\n' "$name" ;; *) printf '%s 0.5.16\n' "$name" ;; esac
+		exit
+	fi
+	case " $* " in *' --init-security '*)
+		[ "$*" = '--https-listen 192.168.8.1:8443 --init-security' ]
+		if [ ! -s "$FS/etc/gofro/guard-device" ] || [ ! -e "$FS/runtime-guard" ] || [ ! -L "$FS/etc/rc.d/S18gofro-guard" ]; then
+			: > "$FS/early-tls"
+			exit 1
+		fi
+		if [ -e "$FS/real-mode" ]; then
+			cp "$FS/routes" "$FS/at-tls-routes"
+			cp "$FS/rules" "$FS/at-tls-rules"
+		fi
+		printf 'new-cert\n' > "$FS/etc/gofro/tls-cert.pem"
+		printf 'new-key\n' > "$FS/etc/gofro/tls-key.pem"
+		;;
+	*)
+		current=$(basename "$(readlink "$FS/usr/lib/gofro/current")")
+		printf '%s:%s:%s\n' "$name" "${1:-}" "$current" >> "$FS/services"
+		case "$name:${1:-}:$current" in gofro-agent:start:0.5.15|gofro-agent:restart:0.5.15)
+			rm -rf "$FS/at-old-start"
+			cp -R "$FS/uci" "$FS/at-old-start"
+			cp "$FS/etc/gofro/tls-cert.pem" "$FS/at-old-cert"
+			cp "$FS/etc/gofro/tls-key.pem" "$FS/at-old-key"
+			if [ -e "$FS/etc/gofro/routing-legacy.json" ]; then cp "$FS/etc/gofro/routing-legacy.json" "$FS/at-old-history"; fi
+			if [ -e "$FS/runtime-guard" ]; then cp "$FS/runtime-guard" "$FS/at-old-guard"; fi
+			if [ -e "$FS/etc/gofro/guard-device" ]; then cp "$FS/etc/gofro/guard-device" "$FS/at-old-boot-device"; fi
+			;;
+		gofro-agent:stop:0.5.16)
+			rm -f "$FS/agent-running"
+			"$FS/usr/libexec/gofro/guard" stop
+			;;
+		gofro-agent:start:0.5.16|gofro-agent:restart:0.5.16)
+			# This is the agent/full-reconcile boundary; production shell never retires history.
+			if [ -e "$FS/etc/gofro/routing-legacy.json" ]; then
+				cp -p "$FS/etc/gofro/routing-legacy.json" "$FS/at-new-history"
+			fi
+			"$FS/usr/libexec/gofro/guard" prepare >/dev/null
+			current_device=br-old
+			[ ! -e "$FS/changed-device" ] || current_device=br-home
+			"$FS/usr/libexec/gofro/mode" check "$current_device" 192.168.8.0/24
+			# An unchanged procd start runs pre-init, but does not spawn/reconcile again.
+			if [ "$1" = start ] && [ -e "$FS/agent-running" ]; then
+				printf 'agent:start-noop\n' >> "$FS/commands"
+				exit 0
+			fi
+			generation=0
+			[ ! -e "$FS/agent-generation" ] || generation=$(cat "$FS/agent-generation")
+			printf '%s\n' "$((generation + 1))" > "$FS/agent-generation"
+			: > "$FS/agent-running"
+			if [ -e "$FS/real-mode" ]; then
+				# Execute the actual pre-init helper and mode, not replacements for their validation.
+				if ! "$FS/usr/libexec/gofro/mode" vpn "$current_device" 192.168.8.0/24; then
+					cp "$FS/runtime-guard" "$FS/expected-guard"
+					exit 1
+				fi
+				rm -f "$FS/etc/gofro/routing-legacy.json"
+				rm -f "$FS/runtime-guard" "$FS/expected-guard"
+				printf 'agent:full-reconcile-complete\n' >> "$FS/commands"
+			elif [ "${BAD_HEALTH:-}" != 0.5.16 ] && [ "${DEGRADED:-false}" = false ]; then
+				rm -f "$FS/etc/gofro/routing-legacy.json"
+				rm -f "$FS/runtime-guard" "$FS/expected-guard"
+			fi
+			;;
+		esac
+		;;
+	esac
+	;;
+gofro-*|firewall|dnsmasq) : ;;
+*) printf 'unexpected command: %s\n' "$name" >&2; exit 2 ;;
+esac

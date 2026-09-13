@@ -1,10 +1,19 @@
+use std::net::Ipv4Addr;
+
+use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 use wireguard_status::PeerStatus;
 
-use crate::stats::{DeviceStatus, HistoryPoint, LiveStats};
+use crate::stats::{HistoryPoint, LiveStats};
 
-pub(crate) const AP_ADDRESS: &str = "10.203.1.1";
 pub(crate) const AP_DOMAIN: &str = "wifi.gofro.net";
+
+#[derive(Clone)]
+pub(crate) struct LanContext {
+    pub(crate) device: String,
+    pub(crate) address: Ipv4Addr,
+    pub(crate) subnet: Ipv4Net,
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct ControllerConfig {
@@ -35,6 +44,34 @@ pub(crate) struct ManagedServer {
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) host_key: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BootstrapStage {
+    Waiting,
+    HostKey,
+    Connect,
+    Inspect,
+    Install,
+    Authorize,
+    Profile,
+    Save,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum BootstrapEvent {
+    Stage {
+        stage: BootstrapStage,
+    },
+    Complete {
+        status: Box<AgentStatus>,
+    },
+    Error {
+        stage: BootstrapStage,
+        message: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -85,30 +122,6 @@ pub(crate) struct ServerUpdate {
 pub(crate) struct ProfileInput {
     pub(crate) name: String,
     pub(crate) profile: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) enum WifiBand {
-    #[serde(rename = "2g")]
-    TwoGhz,
-    #[serde(rename = "5g")]
-    FiveGhz,
-}
-
-impl WifiBand {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::TwoGhz => "2g",
-            Self::FiveGhz => "5g",
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ApInput {
-    pub(crate) band: Option<WifiBand>,
-    pub(crate) ssid: String,
-    pub(crate) password: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -242,20 +255,10 @@ pub(crate) struct AgentStatus {
     pub(crate) interface: String,
     pub(crate) active_server_key: Option<String>,
     pub(crate) servers: Vec<ServerStatus>,
-    pub(crate) ap: ApStatus,
     pub(crate) peer: Option<PeerStatus>,
     pub(crate) stats: LiveStats,
     pub(crate) history: Vec<HistoryPoint>,
-    pub(crate) devices: Vec<DeviceStatus>,
     pub(crate) routing: RoutingStatus,
-    pub(crate) router_info: RouterInfo,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct RouterInfo {
-    pub(crate) model: Option<String>,
-    pub(crate) os_name: Option<String>,
-    pub(crate) os_version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -272,31 +275,9 @@ pub(crate) enum UpdateResult {
     Failed,
 }
 
-#[derive(Debug, Serialize)]
-pub(crate) struct ApStatus {
-    // Browsers loaded before an in-place update still expect this field.
-    pub(crate) ssid: String,
-    pub(crate) networks: Vec<ApNetwork>,
-    pub(crate) address: &'static str,
-    pub(crate) domain: &'static str,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct ApNetwork {
-    pub(crate) band: WifiBand,
-    pub(crate) ssid: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn accepts_legacy_ap_input_without_band() {
-        let input: ApInput =
-            serde_json::from_str(r#"{"ssid":"Legacy","password":"secret123"}"#).unwrap();
-        assert_eq!(input.band, None);
-    }
 
     #[test]
     fn legacy_profiles_are_imported_and_status_omits_secrets() {

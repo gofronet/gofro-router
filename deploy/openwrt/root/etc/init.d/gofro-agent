@@ -5,38 +5,179 @@ START=99
 STOP=10
 USE_PROCD=1
 
+gofro_fail() {
+	echo "gofro service: $*" >&2
+	# rc.common ignores hook failures and would otherwise continue kill/start.
+	exit 1
+}
+
+gofro_apply_lock() {
+	local state ancestor
+	state=${GOFRO_GUARD_DIR:-/etc/gofro}
+	case "$state" in /*) ;; *) gofro_fail 'state directory must be absolute' ;; esac
+	[ "$(id -u)" = 0 ] || gofro_fail 'root required'
+	[ ! -L "$state" ] || gofro_fail 'unsafe state directory'
+	if [ ! -e "$state" ]; then
+		(umask 077; mkdir -p "$state") || gofro_fail 'cannot create state directory'
+	fi
+	if [ ! -d "$state" ] || [ "$(stat -c '%u:%a' "$state")" != 0:700 ]; then gofro_fail 'unsafe state directory'; fi
+	ancestor=$state
+	while :; do
+		if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then gofro_fail 'unsafe apply lock ancestor'; fi
+		case "$(stat -c '%u:%a' "$ancestor")" in
+			0:*[2367][0-7]|0:*[2367]) gofro_fail 'writable apply lock ancestor' ;;
+			0:*) ;; *) gofro_fail 'non-root apply lock ancestor' ;;
+		esac
+		[ "$ancestor" != / ] || break
+		ancestor="$(dirname "$ancestor")"
+	done
+	if [ ! -e "$state/apply.lock" ] && [ ! -L "$state/apply.lock" ]; then
+		# Never replace/unlink the inode also locked by the Rust controller.
+		(umask 077; set -C; : > "$state/apply.lock") || gofro_fail 'cannot create apply lock'
+	fi
+	if [ -L "$state/apply.lock" ] || [ ! -f "$state/apply.lock" ] ||
+		[ "$(stat -c '%u:%a:%h' "$state/apply.lock")" != 0:600:1 ]; then gofro_fail 'unsafe apply lock'; fi
+	exec 8>>"$state/apply.lock" || gofro_fail 'cannot open apply lock'
+	# Order: procd lifecycle lock -> apply (8) -> helper's mode lock (9).
+	flock 8 || gofro_fail 'cannot acquire apply lock'
+}
+
 start_service() {
-	local interface lan_interface wifi_interface dns_upstream
+	local interface snapshot lan_interface lan_subnet lan_address helpers
 
-	config_load gofro
+	# Isolate procd's JSON query; return would submit an empty instance set.
+	# Only explicit start is a no-op: restart/reload must launch after stop.
+	if [ "${action:-}" = start ] && (service_running); then exit 0; fi
+
+	gofro_apply_lock
+	helpers=${GOFRO_HELPERS:-/usr/libexec/gofro}
+	snapshot="$("$helpers/guard" prepare)" || gofro_fail 'guard preparation failed'
+	lan_interface="$(printf '%s' "$snapshot" | jsonfilter -e '@.device')"
+	lan_subnet="$(printf '%s' "$snapshot" | jsonfilter -e '@.subnet')"
+	lan_address="$(printf '%s' "$snapshot" | jsonfilter -e '@.address')"
+	"$helpers/mode" check "$lan_interface" "$lan_subnet" || gofro_fail 'mode check failed'
+	config_load gofro || gofro_fail 'configuration failed'
 	config_get interface main interface 'gt0'
-	config_get lan_interface main lan_interface 'br-lan'
-	config_get wifi_interface main wifi_interface
-	config_get dns_upstream main dns_upstream '1.1.1.1:53'
-	[ -n "$wifi_interface" ] || wifi_interface="$(iw dev 2>/dev/null | awk '$1 == "Interface" { print $2; exit }')"
-	[ -n "$wifi_interface" ] || wifi_interface='phy0-ap0'
+	[ "$interface" = gt0 ] || gofro_fail 'unsupported tunnel interface'
 
-	mkdir -p /tmp/gofro
+	mkdir -p /tmp/gofro || gofro_fail 'cannot create runtime directory'
 	procd_open_instance
 	procd_set_param command /usr/bin/gofro-agent
 	procd_append_param command --listen 127.0.0.1:8080
-	procd_append_param command --http-listen 10.203.1.1:80
-	procd_append_param command --https-listen 10.203.1.1:443
+	procd_append_param command --http-listen "$lan_address:8081"
+	procd_append_param command --https-listen "$lan_address:8443"
 	procd_append_param command --interface "$interface"
 	procd_append_param command --lan-interface "$lan_interface"
-	procd_append_param command --wifi-interface "$wifi_interface"
+	procd_append_param command --lan-subnet "$lan_subnet"
 	procd_append_param command --mode-command /usr/libexec/gofro/mode
 	procd_append_param command --geosite /usr/share/gofro/geosite.dat
 	procd_append_param command --geoip /usr/share/gofro/geoip.dat
-	procd_append_param command --dns-upstream "$dns_upstream"
+	procd_append_param command --dns-listen "$lan_address:5353"
+	procd_append_param command --dns-upstream "$lan_address:53"
 	procd_append_param command --routing-state /tmp/gofro/routing.sqlite
 	procd_set_param env RUST_LOG=gofro_agent=info
 	procd_set_param respawn
+	procd_set_param term_timeout 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
-	procd_close_instance
+	procd_close_instance || gofro_fail 'cannot define instance'
+	# Instance JSON only: release before rc.common submits it and the new
+	# controller immediately try-locks. Old PIDs are gone; the guard stays armed.
+	exec 8>&-
 }
 
 service_triggers() {
-	procd_add_reload_trigger gofro network wireless
+	procd_add_reload_trigger gofro network
+}
+
+reload_service() {
+	restart
+}
+
+gofro_capture_instances() {
+	local status values pids pid timeout running count kind
+	status="$(ubus call service list '{"name":"gofro-agent"}')" || gofro_fail 'cannot inspect procd instances'
+	[ "$(printf '%s' "$status" | jsonfilter -t '@')" = object ] || gofro_fail 'invalid procd response'
+	# jsonfilter returns 1 for no matches (stopped/not yet registered).
+	pids="$(printf '%s' "$status" | jsonfilter -e '@["gofro-agent"].instances[*].pid')" ||
+		[ "$?" = 1 ] || gofro_fail 'cannot read instance PIDs'
+	case "$pids" in *[!0-9[:space:]]*) gofro_fail 'invalid instance PID' ;; esac
+	count=0
+	for pid in $pids; do
+		case "$pid" in 0*|1|???????????*) gofro_fail 'invalid instance PID' ;; esac
+		[ "$pid" -le 2147483647 ] || gofro_fail 'invalid instance PID'
+		count=$((count + 1))
+	done
+	values="$(printf '%s' "$status" | jsonfilter -e '@["gofro-agent"].instances[*].running')" ||
+		[ "$?" = 1 ] || gofro_fail 'cannot read instance state'
+	for running in $values; do
+		case "$running" in true) count=$((count - 1)) ;; false) ;; *) gofro_fail 'invalid instance state' ;; esac
+	done
+	[ "$count" = 0 ] || gofro_fail 'running instance has no valid PID'
+	gofro_stop_pids="$gofro_stop_pids $pids"
+	values="$(printf '%s' "$status" | jsonfilter -e '@["gofro-agent"].instances[*].term_timeout')" ||
+		[ "$?" = 1 ] || gofro_fail 'cannot read termination timeout'
+	case "$values" in *[!0-9[:space:]]*) gofro_fail 'invalid termination timeout' ;; esac
+	for timeout in $values; do
+		case "$timeout" in 0[0-9]*) gofro_fail 'invalid termination timeout' ;; esac
+		if [ "${#timeout}" -gt 3 ] || [ "$timeout" -gt 300 ]; then gofro_fail 'invalid termination timeout'; fi
+		[ "$timeout" -le "$gofro_stop_wait" ] || gofro_stop_wait=$timeout
+	done
+	# No PIDs alone is not proof: a registered instance may be awaiting respawn.
+	gofro_stop_empty=
+	kind="$(printf '%s' "$status" | jsonfilter -t '@["gofro-agent"]')" ||
+		[ "$?" = 1 ] || gofro_fail 'cannot inspect procd service'
+	case "$kind" in
+		'') gofro_stop_empty=1 ;;
+		object)
+			[ "$(printf '%s' "$status" | jsonfilter -t '@["gofro-agent"].instances')" = object ] ||
+				gofro_fail 'invalid procd instance map'
+			values="$(printf '%s' "$status" | jsonfilter -e '@["gofro-agent"].instances[*]')" ||
+				[ "$?" = 1 ] || gofro_fail 'cannot inspect procd instance map'
+			[ -n "$values" ] || gofro_stop_empty=1 ;;
+		*) gofro_fail 'invalid procd service' ;;
+	esac
+}
+
+stop_service() {
+	local identity
+	gofro_apply_lock
+	gofro_stop_pids=
+	gofro_stop_wait=5
+	gofro_stop_no_guard=
+	gofro_capture_instances
+	identity=${GOFRO_GUARD_DIR:-/etc/gofro}/guard-device
+	if [ "$gofro_stop_empty" = 1 ] && [ ! -e "$identity" ] && [ ! -L "$identity" ]; then
+		# A first-upgrade crash may publish current before ever preparing a guard.
+		gofro_stop_no_guard=1
+	else
+		"${GOFRO_HELPERS:-/usr/libexec/gofro}/guard" stop || gofro_fail 'stop guard failed; not killing agent'
+	fi
+	# FD 8 survives this return and rc.common's asynchronous procd_kill.
+}
+
+service_stopped() {
+	local pid alive remaining identity
+	# Also capture a crash/respawn replacement between the first query and
+	# procd_kill. Procd retains terminating instances until their exit callback.
+	gofro_capture_instances
+	[ "$gofro_stop_no_guard" != 1 ] || [ "$gofro_stop_empty" = 1 ] ||
+		gofro_fail 'procd instances appeared without guard identity; stop aborted'
+	remaining=$((${gofro_stop_wait:?} + 5))
+	while :; do
+		alive=
+		for pid in $gofro_stop_pids; do
+			# Signal 0 only observes; procd alone sends TERM/KILL to its instances.
+			if kill -0 "$pid" 2>/dev/null; then alive=1; fi
+		done
+		[ -n "$alive" ] || break
+		[ "$remaining" -gt 0 ] || gofro_fail 'old agent did not exit; guard retained, restart aborted'
+		sleep 1 || gofro_fail 'process-exit wait failed'
+		remaining=$((remaining - 1))
+	done
+	identity=${GOFRO_GUARD_DIR:-/etc/gofro}/guard-device
+	if [ "$gofro_stop_no_guard" != 1 ] || [ -e "$identity" ] || [ -L "$identity" ]; then
+		"${GOFRO_HELPERS:-/usr/libexec/gofro}/guard" boot || gofro_fail 'post-stop guard failed'
+	fi
+	exec 8>&-
 }

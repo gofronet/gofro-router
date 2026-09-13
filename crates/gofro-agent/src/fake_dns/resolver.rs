@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     fs,
     io::{Read, Write},
-    net::{SocketAddr, TcpStream, UdpSocket},
+    net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket},
     path::Path,
     sync::{
         Mutex, RwLock,
@@ -21,8 +21,8 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::{
     config::normalize_domain,
     dataplane::{self, FakeMapping},
-    model::RouteTarget,
-    routing::RoutingPolicy,
+    model::{LanContext, RouteTarget},
+    routing::{RoutingPolicy, is_lan_destination},
 };
 
 use super::store::Store;
@@ -34,6 +34,7 @@ pub(crate) struct FakeDns {
     store: Mutex<Store>,
     pub(super) updates: RwLock<()>,
     pub(super) active: AtomicBool,
+    vpn_enabled: AtomicBool,
 }
 
 impl FakeDns {
@@ -46,6 +47,7 @@ impl FakeDns {
             store: Mutex::new(Store::open(path)?),
             updates: RwLock::new(()),
             active: AtomicBool::new(false),
+            vpn_enabled: AtomicBool::new(false),
         })
     }
 
@@ -70,6 +72,10 @@ impl FakeDns {
 
     pub(crate) fn is_active(&self) -> bool {
         self.active.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_vpn_enabled(&self, enabled: bool) {
+        self.vpn_enabled.store(enabled, Ordering::Relaxed);
     }
 
     pub(crate) fn begin_update(&self) -> Result<std::sync::RwLockWriteGuard<'_, ()>> {
@@ -108,24 +114,15 @@ impl FakeDns {
         packet: &[u8],
         policy: &RoutingPolicy,
         upstream: SocketAddr,
+        lan: &LanContext,
     ) -> Result<Vec<u8>> {
         let request = Message::from_vec(packet).context("invalid DNS request")?;
         let query = request.query().context("DNS request has no question")?;
         let domain = query_domain(&query.name().to_utf8());
-        let query_type = query.query_type();
-        if matches!(
-            query_type,
-            RecordType::AAAA | RecordType::HTTPS | RecordType::SVCB
-        ) {
-            return empty_response(&request, ResponseCode::NoError);
+        if domain == "wifi.gofro.net" {
+            return panel_response(&request, lan.address);
         }
-
-        let domain_target = policy.domain_target(&domain).map(|(target, _)| target);
-        let resolver_target = match policy.resolver_target(&domain) {
-            RouteTarget::Block => RouteTarget::Vpn,
-            target => target,
-        };
-        let response = query_upstream(packet, resolver_target, upstream)?;
+        let response = query_upstream(packet, upstream)?;
         let mut message = Message::from_vec(&response).context("invalid upstream DNS response")?;
         if message.message_type() != MessageType::Response
             || message.id() != request.id()
@@ -133,30 +130,40 @@ impl FakeDns {
         {
             bail!("upstream DNS response does not match the request");
         }
+        self.rewrite_response(&mut message, &domain, policy, lan)?;
+        message.to_vec().context("failed to encode DNS response")
+    }
+
+    fn rewrite_response(
+        &self,
+        message: &mut Message,
+        domain: &str,
+        policy: &RoutingPolicy,
+        lan: &LanContext,
+    ) -> Result<()> {
+        let vpn_enabled = self.vpn_enabled.load(Ordering::Relaxed);
+        let domain_target = policy.domain_target(domain).map(|(target, _)| target);
         let rewritten = domain_target
             .is_some()
-            .then(|| self.rewrite_records(&mut message, &domain, policy))
+            .then(|| self.rewrite_records(message, domain, policy, lan))
             .transpose()?
             .unwrap_or(false);
-        message.answers_mut().retain(|record| {
-            !matches!(
-                record.record_type(),
-                RecordType::AAAA | RecordType::HTTPS | RecordType::SVCB
-            ) && (!rewritten || !record.record_type().is_dnssec())
-        });
-        message.additionals_mut().retain(|record| {
-            !matches!(
-                record.record_type(),
-                RecordType::AAAA | RecordType::HTTPS | RecordType::SVCB
-            ) && (!rewritten || !record.record_type().is_dnssec())
-        });
-        if rewritten {
+        let filtered = (vpn_enabled || domain_target == Some(RouteTarget::Block))
+            && (retain_ipv4_records(message.answers_mut())
+                | retain_ipv4_records(message.additionals_mut()));
+        if rewritten || filtered {
+            message
+                .answers_mut()
+                .retain(|record| !record.record_type().is_dnssec());
+            message
+                .additionals_mut()
+                .retain(|record| !record.record_type().is_dnssec());
             message
                 .name_servers_mut()
                 .retain(|record| !record.record_type().is_dnssec());
             message.set_authentic_data(false);
         }
-        message.to_vec().context("failed to encode DNS response")
+        Ok(())
     }
 
     fn rewrite_records(
@@ -164,6 +171,7 @@ impl FakeDns {
         message: &mut Message,
         domain: &str,
         policy: &RoutingPolicy,
+        lan: &LanContext,
     ) -> Result<bool> {
         let mut store = self
             .store
@@ -179,6 +187,7 @@ impl FakeDns {
                 &names,
                 &mut store,
                 &mut added,
+                lan,
             )?;
             rewritten |= rewrite_records(
                 message.additionals_mut(),
@@ -187,6 +196,7 @@ impl FakeDns {
                 &names,
                 &mut store,
                 &mut added,
+                lan,
             )?;
             dataplane::install_mappings(&added)?;
             Ok(rewritten)
@@ -211,6 +221,7 @@ fn rewrite_records(
     names: &HashSet<String>,
     store: &mut Store,
     added: &mut Vec<FakeMapping>,
+    lan: &LanContext,
 ) -> Result<bool> {
     let mut rewritten = false;
     for record in records {
@@ -218,6 +229,10 @@ fn rewrite_records(
             && let RData::A(address) = record.data()
         {
             let real = address.0;
+            // Fake DNAT to an on-link host gives replies an asymmetric return path.
+            if is_lan_destination(real) || real == lan.address || lan.subnet.contains(&real) {
+                continue;
+            }
             let ttl = record.ttl().clamp(30, 3600);
             let (mapping, new) = store.allocate(domain, real, policy.target(domain, real), ttl)?;
             if new {
@@ -247,8 +262,8 @@ fn relevant_names(records: &[Record], domain: &str) -> HashSet<String> {
     names
 }
 
-fn query_upstream(packet: &[u8], target: RouteTarget, upstream: SocketAddr) -> Result<Vec<u8>> {
-    let mark = dataplane::target_mark(target);
+fn query_upstream(packet: &[u8], upstream: SocketAddr) -> Result<Vec<u8>> {
+    let mark = dataplane::target_mark(RouteTarget::Direct);
     let socket = marked_socket(Type::DGRAM, Protocol::UDP, mark)?;
     socket.set_read_timeout(Some(DNS_TIMEOUT))?;
     socket.set_write_timeout(Some(DNS_TIMEOUT))?;
@@ -262,6 +277,47 @@ fn query_upstream(packet: &[u8], target: RouteTarget, upstream: SocketAddr) -> R
         return query_upstream_tcp(packet, mark, upstream);
     }
     Ok(response)
+}
+
+fn retain_ipv4_records(records: &mut Vec<Record>) -> bool {
+    let before = records.len();
+    records.retain(|record| match record.data() {
+        RData::AAAA(address) => {
+            let ip = address.0;
+            ip.is_loopback()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.is_multicast()
+        }
+        RData::HTTPS(_) | RData::SVCB(_) => false,
+        _ => true,
+    });
+    records.len() != before
+}
+
+fn panel_response(request: &Message, address: Ipv4Addr) -> Result<Vec<u8>> {
+    let mut response = Message::new();
+    response
+        .set_id(request.id())
+        .set_message_type(MessageType::Response)
+        .set_op_code(request.op_code())
+        .set_recursion_desired(request.recursion_desired())
+        .set_recursion_available(true)
+        .set_response_code(ResponseCode::NoError)
+        .add_queries(request.queries().iter().cloned());
+    if let Some(query) = request
+        .query()
+        .filter(|query| query.query_type() == RecordType::A)
+    {
+        response.add_answer(Record::from_rdata(
+            query.name().clone(),
+            30,
+            RData::A(A(address)),
+        ));
+    }
+    response
+        .to_vec()
+        .context("failed to encode panel DNS response")
 }
 
 fn query_upstream_tcp(packet: &[u8], mark: u32, upstream: SocketAddr) -> Result<Vec<u8>> {
@@ -318,143 +374,4 @@ fn query_domain(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-
-    use hickory_proto::rr::Name;
-
-    use crate::{
-        fake_dns::store::Store,
-        geodata::GeoData,
-        model::{DomainMatch, DomainRule, IpMatch, IpRule, RoutingConfig, RoutingMode},
-    };
-
-    #[test]
-    fn overload_returns_servfail() {
-        let mut request = Message::new();
-        request.set_id(42).set_recursion_desired(true);
-
-        let response = Message::from_vec(&failure_response(&request.to_vec().unwrap())).unwrap();
-
-        assert_eq!(response.id(), 42);
-        assert_eq!(response.response_code(), ResponseCode::ServFail);
-    }
-
-    #[test]
-    fn accepts_dns_service_labels() {
-        assert_eq!(
-            query_domain("_Minecraft._TCP.Example.com."),
-            "_minecraft._tcp.example.com"
-        );
-    }
-
-    #[test]
-    fn rewrites_mixed_answers_with_independent_targets() {
-        let policy = RoutingPolicy::compile(
-            RoutingConfig {
-                domain_rules: vec![DomainRule {
-                    name: "Context".into(),
-                    enabled: true,
-                    matcher: DomainMatch::Exact {
-                        value: "example.com".into(),
-                    },
-                    target: RouteTarget::Vpn,
-                }],
-                ip_rules: vec![IpRule {
-                    name: "Direct IP".into(),
-                    enabled: true,
-                    matcher: IpMatch::Cidr {
-                        value: "1.1.1.0/24".into(),
-                    },
-                    target: RouteTarget::Direct,
-                }],
-                default_target: RouteTarget::Vpn,
-                mode: RoutingMode::Rules,
-                rule_order: Some(vec![
-                    crate::model::RuleRef::Ip { index: 0 },
-                    crate::model::RuleRef::Domain { index: 0 },
-                ]),
-            },
-            Arc::new(GeoData::default()),
-        )
-        .unwrap();
-        let name = Name::from_ascii("example.com.").unwrap();
-        let mut records = vec![
-            Record::from_rdata(name.clone(), 60, RData::A(A("1.1.1.1".parse().unwrap()))),
-            Record::from_rdata(name, 60, RData::A(A("8.8.8.8".parse().unwrap()))),
-        ];
-        let mut store =
-            Store::from_connection(rusqlite::Connection::open_in_memory().unwrap()).unwrap();
-        let mut added = vec![];
-        let names = relevant_names(&records, "example.com");
-        rewrite_records(
-            &mut records,
-            "example.com",
-            &policy,
-            &names,
-            &mut store,
-            &mut added,
-        )
-        .unwrap();
-        assert_eq!(
-            added
-                .iter()
-                .map(|mapping| mapping.target)
-                .collect::<Vec<_>>(),
-            vec![RouteTarget::Direct, RouteTarget::Vpn]
-        );
-    }
-
-    #[test]
-    fn block_domains_keep_lan_answers_direct_with_legacy_and_explicit_order() {
-        let mut config = RoutingConfig {
-            domain_rules: vec![DomainRule {
-                name: "Block domain".into(),
-                enabled: true,
-                matcher: DomainMatch::Exact {
-                    value: "example.com".into(),
-                },
-                target: RouteTarget::Block,
-            }],
-            ip_rules: vec![],
-            default_target: RouteTarget::Vpn,
-            mode: RoutingMode::Rules,
-            rule_order: None,
-        };
-        for order in [None, Some(vec![crate::model::RuleRef::Domain { index: 0 }])] {
-            config.rule_order = order;
-            let policy =
-                RoutingPolicy::compile(config.clone(), Arc::new(GeoData::default())).unwrap();
-            let name = Name::from_ascii("example.com.").unwrap();
-            let mut records = vec![
-                Record::from_rdata(
-                    name.clone(),
-                    60,
-                    RData::A(A("192.168.1.1".parse().unwrap())),
-                ),
-                Record::from_rdata(name, 60, RData::A(A("8.8.8.8".parse().unwrap()))),
-            ];
-            let mut store =
-                Store::from_connection(rusqlite::Connection::open_in_memory().unwrap()).unwrap();
-            let mut added = vec![];
-            let names = relevant_names(&records, "example.com");
-            rewrite_records(
-                &mut records,
-                "example.com",
-                &policy,
-                &names,
-                &mut store,
-                &mut added,
-            )
-            .unwrap();
-            assert_eq!(
-                added
-                    .iter()
-                    .map(|mapping| mapping.target)
-                    .collect::<Vec<_>>(),
-                vec![RouteTarget::Direct, RouteTarget::Block]
-            );
-        }
-    }
-}
+mod tests;

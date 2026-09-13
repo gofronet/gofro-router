@@ -1,0 +1,104 @@
+#!/bin/sh
+set -eu
+
+state_dir=${STATE_DIR:-/etc/gofro}
+
+save_option() {
+	if value="$(uci -q get "$1" 2>/dev/null)"; then
+		printf '%s' 1 > "$2.present"; printf '%s\n' "$value" > "$2"
+	else
+		printf '%s' 0 > "$2.present"
+	fi
+}
+
+restore_option() {
+	present="$(cat "$2.present")" || return 1
+	case "$present" in
+		1) value="$(cat "$2")" || return 1; uci set "$1=$value" ;;
+		0) if uci -q get "$1" >/dev/null; then uci -q delete "$1"; fi ;;
+		*) return 1 ;;
+	esac
+}
+
+snapshot() {
+	[ "${GOFRO_INTERFACE:-gt0}" = gt0 ] || return 1
+	dir=$1; tmp=$1.new.$$
+	[ ! -e "$dir" ] || return 1
+	rm -rf "$tmp"; umask 077; mkdir -p "$tmp" || return 1
+	cp "$0" "$tmp/restore"; chmod 700 "$tmp/restore"
+	printf '%s\n' "${GOFRO_INTERFACE:-gt0}" > "$tmp/interface"
+	printf '%s\n' "${GOFRO_LEGACY_DNS:-0}" > "$tmp/legacy-dns"
+	save_option "network.${GOFRO_INTERFACE:-gt0}.mtu" "$tmp/network-mtu"
+	save_option firewall.gofro_vpn.mtu_fix "$tmp/firewall-mtu-fix"
+	save_option firewall.gofro_vpn.masq "$tmp/firewall-masq"
+	if [ "${GOFRO_LEGACY_DNS:-0}" = 1 ]; then
+		uci export dhcp > "$tmp/dhcp" || return 1
+		# Keep the original list order, quoting and option/list types, not the whole package.
+		awk '
+			$1 == "config" { active = ($2 == "dnsmasq" && !seen); if ($2 == "dnsmasq") seen = 1 }
+			active && ($1 == "option" || $1 == "list") && $2 ~ /^(server|address|noresolv|localuse)$/ {
+				kind = $1 == "list" ? "add_list" : "set"; key = $2
+				sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+/, "")
+				print kind " dhcp.@dnsmasq[0]." key "=" $0
+			}' "$tmp/dhcp" > "$tmp/dns-restore"
+		rm "$tmp/dhcp"
+	fi
+	for file in tls-cert.pem tls-key.pem routing-legacy.json guard-device; do
+		if [ -e "$state_dir/$file" ]; then cp -p "$state_dir/$file" "$tmp/$file"; else : > "$tmp/$file.absent"; fi
+	done
+	if [ -n "${GOFRO_LEGACY_DEVICE:-}" ]; then
+		printf '{"version":"0.5.15","device":"%s","subnet":"%s"}\n' "$GOFRO_LEGACY_DEVICE" "$GOFRO_LEGACY_SUBNET" > "$tmp/routing-attestation"
+	fi
+	mv -f "$tmp" "$dir" && chmod 700 "$dir" && sync
+}
+
+restore() {
+	# The snapshot covers installer deltas only, never the agent's runtime guard/state.
+	dir=$1; [ -d "$dir" ] || return 1; interface="$(cat "$dir/interface")"
+	[ "$interface" = gt0 ] || return 1
+	# A newly validated boot guard is a retained safety addition, not an undoable setting.
+	# Never overwrite a different/missing current identity with an older LAN device.
+	if [ -f "$dir/guard-device" ] && ! cmp -s "$dir/guard-device" "$state_dir/guard-device"; then
+		echo 'error: boot guard identity changed; refusing rollback to a different LAN' >&2
+		return 1
+	fi
+	if [ -e "$state_dir/guard-device" ] || [ -L "$state_dir/guard-device" ]; then
+		[ ! -L "$state_dir" ] && [ "$(stat -c '%u:%a' "$state_dir")" = 0:700 ] &&
+			[ ! -L "$state_dir/guard-device" ] && [ -f "$state_dir/guard-device" ] &&
+			[ "$(stat -c '%u:%a' "$state_dir/guard-device")" = 0:600 ] || return 1
+	fi
+	legacy_dns="$(cat "$dir/legacy-dns")" || return 1
+	case "$legacy_dns" in 0|1) ;; *) return 1 ;; esac
+	restore_option "network.$interface.mtu" "$dir/network-mtu" || return 1
+	restore_option firewall.gofro_vpn.mtu_fix "$dir/firewall-mtu-fix" || return 1
+	restore_option firewall.gofro_vpn.masq "$dir/firewall-masq" || return 1
+	if [ "$legacy_dns" = 1 ]; then
+		[ -f "$dir/dns-restore" ] || return 1
+		for option in server address noresolv localuse; do
+			if uci -q get "dhcp.@dnsmasq[0].$option" >/dev/null; then
+				uci -q delete "dhcp.@dnsmasq[0].$option" || return 1
+			fi
+		done
+		uci batch < "$dir/dns-restore" || return 1
+		uci commit dhcp || return 1
+	fi
+	uci commit network || return 1; uci commit firewall || return 1
+	for file in tls-cert.pem tls-key.pem routing-legacy.json; do
+		if [ -e "$dir/$file.absent" ]; then rm -f "$state_dir/$file"; else cp -p "$dir/$file" "$state_dir/$file" || return 1; fi
+	done
+	sync
+}
+
+attest() {
+	[ -f "$1/routing-attestation" ] || return 0
+	umask 077
+	chown 0:0 "$state_dir" || return 1
+	chmod 700 "$state_dir" || return 1
+	rm -f "$state_dir/routing-legacy.json.new" || return 1
+	cp "$1/routing-attestation" "$state_dir/routing-legacy.json.new" || return 1
+	chmod 600 "$state_dir/routing-legacy.json.new" || return 1
+	mv -f "$state_dir/routing-legacy.json.new" "$state_dir/routing-legacy.json" || return 1
+	sync
+}
+
+case "${1:-}" in snapshot) snapshot "$2" ;; restore) restore "$2" ;; attest) attest "$2" ;; *) exit 2 ;; esac

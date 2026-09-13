@@ -25,6 +25,29 @@ jobs:
       - run: cargo fmt --check
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Dataplane, mode and actual DNS namespace tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends iproute2 nftables python3
+          cargo build --locked -p gofro-agent --bin gofro-agent
+          FIXTURES=$(mktemp -d)
+          export FIXTURES
+          trap 'rm -rf "$FIXTURES"' EXIT
+          bash deploy/openwrt/tests/dataplane-netns.sh
+          sudo -n docker build -t gofro-mode-test - <<'EOF'
+          FROM debian:trixie-slim
+          RUN apt-get update && apt-get install -y --no-install-recommends iproute2 nftables python3
+          EOF
+          sudo -n docker run --rm --network none --cap-add NET_ADMIN --user 0:0 \
+            -v "$GITHUB_WORKSPACE:/src:ro" -w /src gofro-mode-test \
+            sh deploy/openwrt/tests/mode-netns.sh --run
+          # Nested ip netns needs mount/setns privileges, never host networking.
+          sudo -n docker run --rm --network none --user 0:0 \
+            --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN \
+            --security-opt apparmor=unconfined \
+            -v "$GITHUB_WORKSPACE:/src:ro" -v "$FIXTURES:/fixtures:ro" \
+            -e AGENT_BIN=/src/target/debug/gofro-agent -e FIXTURES=/fixtures \
+            -w /src gofro-mode-test sh deploy/openwrt/tests/dns-netns.sh
 
   web:
     name: Web
@@ -53,34 +76,31 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: |
-          bash -n deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install
+          for file in deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install deploy/server/tests/*.sh; do
+            bash -n "$file"
+          done
           shellcheck -s bash deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install deploy/server/tests/*.sh
           bash deploy/server/tests/version.sh
           bash deploy/server/tests/managed.sh
-          sh -n deploy/openwrt/install.sh \
+          for file in deploy/openwrt/install.sh \
             deploy/openwrt/root/etc/init.d/* \
             deploy/openwrt/root/etc/hotplug.d/iface/* \
             deploy/openwrt/root/usr/libexec/gofro/* \
             deploy/openwrt/root/usr/sbin/* \
-            deploy/openwrt/tests/*.sh
-          sh -n deploy/raspios/install.sh \
-            deploy/raspios/root/usr/libexec/gofro/* \
-            deploy/raspios/root/usr/sbin/* \
-            deploy/raspios/tests/*.sh
+            deploy/openwrt/tests/*.sh deploy/openwrt/tests/fixtures/*; do
+            sh -n "$file"
+          done
           shellcheck -s sh deploy/openwrt/install.sh \
             deploy/openwrt/root/etc/init.d/* \
             deploy/openwrt/root/etc/hotplug.d/iface/* \
             deploy/openwrt/root/usr/libexec/gofro/* \
             deploy/openwrt/root/usr/sbin/* \
-            deploy/openwrt/tests/*.sh
-          shellcheck -s sh deploy/raspios/install.sh \
-            deploy/raspios/root/usr/libexec/gofro/* \
-            deploy/raspios/root/usr/sbin/* \
-            deploy/raspios/tests/*.sh
-          cmp deploy/openwrt/update-public.pem deploy/raspios/update-public.pem
+            deploy/openwrt/tests/*.sh deploy/openwrt/tests/fixtures/*
           cmp deploy/openwrt/update-public.pem deploy/server/update-public.pem
           sh deploy/openwrt/tests/health.sh
           sh deploy/openwrt/tests/hotplug.sh
+          sh deploy/openwrt/tests/guard.sh
+          sh deploy/openwrt/tests/network.sh
           sh deploy/openwrt/tests/mode.sh
           sh deploy/openwrt/tests/service.sh
           sh deploy/openwrt/tests/transaction.sh
@@ -90,14 +110,3 @@ jobs:
           sh deploy/openwrt/tests/wifi.sh
           sh deploy/openwrt/tests/onboarding.sh
           sh deploy/openwrt/tests/install-output.sh
-          sh deploy/raspios/tests/health.sh
-          sh deploy/raspios/tests/mode.sh
-          sh deploy/raspios/tests/service.sh
-          sh deploy/raspios/tests/network.sh
-          sh deploy/raspios/tests/recover.sh
-          sh deploy/raspios/tests/transaction.sh
-          sh deploy/raspios/tests/tunnel.sh
-          sh deploy/raspios/tests/update.sh
-          sh deploy/raspios/tests/version.sh
-          sh deploy/raspios/tests/wifi.sh
-          sh deploy/raspios/tests/onboarding.sh

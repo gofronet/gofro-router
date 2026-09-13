@@ -10,11 +10,11 @@
 </script>
 
 <section class="panel traffic-panel" aria-labelledby="traffic-title">
-  <div class="panel-head"><h2 id="traffic-title">Трафик сети</h2><span class="muted small">Последние 10 минут</span></div>
+  <div class="panel-head"><h2 id="traffic-title">Трафик VPN</h2><span class="muted small">Последние 10 минут</span></div>
   <div class="traffic-values">
     <div class="traffic-value"><span>↓ Скачивание</span><strong>{down[0]}<small>{down.slice(1).join(" ")}</small></strong></div>
     <div class="traffic-value"><span>↑ Отдача</span><strong>{up[0]}<small>{up.slice(1).join(" ")}</small></strong></div>
   </div>
-  <div class="chart-wrap"><Chart history={status.history} label="Трафик сети: скачивание и отдача" /></div>
-  <div class="chart-note"><span>Данные роутера</span><span>VPN: ↓ {formatBytes(status.peer?.rx_bytes)} · ↑ {formatBytes(status.peer?.tx_bytes)}</span></div>
+  <div class="chart-wrap"><Chart history={status.history} label="Трафик VPN: скачивание и отдача" /></div>
+  <div class="chart-note"><span>Данные VPN</span><span>↓ {formatBytes(status.peer?.rx_bytes)} · ↑ {formatBytes(status.peer?.tx_bytes)}</span></div>
 </section>

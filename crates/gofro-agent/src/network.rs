@@ -1,16 +1,14 @@
 use std::{
-    fs,
+    fs::{self, File, OpenOptions, TryLockError},
     io::Write,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::Path,
     process::{Command, Stdio},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::{
-    AppState,
-    config::validate_server,
-    model::{ApNetwork, ServerProfile, WifiBand},
-};
+use crate::{AppState, config::validate_server, model::ServerProfile};
 
 const RELAY_ENDPOINT_PATH: &str = "/etc/gofro/relay-endpoint";
 const RELAY_SERVICE: &str = "gofro-relay";
@@ -19,8 +17,129 @@ const SERVICE_COMMAND: &str = "/usr/libexec/gofro/service";
 const TUNNEL_COMMAND: &str = "/usr/libexec/gofro/tunnel";
 const TUNNEL_MTU: &str = "1280";
 const LEGACY_TUNNEL_ADDRESS: &str = "10.202.0.2/32";
-const WIFI_COMMAND: &str = "/usr/libexec/gofro/wifi";
 const DEVICE_PRIVATE_KEY: &str = "/etc/wireguard/client.key";
+
+pub(crate) fn lock_apply(state: &AppState) -> Result<File> {
+    let parent = state
+        .config_path
+        .parent()
+        .context("configuration path has no parent")?;
+    let directory =
+        fs::symlink_metadata(parent).context("failed to inspect apply lock directory")?;
+    if !directory.is_dir() || directory.mode() & 0o022 != 0 {
+        bail!("unsafe apply lock directory");
+    }
+    // Production namespace is root-owned and not writable by other users. This
+    // makes checking the existing leaf before opening safe from symlink swaps.
+    // Unit fixtures instead live in the unprivileged test user's temporary tree.
+    #[cfg(not(test))]
+    for ancestor in parent.ancestors() {
+        let metadata = fs::symlink_metadata(ancestor)?;
+        if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            bail!("unsafe apply lock ancestor: {}", ancestor.display());
+        }
+    }
+    let path = parent.join("apply.lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).mode(0o600);
+    let file = match options.create_new(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(&path)?;
+            if !metadata.is_file()
+                || metadata.nlink() != 1
+                || metadata.mode() & 0o7777 != 0o600
+                || metadata.uid() != directory.uid()
+            {
+                bail!("unsafe apply lock file: {}", path.display());
+            }
+            options.create_new(false).open(&path)?
+        }
+        Err(error) => return Err(error).context("failed to create apply lock"),
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => bail!("network lifecycle operation is in progress"),
+        Err(TryLockError::Error(error)) => Err(error).context("failed to acquire apply lock"),
+    }
+}
+
+pub(crate) struct Snapshot {
+    endpoint: Option<Vec<u8>>,
+    relay_active: bool,
+    saved_tunnel: Option<Vec<u8>>,
+    addresses: Option<Vec<String>>,
+}
+
+impl Snapshot {
+    pub(crate) fn capture(state: &AppState) -> Result<Self> {
+        Ok(Self {
+            endpoint: read_optional(Path::new(RELAY_ENDPOINT_PATH))?,
+            relay_active: relay_active()?,
+            saved_tunnel: read_optional(Path::new(&format!(
+                "/etc/wireguard/{}.conf",
+                state.interface
+            )))?,
+            addresses: if service_active(&state.interface)? {
+                Some(tunnel_addresses(&state.interface)?)
+            } else {
+                None
+            },
+        })
+    }
+
+    // Called under the controller guard after replaying the previous desired mode.
+    pub(crate) fn restore(&self, state: &AppState) -> Result<()> {
+        if let Some(addresses) = &self.addresses {
+            replace_tunnel_addresses(&state.interface, addresses)?;
+        }
+        restore_file(
+            Path::new(&format!("/etc/wireguard/{}.conf", state.interface)),
+            self.saved_tunnel.as_deref(),
+        )?;
+        restore_file(Path::new(RELAY_ENDPOINT_PATH), self.endpoint.as_deref())?;
+        run(Command::new(SERVICE_COMMAND).args([
+            if self.relay_active { "restart" } else { "stop" },
+            RELAY_SERVICE,
+        ]))?;
+        Ok(())
+    }
+}
+
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+fn restore_file(path: &Path, contents: Option<&[u8]>) -> Result<()> {
+    if let Some(contents) = contents {
+        let temporary = path.with_extension("restore.tmp");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)
+            .with_context(|| format!("failed to open {}", temporary.display()))?;
+        file.write_all(contents)
+            .with_context(|| format!("failed to write {}", temporary.display()))?;
+        drop(file);
+        fs::rename(&temporary, path)
+            .with_context(|| format!("failed to replace {}", path.display()))?;
+    } else {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to remove {}", path.display()));
+            }
+        }
+    }
+    Ok(())
+}
 
 fn run(command: &mut Command) -> Result<String> {
     let description = format!("{command:?}");
@@ -100,10 +219,6 @@ fn replace_tunnel_addresses(interface: &str, addresses: &[String]) -> Result<()>
     Ok(())
 }
 
-pub(crate) fn start_and_select(state: &AppState, server: &ServerProfile) -> Result<()> {
-    configure_server(state, server, true)
-}
-
 pub(crate) fn stop_tunnel(interface: &str) -> Result<()> {
     set_tunnel(interface, "stop")
 }
@@ -121,40 +236,32 @@ pub(crate) fn service_active(interface: &str) -> Result<bool> {
         .success())
 }
 
-pub(crate) fn select_server_peer(state: &AppState, server: &ServerProfile) -> Result<()> {
-    configure_server(state, server, false)
-}
-
-fn configure_server(state: &AppState, server: &ServerProfile, start_tunnel: bool) -> Result<()> {
-    let previous_endpoint = fs::read(RELAY_ENDPOINT_PATH).ok();
+pub(crate) fn start_and_select(state: &AppState, server: &ServerProfile) -> Result<()> {
+    let previous_endpoint = read_optional(Path::new(RELAY_ENDPOINT_PATH))?;
     let tunnel_was_active = service_active(&state.interface)?;
     let result = (|| {
-        prepare_relay(server, start_tunnel && !tunnel_was_active)?;
-        if start_tunnel {
-            if !tunnel_was_active {
-                set_tunnel(&state.interface, "start")?;
-            }
-            run(Command::new("ip").args([
-                "link",
-                "set",
-                "mtu",
-                TUNNEL_MTU,
-                "dev",
-                &state.interface,
-            ]))?;
+        prepare_relay(server, !tunnel_was_active)?;
+        if !tunnel_was_active {
+            set_tunnel(&state.interface, "start")?;
         }
+        run(Command::new("ip").args(["link", "set", "mtu", TUNNEL_MTU, "dev", &state.interface]))?;
         set_peer(&state.interface, server)
     })();
     if let Err(error) = result {
-        if start_tunnel && !tunnel_was_active {
-            let _ = stop_tunnel(&state.interface);
+        let mut rollback_errors = Vec::new();
+        if !tunnel_was_active && let Err(rollback) = stop_tunnel(&state.interface) {
+            rollback_errors.push(format!("tunnel stop: {rollback:#}"));
         }
-        return match restore_relay(previous_endpoint) {
-            Ok(()) => Err(error),
-            Err(rollback) => Err(anyhow!(
-                "server update failed: {error:#}; relay rollback failed: {rollback:#}"
-            )),
-        };
+        if let Err(rollback) = restore_relay(previous_endpoint) {
+            rollback_errors.push(format!("relay: {rollback:#}"));
+        }
+        if rollback_errors.is_empty() {
+            return Err(error);
+        }
+        return Err(anyhow!(
+            "server update failed: {error:#}; rollback failed: {}",
+            rollback_errors.join("; ")
+        ));
     }
     Ok(())
 }
@@ -164,26 +271,30 @@ fn prepare_relay(server: &ServerProfile, force_restart: bool) -> Result<()> {
     let endpoint = format!("{}\n", server.endpoint);
     let endpoint_changed =
         !fs::read(RELAY_ENDPOINT_PATH).is_ok_and(|current| current == endpoint.as_bytes());
-    let relay_active = Command::new(SERVICE_COMMAND)
-        .args(["status", RELAY_SERVICE])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("failed to query relay service")?
-        .success();
+    let relay_active = relay_active()?;
     if !endpoint_changed && !force_restart && relay_active {
         return Ok(());
     }
     if endpoint_changed {
-        fs::write(RELAY_ENDPOINT_PATH, endpoint).context("failed to update relay endpoint")?;
+        write_relay_endpoint(endpoint.as_bytes())?;
     }
     run(Command::new(SERVICE_COMMAND).args(["restart", RELAY_SERVICE]))?;
     Ok(())
 }
 
+fn relay_active() -> Result<bool> {
+    Ok(Command::new(SERVICE_COMMAND)
+        .args(["status", RELAY_SERVICE])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("failed to query relay service")?
+        .success())
+}
+
 fn restore_relay(previous_endpoint: Option<Vec<u8>>) -> Result<()> {
     if let Some(endpoint) = previous_endpoint {
-        fs::write(RELAY_ENDPOINT_PATH, endpoint).context("failed to restore relay endpoint")?;
+        write_relay_endpoint(&endpoint)?;
         run(Command::new(SERVICE_COMMAND).args(["restart", RELAY_SERVICE]))?;
     } else {
         match fs::remove_file(RELAY_ENDPOINT_PATH) {
@@ -194,6 +305,10 @@ fn restore_relay(previous_endpoint: Option<Vec<u8>>) -> Result<()> {
         run(Command::new(SERVICE_COMMAND).args(["stop", RELAY_SERVICE]))?;
     }
     Ok(())
+}
+
+fn write_relay_endpoint(endpoint: &[u8]) -> Result<()> {
+    restore_file(Path::new(RELAY_ENDPOINT_PATH), Some(endpoint))
 }
 
 fn set_peer(interface: &str, server: &ServerProfile) -> Result<()> {
@@ -265,64 +380,17 @@ fn next_tunnel_addresses(configured: Option<&str>, previous: &[String]) -> Vec<S
 }
 
 pub(crate) fn apply_mode(state: &AppState, mode: &str) -> Result<()> {
-    run(Command::new(&state.mode_command).arg(mode))?;
+    let subnet = state.lan.subnet.to_string();
+    run(Command::new(&state.mode_command).args([mode, &state.lan.device, &subnet]))?;
     Ok(())
 }
 
-pub(crate) fn access_points() -> Result<Vec<ApNetwork>> {
-    parse_access_points(&run(Command::new(WIFI_COMMAND).arg("list"))?)
-}
-
-fn parse_access_points(output: &str) -> Result<Vec<ApNetwork>> {
-    let mut networks = Vec::new();
-    for line in output.lines() {
-        let (band, ssid) = line
-            .split_once('\t')
-            .context("invalid Wi-Fi helper output")?;
-        let band = match band {
-            "2g" => WifiBand::TwoGhz,
-            "5g" => WifiBand::FiveGhz,
-            _ => bail!("unsupported Wi-Fi band: {band}"),
-        };
-        if ssid.is_empty() {
-            bail!("Wi-Fi helper returned an empty SSID");
-        }
-        if networks
-            .iter()
-            .any(|network: &ApNetwork| network.band == band)
-        {
-            continue;
-        }
-        networks.push(ApNetwork {
-            band,
-            ssid: ssid.to_owned(),
-        });
-    }
-    if networks.is_empty() {
-        bail!("Wi-Fi helper returned no access points");
-    }
-    Ok(networks)
-}
-
-pub(crate) fn update_ap(band: Option<WifiBand>, ssid: &str, password: Option<&str>) -> Result<()> {
-    let mut command = Command::new(WIFI_COMMAND);
-    command
-        .args(["set", band.map_or("all", WifiBand::as_str), ssid])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let mut child = command.spawn().context("failed to start Wi-Fi helper")?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .context("failed to open Wi-Fi helper input")?;
-    stdin.write_all(password.unwrap_or("").as_bytes())?;
-    stdin.write_all(b"\n")?;
-    drop(stdin);
-    if !child.wait()?.success() {
-        bail!("Wi-Fi helper rejected update");
-    }
-    Ok(())
+pub(crate) fn retire_legacy_routing(state: &AppState) -> Result<()> {
+    let parent = state
+        .config_path
+        .parent()
+        .context("configuration path has no parent")?;
+    restore_file(&parent.join("routing-legacy.json"), None)
 }
 
 #[cfg(test)]
@@ -330,14 +398,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_access_point_bands() {
-        let networks =
-            parse_access_points("2g\tGofroWIFI 2\n2g\tGuest Wi-Fi\n5g\tGofroWIFI 5\n").unwrap();
-        assert_eq!(networks.len(), 2);
-        assert_eq!(networks[0].band, WifiBand::TwoGhz);
-        assert_eq!(networks[0].ssid, "GofroWIFI 2");
-        assert_eq!(networks[1].ssid, "GofroWIFI 5");
-        assert!(parse_access_points("6g\tUnsupported\n").is_err());
+    fn restores_saved_credentials_atomically_including_absent_files() {
+        let directory = std::env::temp_dir().join(format!("gofro-network-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("tunnel.conf");
+        fs::write(&path, b"original").unwrap();
+        fs::create_dir(path.with_extension("restore.tmp")).unwrap();
+        assert!(restore_file(&path, Some(b"replacement")).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        fs::remove_dir(path.with_extension("restore.tmp")).unwrap();
+        restore_file(&path, Some(b"replacement")).unwrap();
+        assert_eq!(read_optional(&path).unwrap().unwrap(), b"replacement");
+        restore_file(&path, None).unwrap();
+        restore_file(&path, None).unwrap();
+        assert!(read_optional(&path).unwrap().is_none());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
   import { getAppContext } from "../app-context";
   import Dialog from "../components/dialog.svelte";
+  import OperationWarning from "../components/operation-warning.svelte";
   import ServerDialogs, { type ServerDialogFlow } from "../components/server-dialogs.svelte";
   import ServerMarker from "../components/server-marker.svelte";
   import { p, route, serverManagementPath } from "../router";
@@ -37,13 +38,20 @@
   let loadedKey = $state("");
   let selectionRevision = 0;
 
-  const peers = $derived(details?.peers ?? []);
-  const activePeers = $derived(details ? peers.filter((peer) => !peer.revoked).length : null);
+  const peers = $derived(details?.peers.filter(peer => !peer.revoked) ?? []);
+  const activePeers = $derived(details ? peers.length : null);
 
   function characterCount(value: string): number { return Array.from(value.trim()).length; }
   function request(key: string): { key: string; revision: number } { return { key, revision: selectionRevision }; }
   function current(value: { key: string; revision: number }): boolean { return value.revision === selectionRevision && value.key === serverKey; }
   function error(): void { dialogError = app.actionError || "Операция не выполнена."; }
+  function committed(): boolean {
+    if (!app.actionWarning || app.actionError) return false;
+    details = null;
+    peerFlow = null;
+    maintenance = null;
+    return true;
+  }
   function openPeer(flow: PeerFlow): void { app.clearActionError(); dialogError = ""; profile = null; shareMessage = ""; peerFlow = flow; }
   function closePeer(): void { if (!busy) { peerFlow = null; profile = null; shareMessage = ""; } }
 
@@ -96,7 +104,7 @@
     if (!parsed.success) { dialogError = "Введите имя от 1 до 60 символов без управляющих знаков."; return; }
     const name = parsed.data;
     const editedKey = peerFlow.kind === "edit" ? peerFlow.peer.public_key : null;
-    if (peers.some(peer => !peer.revoked && peer.public_key !== editedKey && peer.name.toLowerCase() === name.toLowerCase())) {
+    if (peers.some(peer => peer.public_key !== editedKey && peer.name.toLowerCase() === name.toLowerCase())) {
       dialogError = "Активный доступ с таким именем уже существует.";
       return;
     }
@@ -104,6 +112,7 @@
     const pending = request(server.public_key);
     const result = peerFlow.kind === "edit" ? await app.renameFriend(pending.key, peerFlow.peer.public_key, name) : await app.createFriend(pending.key, name);
     if (!current(pending)) return;
+    if (!result && committed()) return;
     if (!result) return error();
     details = result;
     closePeer();
@@ -114,6 +123,7 @@
     const pending = request(server.public_key);
     const result = await app.revokeFriend(pending.key, peerFlow.peer.public_key);
     if (!current(pending)) return;
+    if (!result && committed()) return;
     if (!result) return error();
     details = result;
     closePeer();
@@ -156,6 +166,7 @@
     const pending = request(server.public_key);
     const result = action === "update" ? await app.updateManagedServer(pending.key) : await app.restartServer(pending.key);
     if (!current(pending)) return;
+    if (!result && committed()) return;
     if (!result) return error();
     maintenance = null;
     await inspect(pending.key, action === "update" ? "Обновление завершено" : "VPN перезапущен");
@@ -163,6 +174,8 @@
 </script>
 
 <svelte:head><title>Управление сервером · Gofro Router</title></svelte:head>
+
+{#if app.warningServerKey === serverKey}<OperationWarning onrefresh={() => inspect(serverKey)} />{/if}
 
 {#if !serverKey}
   <section class="panel"><div class="panel-head"><h2>Выберите сервер</h2></div><div class="panel-body">{#each status.servers as item (item.public_key)}<a class="choice-button" href={serverManagementPath(item.public_key)}><ServerMarker emoji={item.emoji} /><span><strong>{item.name}</strong><small>{item.managed ? "Свой VPS" : "VPN-профиль"}</small></span><ChevronRight class="icon" /></a>{:else}<p class="small">Сначала добавьте свой VPS, чтобы управлять доступами друзей.</p>{/each}<div class="form-actions"><button class="btn primary" type="button" disabled={busy} onclick={() => editFlow = { kind: "vps" }}><Plus size={17} />Добавить свой VPS</button></div></div></section>
@@ -173,7 +186,7 @@
     <section class="panel"><div class="panel-head"><h2>Доступность</h2><button class="btn" type="button" disabled={busy || !server.managed} onclick={() => inspect(server.public_key)}>Проверить</button></div><div class="panel-body">{#if inspectedAt}<p class="small muted">Последняя попытка: {inspectedAt.toLocaleString("ru-RU")}</p>{/if}<p class="management-result" role="status">{server.managed ? inspection || (loadingDetails ? "Проверяем сервер…" : "Ещё не проверено") : importedAvailability}</p></div></section>
     {#if server.managed}
       <section class="panel"><div class="panel-head"><h2>Доступы друзей {#if activePeers !== null}<span class="count">{activePeers}</span>{/if}</h2><button class="btn primary" type="button" disabled={busy || !details} onclick={() => { peerName = ""; openPeer({ kind: "create" }); }}>Создать доступ</button></div>
-        {#if details}{#each peers as peer (peer.public_key)}<article class="full-row peer-row"><div class="row-main"><h3>{peer.name}</h3><p>{peer.revoked ? "Доступ отозван" : "Доступ активен"}</p></div><div class="row-actions">{#if !peer.revoked}{#if peer.can_share}<button class="btn" type="button" disabled={busy} onclick={() => openShare(peer)}>Поделиться</button>{:else}<span class="small muted">Профиль для этого старого доступа не хранится, поэтому поделиться им нельзя.</span>{/if}<button class="icon-btn" type="button" disabled={busy} aria-label={`Изменить доступ ${peer.name}`} onclick={() => { peerName = peer.name; openPeer({ kind: "edit", peer }); }}><MoreHorizontal size={19} /></button>{/if}</div></article>{:else}<div class="empty"><h3>Пока нет доступов</h3><p>Для каждого друга создайте отдельный доступ.</p></div>{/each}{:else}<div class="empty"><h3>{loadingDetails ? "Получаем доступы" : "Доступы недоступны"}</h3><p>{loadingDetails ? "Запрашиваем данные сервера." : "Повторите проверку сервера, чтобы загрузить доступы."}</p>{#if !loadingDetails}<button class="btn" type="button" disabled={busy} onclick={() => inspect(server.public_key)}>Повторить</button>{/if}</div>{/if}
+        {#if details}{#each peers as peer (peer.public_key)}<article class="full-row peer-row"><div class="row-main"><h3>{peer.name}</h3><p>Доступ активен</p></div><div class="row-actions">{#if peer.can_share}<button class="btn" type="button" disabled={busy} onclick={() => openShare(peer)}>Поделиться</button>{:else}<span class="small muted">Профиль для этого старого доступа не хранится, поэтому поделиться им нельзя.</span>{/if}<button class="icon-btn" type="button" disabled={busy} aria-label={`Изменить доступ ${peer.name}`} onclick={() => { peerName = peer.name; openPeer({ kind: "edit", peer }); }}><MoreHorizontal size={19} /></button></div></article>{:else}<div class="empty"><h3>Пока нет доступов</h3><p>Для каждого друга создайте отдельный доступ.</p></div>{/each}{:else}<div class="empty"><h3>{loadingDetails ? "Получаем доступы" : "Доступы недоступны"}</h3><p>{loadingDetails ? "Запрашиваем данные сервера." : "Повторите проверку сервера, чтобы загрузить доступы."}</p>{#if !loadingDetails}<button class="btn" type="button" disabled={busy} onclick={() => inspect(server.public_key)}>Повторить</button>{/if}</div>{/if}
       </section>
       <section class="panel"><details class="disclosure"><summary>Обслуживание</summary><div class="details-content"><div class="management-actions"><button class="btn" type="button" disabled={busy} onclick={() => checkUpdates(server.public_key)}>Проверить обновления</button><button class="btn" type="button" disabled={busy} onclick={() => { app.clearActionError(); dialogError = ""; maintenance = "update"; }}>Обновить</button><button class="btn" type="button" disabled={busy} onclick={() => { app.clearActionError(); dialogError = ""; maintenance = "restart"; }}>Перезапустить VPN</button></div>{#if checkedAt}<p class="management-result" role="status">Последняя проверка: {checkedAt.toLocaleString("ru-RU")}. {updateResult}</p>{/if}</div></details></section>
     {:else}<p class="support-text">Доступами и обновлениями управляет владелец сервера.</p>{/if}

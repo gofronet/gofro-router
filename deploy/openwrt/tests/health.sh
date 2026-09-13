@@ -5,7 +5,9 @@ ROOT="$(CDPATH='' cd "$(dirname "$0")/../../.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-sed -n '/^status_healthy() {$/,/^}$/p' "$ROOT/deploy/openwrt/install.sh" > "$TMP/health.sh"
+sed -n '/^status_healthy() {$/,/^}$/p' "$ROOT/deploy/openwrt/install.sh" |
+	sed "s|/etc/gofro|$TMP/state|g" > "$TMP/health.sh"
+STATE_DIR=$TMP/state; export STATE_DIR
 # shellcheck disable=SC1091
 . "$TMP/health.sh"
 
@@ -21,6 +23,7 @@ jsonfilter() {
 		'@.version') printf '%s\n' "$TEST_VERSION" ;;
 		'@.dns_active') printf '%s\n' "$TEST_DNS" ;;
 		'@.dataplane_active') printf '%s\n' "$TEST_DATAPLANE" ;;
+		'@.degraded') printf '%s\n' "$TEST_DEGRADED" ;;
 		'@.vpn_enabled') printf '%s\n' "$TEST_VPN" ;;
 		'@.tunnel_active') printf '%s\n' "$TEST_TUNNEL" ;;
 		'@.handshake_age_seconds') printf '%s\n' "$TEST_HANDSHAKE_AGE" ;;
@@ -38,6 +41,12 @@ ip() {
 	printf '7: gt0: <POINTOPOINT,UP> mtu %s state UNKNOWN\n' "$TEST_MTU"
 }
 
+nft() {
+	[ "$*" = 'list tables' ] || return 1
+	[ "${TEST_NFT_ERROR:-0}" = 0 ] || return 1
+	[ "${TEST_GUARD:-0}" = 0 ] || printf 'table inet gofro_guard\n'
+}
+
 # Referenced by the sourced function; ShellCheck cannot follow the generated file.
 # shellcheck disable=SC2034
 STATUS_FILE=$TMP/status
@@ -46,6 +55,7 @@ VERSION=0.4.0
 TEST_VERSION=0.4.0
 TEST_DNS=true
 TEST_DATAPLANE=true
+TEST_DEGRADED=false
 TEST_VPN=false
 TEST_TUNNEL=false
 TEST_HANDSHAKE_AGE=
@@ -60,6 +70,14 @@ sed -n '/^install_status_healthy() {$/,/^}$/p' \
 # shellcheck disable=SC2034
 status_file=$STATUS_FILE
 install_status_healthy 0.4.0
+
+TEST_GUARD=1
+if status_healthy || install_status_healthy 0.4.0; then exit 1; fi
+TEST_GUARD=0 TEST_NFT_ERROR=1
+if status_healthy || install_status_healthy 0.4.0; then exit 1; fi
+TEST_NFT_ERROR=0 TEST_DEGRADED=true
+if status_healthy || install_status_healthy 0.4.0; then exit 1; fi
+TEST_DEGRADED=false
 
 TEST_DATAPLANE=false
 set +e

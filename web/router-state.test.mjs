@@ -1,0 +1,373 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { plugin } from "bun";
+import { test } from "bun:test";
+import { compileModule } from "svelte/compiler";
+import { api, ApiError } from "./src/api/index.ts";
+import { setCsrfToken, clearCsrfToken } from "./src/api/client.ts";
+import { statusSchema } from "./src/api/schemas.ts";
+
+plugin({ name: "svelte-store-test", setup(build) {
+  build.onLoad({ filter: /router-state\.svelte\.ts$/ }, async ({ path }) => ({
+    contents: compileModule(new Bun.Transpiler({ loader: "ts" }).transformSync(await readFile(path, "utf8")), { filename: path, generate: "server" }).js.code,
+    loader: "js",
+  }));
+} });
+const { RouterState } = await import("./src/stores/router-state.svelte.ts");
+const status = statusSchema.parse({
+  version: "test", update: { running: false, result: null }, vpn_enabled: false,
+  tunnel_active: false, interface: "wg0", active_server_key: null, servers: [], peer: null,
+  stats: { rx_bps: 0, tx_bps: 0 }, history: [],
+  routing: { config: { domain_rules: [], ip_rules: [], default_target: "direct" }, dns_active: false, fake_ips: 0, geosite_loaded: false, geoip_loaded: false, dataplane_active: false },
+});
+const auth = { state: "authenticated", csrf_token: "new-session" };
+const onboarding = { step: "complete", networks: [], setup_window_seconds: null, error: null };
+function deferred() { return Promise.withResolvers(); }
+
+async function scenario(run) {
+  const original = { status: api.status.get, auth: { ...api.auth }, onboarding: api.onboarding.get, save: api.routing.save, create: api.servers.createFriend, window: globalThis.window };
+  const timers = new Map();
+  let next = 0;
+  globalThis.window = { setInterval(callback) { timers.set(++next, callback); return next; }, clearInterval(id) { timers.delete(id); } };
+  api.status.get = async () => structuredClone(status);
+  api.auth.login = async () => auth;
+  api.auth.logout = async () => ({ state: "login", csrf_token: "logged-out" });
+  api.onboarding.get = async () => onboarding;
+  const app = new RouterState();
+  try { await run(app, timers); }
+  finally {
+    app.stop();
+    api.status.get = original.status;
+    Object.assign(api.auth, original.auth);
+    api.onboarding.get = original.onboarding;
+    api.routing.save = original.save;
+    api.servers.createFriend = original.create;
+    globalThis.window = original.window;
+  }
+}
+
+test("logout invalidates pending status success/error and queued polling callbacks", () => scenario(async (app, timers) => {
+  for (const fail of [false, true]) {
+    const pending = deferred();
+    api.status.get = () => pending.promise;
+    const refresh = app.refresh();
+    app.startPolling();
+    const tick = [...timers.values()][0];
+    await app.logoutAuth();
+    if (fail) pending.reject(new ApiError("old failure", 401)); else pending.resolve(status);
+    await refresh;
+    tick();
+    assert.equal(app.hasStatus, false);
+    assert.equal(app.authState, "login");
+    assert.equal(app.pollError, "");
+    assert.equal(timers.size, 0);
+  }
+}));
+
+test("old 401 cannot log out a new login or clear its in-flight status", () => scenario(async (app, timers) => {
+  const old = deferred();
+  api.status.get = () => old.promise;
+  const oldRefresh = app.refresh();
+  const fresh = deferred();
+  let freshCalls = 0;
+  api.status.get = () => { freshCalls++; return fresh.promise; };
+  assert.equal(await app.loginAuth("password"), true);
+  old.reject(new ApiError("session_expired", 401));
+  await oldRefresh;
+  await app.refresh();
+  assert.equal(freshCalls, 1);
+  fresh.resolve(status);
+  await fresh.promise;
+  assert.equal(app.authState, "authenticated");
+  assert.equal(app.hasStatus, true);
+  assert.equal(timers.size, 1);
+}));
+
+test("logout hides login until settlement and invalidates pending auth", () => scenario(async (app, timers) => {
+  const initializing = deferred();
+  api.auth.status = () => initializing.promise;
+  const initialize = app.initializeAuth();
+  const exiting = deferred();
+  api.auth.logout = () => exiting.promise;
+  const logout = app.logoutAuth();
+  initializing.resolve(auth);
+  await initialize;
+  assert.equal(app.authState, "login");
+  assert.equal(app.authLoading, true);
+  assert.equal(timers.size, 0);
+  exiting.reject(new ApiError("old logout", 401));
+  await logout;
+  assert.equal(app.authLoading, false);
+  assert.equal(await app.loginAuth("password"), true);
+  assert.equal(app.authState, "authenticated");
+  assert.equal(app.actionError, "");
+  assert.equal(timers.size, 1);
+}));
+
+test("committed/unknown status writes cannot turn stale A or disabled cache into a false no-op", () => scenario(async app => {
+  const select = api.servers.select;
+  const mode = api.mode.set;
+  try {
+    for (const outcome of ["committed", undefined]) {
+      api.status.get = async () => ({ ...status, active_server_key: "A" });
+      await app.refresh();
+      const old = deferred();
+      api.status.get = () => old.promise;
+      const polling = app.refresh();
+      const selections = [];
+      api.servers.select = async key => {
+        selections.push(key);
+        throw new ApiError("observation failed", undefined, undefined, outcome);
+      };
+      assert.equal(await app.selectServer("B"), outcome === "committed");
+      old.resolve({ ...status, active_server_key: "A" });
+      await polling;
+      assert.equal(app.statusUncertain, true);
+      assert.equal(await app.selectServer("A"), false);
+      assert.match(app.actionError, /новая команда не отправлена/);
+      assert.deepEqual(selections, ["B"]);
+      api.status.get = async () => { throw new ApiError("read failed"); };
+      await app.refresh();
+      assert.equal(app.statusUncertain, true);
+      api.status.get = async () => ({ ...status, active_server_key: "B" });
+      await app.refresh();
+      api.servers.select = async key => { selections.push(key); return { ...status, active_server_key: key }; };
+      assert.equal(await app.selectServer("A"), true);
+      assert.deepEqual(selections, ["B", "A"]);
+
+      const modes = [];
+      api.mode.set = async enabled => {
+        modes.push(enabled);
+        throw new ApiError("observation failed", undefined, undefined, outcome);
+      };
+      assert.equal(await app.setMode(true), outcome === "committed");
+      assert.equal(await app.setMode(false), false);
+      assert.match(app.actionError, /новая команда не отправлена/);
+      assert.deepEqual(modes, [true]);
+      api.status.get = async () => ({ ...status, vpn_enabled: true });
+      await app.refresh();
+      api.mode.set = async enabled => { modes.push(enabled); return { ...status, vpn_enabled: enabled }; };
+      assert.equal(await app.setMode(false), true);
+      assert.deepEqual(modes, [true, false]);
+      assert.equal(app.statusUncertain, false);
+    }
+    const pending = deferred();
+    api.mode.set = () => pending.promise;
+    const enabling = app.setMode(true);
+    assert.equal(await app.setMode(false), false, "busy state must precede cached no-op checks");
+    pending.resolve({ ...status, vpn_enabled: true });
+    await enabling;
+    app.stop();
+    assert.equal(app.statusUncertain, true, "a stopped lifecycle cannot lend confidence to its successor");
+  } finally { api.servers.select = select; api.mode.set = mode; }
+}));
+
+test("a current login 401 resynchronizes preauth CSRF before a corrected password", async () => {
+  const login = api.auth.login;
+  await scenario(async app => {
+    const originalFetch = globalThis.fetch;
+    api.auth.login = login;
+    let calls = 0;
+    let reads = 0;
+    setCsrfToken("preauth");
+    globalThis.fetch = async (url, init) => {
+      if (url === "/api/auth/status") {
+        reads++;
+        return Response.json({ state: "login", csrf_token: "preauth" });
+      }
+      assert.equal(url, "/api/auth/login");
+      assert.equal(new Headers(init.headers).get("X-CSRF-Token"), "preauth");
+      return ++calls === 1 ? Response.json({ error: "invalid_password" }, { status: 401 }) : Response.json(auth);
+    };
+    try {
+      assert.equal(await app.loginAuth("wrong"), false);
+      assert.equal(await app.loginAuth("correct"), true);
+      assert.equal(calls, 2);
+      assert.equal(reads, 1);
+    } finally { globalThis.fetch = originalFetch; clearCsrfToken(); }
+  });
+});
+
+test("auth transport queue includes status/logout and applies CSRF before the next login", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const operation of [api.auth.status, api.auth.logout]) {
+      for (const fail of [false, true]) {
+        const first = deferred();
+        const calls = [];
+        setCsrfToken("initial-csrf");
+        globalThis.fetch = async (url, init) => {
+          calls.push(url);
+          if (calls.length === 1) return first.promise;
+          if (url === "/api/auth/status") {
+            assert.equal(fail, true);
+            return Response.json({ state: "login", csrf_token: "settled-csrf" });
+          }
+          assert.equal(url, "/api/auth/login");
+          assert.equal(new Headers(init.headers).get("X-CSRF-Token"), "settled-csrf");
+          return Response.json(auth);
+        };
+        const pending = operation().catch(error => error);
+        const login = api.auth.login("password");
+        await new Promise(resolve => setTimeout(resolve, 0));
+        assert.equal(calls.length, 1);
+        if (fail) first.reject(new TypeError("network failed"));
+        else first.resolve(Response.json({ state: "login", csrf_token: "settled-csrf" }));
+        await pending;
+        assert.deepEqual(await login, auth);
+        assert.equal(calls.length, fail ? 3 : 2);
+      }
+    }
+  } finally { globalThis.fetch = originalFetch; clearCsrfToken(); }
+});
+
+test("failed CSRF resync stays unverified and refuses credentials until a valid status reply", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, ms, ...args) => originalTimeout(callback, ms === 10_000 ? 0 : ms, ...args);
+  let phase = "verified";
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push(url);
+    if (url === "/api/auth/status") {
+      if (phase === "http-error") return Response.json({ error: "unavailable" }, { status: 500 });
+      if (phase === "invalid-body") return Response.json({ state: "login" });
+      if (phase === "headers-timeout") return new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true }));
+      if (phase === "body-timeout") return new Response(new ReadableStream({ start(controller) {
+        init.signal.addEventListener("abort", () => controller.error(init.signal.reason), { once: true });
+      } }));
+      return Response.json({ state: "login", csrf_token: "verified-csrf" });
+    }
+    if (url === "/api/auth/logout") return new Response('{"state":', { status: 200 });
+    assert.equal(phase, "verified");
+    assert.equal(new Headers(init.headers).get("X-CSRF-Token"), "verified-csrf");
+    return Response.json(auth);
+  };
+  try {
+    await api.auth.status();
+    await assert.rejects(api.auth.logout());
+    for (phase of ["http-error", "invalid-body", "headers-timeout", "body-timeout"]) {
+      await assert.rejects(api.auth.login("password"));
+      assert.equal(calls.filter(url => url === "/api/auth/login").length, 0);
+    }
+    phase = "verified";
+    assert.deepEqual(await api.auth.login("password"), auth);
+    assert.equal(calls.filter(url => url === "/api/auth/logout").length, 1);
+    assert.equal(calls.filter(url => url === "/api/auth/login").length, 1);
+    assert.equal(calls.filter(url => url === "/api/auth/status").length, 6);
+  } finally { globalThis.fetch = originalFetch; globalThis.setTimeout = originalTimeout; clearCsrfToken(); }
+});
+
+test("stop invalidates pending initialize/login/setup and onboarding, including failures", () => scenario(async (app, timers) => {
+  for (const method of ["initializeAuth", "loginAuth", "setupAuth"]) {
+    for (const fail of [false, true]) {
+      const pending = deferred();
+      api.auth.status = api.auth.login = api.auth.setup = () => pending.promise;
+      const request = app[method]("password");
+      app.stop();
+      if (fail) pending.reject(new ApiError("old auth error", 401)); else pending.resolve(auth);
+      await request;
+      assert.equal(app.authState, "login");
+      assert.equal(app.authError, "");
+      assert.equal(app.authLoading, false);
+      assert.equal(timers.size, 0);
+    }
+  }
+  api.auth.status = async () => auth;
+  const pending = deferred();
+  api.onboarding.get = () => pending.promise;
+  const initializing = app.initializeAuth();
+  await Promise.resolve();
+  app.stop();
+  pending.resolve(onboarding);
+  await initializing;
+  assert.equal(app.onboarding, null);
+  assert.equal(timers.size, 0);
+}));
+
+test("mutation/status coordinator rejects older polls and stopped mutation completions", () => scenario(async app => {
+  const old = deferred();
+  api.status.get = () => old.promise;
+  const refresh = app.refresh();
+  api.routing.save = async () => ({ ...status, version: "written" });
+  assert.equal(await app.saveRouting(status.routing.config), true);
+  old.resolve(status);
+  await refresh;
+  assert.equal(app.status.version, "written");
+  const pending = deferred();
+  api.routing.save = () => pending.promise;
+  const save = app.saveRouting(status.routing.config);
+  app.stop();
+  pending.reject(new ApiError("old mutation error", 401));
+  assert.equal(await save, false);
+  assert.equal(app.actionError, "");
+  assert.equal(app.busy, false);
+}));
+
+test("known commit preserves routing draft and friends warn without replay; failed writes stay failed", () => scenario(async app => {
+  let writes = 0;
+  api.routing.save = async () => { writes++; throw new ApiError("refresh failed", 500, undefined, "committed"); };
+  const previous = status.routing.config;
+  let draft = { ...previous, default_target: "block" };
+  if (!await app.saveRouting(draft)) draft = previous;
+  assert.equal(draft.default_target, "block");
+  assert.equal(app.actionError, "");
+  assert.notEqual(app.actionWarning, "");
+  await app.refresh();
+  assert.equal(writes, 1);
+  api.servers.createFriend = async () => { writes++; throw new ApiError("refresh failed", 500, undefined, "committed"); };
+  assert.equal(await app.createFriend("key", "Friend"), null);
+  assert.notEqual(app.actionWarning, "");
+  assert.equal(writes, 2);
+  api.routing.save = async () => { throw new ApiError("write rejected", 500); };
+  assert.equal(await app.saveRouting(draft), false);
+  assert.notEqual(app.actionWarning, "");
+  assert.equal(app.actionError, "write rejected");
+  await app.refresh();
+  assert.notEqual(app.actionWarning, "", "local status cannot resolve a managed-server warning");
+  const inspect = api.servers.inspect;
+  try {
+    api.servers.inspect = async () => { throw new ApiError("observation failed", 500); };
+    assert.equal(await app.inspectServer("key"), null);
+    assert.notEqual(app.actionWarning, "");
+    api.servers.inspect = async () => ({ version: "0.5.15", peers: [] });
+    await app.inspectServer("other-key");
+    assert.notEqual(app.actionWarning, "");
+    await app.inspectServer("key");
+    assert.equal(app.actionWarning, "");
+  } finally { api.servers.inspect = inspect; }
+}));
+
+test("managed inspection and write deadlines release the global coordinator after stalled headers/body", () => scenario(async app => {
+  const originalFetch = globalThis.fetch;
+  const originalTimeout = globalThis.setTimeout;
+  try {
+    for (const phase of ["headers", "body"]) {
+      for (const [operation, deadline] of [
+        [() => app.inspectServer("key"), 150_000],
+        [() => app.restartServer("key"), 300_000],
+        [() => app.updateManagedServer("key"), 1_200_000],
+      ]) {
+        let calls = 0;
+        globalThis.setTimeout = (callback, milliseconds) => {
+          assert.equal(milliseconds, deadline);
+          return originalTimeout(callback, 0);
+        };
+        globalThis.fetch = async (_url, init) => {
+          calls++;
+          const signal = init.signal;
+          assert.equal(init.method, "POST");
+          if (phase === "headers") return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+          return new Response(new ReadableStream({ start(controller) {
+            signal.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+          } }));
+        };
+        assert.equal(await operation(), null);
+        assert.equal(app.busy, false);
+        assert.match(app.actionError, /Результат операции неизвестен/);
+        assert.equal(app.actionWarning, "");
+        assert.equal(calls, 1);
+      }
+    }
+  } finally { globalThis.fetch = originalFetch; globalThis.setTimeout = originalTimeout; }
+}));

@@ -1,0 +1,108 @@
+#!/bin/sh
+set -eu
+
+die() { echo "gofro network: $*" >&2; exit 1; }
+
+optional_field() {
+	# Native jsonfilter returns 1 for no matches AND malformed JSON. Validate first.
+	[ "$(printf '%s' "$1" | jsonfilter -t '@' 2>/dev/null)" = object ] || die 'invalid network status JSON'
+	printf '%s' "$1" | jsonfilter -e "$2" 2>/dev/null ||
+		[ "$?" = 1 ] || die "cannot read optional network field $2"
+}
+
+# LAN is the OpenWrt logical LAN. Gofro supports any address/device behind it,
+# never a WAN/PPPoE logical interface selected through its own configuration.
+[ -z "$(uci -q get gofro.main.lan_network 2>/dev/null || true)" ] || die 'lan_network is unsupported; use OpenWrt logical lan'
+status="$(ubus call network.interface.lan status 2>/dev/null)" || die 'cannot read network.interface.lan'
+up="$(printf '%s' "$status" | jsonfilter -e '@.up' 2>/dev/null)" || die 'LAN has no valid up status'
+proto="$(printf '%s' "$status" | jsonfilter -e '@.proto' 2>/dev/null)" || die 'LAN has no valid protocol'
+[ -n "$proto" ] || die 'LAN has no valid protocol'
+[ "$up" = true ] || die 'LAN is not up'
+[ "$proto" != pppoe ] || die 'LAN cannot use PPPoE'
+address="$(printf '%s' "$status" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)" || die 'LAN has no valid primary IPv4 address'
+prefix="$(printf '%s' "$status" | jsonfilter -e '@["ipv4-address"][0].mask' 2>/dev/null)" || die 'LAN has no valid IPv4 prefix'
+device="$(printf '%s' "$status" | jsonfilter -e '@.l3_device' 2>/dev/null)" || die 'LAN has no valid l3_device'
+case "$address" in ''|*[!0-9.]*|.*|*..*|*.) die 'LAN has no valid primary IPv4 address' ;; esac
+IFS=. read -r octet1 octet2 octet3 octet4 extra <<EOF
+$address
+EOF
+[ -z "${extra:-}" ] || die 'LAN has no valid primary IPv4 address'
+for octet in "$octet1" "$octet2" "$octet3" "$octet4"; do
+	case "$octet" in ''|*[!0-9]*|0[0-9]*) die 'LAN has no valid primary IPv4 address' ;; esac
+	[ "$octet" -le 255 ] || die 'LAN has no valid primary IPv4 address'
+done
+case "$prefix" in ''|*[!0-9]*) die 'LAN has no valid IPv4 prefix' ;; esac
+if [ "$prefix" -lt 0 ] || [ "$prefix" -gt 32 ]; then die 'LAN has no valid IPv4 prefix'; fi
+case "$device" in ''|*[!A-Za-z0-9_.-]*|????????????????*) die 'LAN has no valid l3_device' ;; esac
+
+# Compare both configured and live identities: DHCP and down WANs count too.
+lan_device="$(optional_field "$status" '@.device')" || exit 1
+lan_devices="$device $lan_device $(uci -q get network.lan.device || true) $(uci -q get network.lan.ifname || true)"
+device_status="$(ubus call network.device status "{\"name\":\"$device\"}" 2>/dev/null)" || die 'cannot read LAN device membership'
+members="$(optional_field "$device_status" '@["bridge-members"][*]')" || exit 1
+lan_devices="$lan_devices $members"
+case " $lan_devices " in *' @wan '*|*' @wan6 '*) die 'LAN aliases WAN' ;; esac
+wan_known=
+for wan in wan wan6; do
+	wan_status="$(ubus call "network.interface.$wan" status 2>/dev/null)" || {
+		[ -z "$(uci -q get "network.$wan" || true)" ] || die "cannot establish $wan device identity"
+		continue
+	}
+	wan_l3="$(optional_field "$wan_status" '@.l3_device')" || exit 1
+	wan_device="$(optional_field "$wan_status" '@.device')" || exit 1
+	wan_devices="$wan_l3 $wan_device $(uci -q get "network.$wan.device" || true) $(uci -q get "network.$wan.ifname" || true)"
+	[ -n "$(printf '%s' "$wan_devices" | tr -d '[:space:]')" ] || die "cannot establish $wan device identity"
+	wan_members=
+	for candidate in $wan_devices; do
+		case "$candidate" in @*) continue ;; *[!A-Za-z0-9_.-]*|????????????????*) die "$wan has an invalid device identity" ;; esac
+		device_status="$(ubus call network.device status "{\"name\":\"$candidate\"}" 2>/dev/null)" || die "cannot read $wan device membership"
+		members="$(optional_field "$device_status" '@["bridge-members"][*]')" || exit 1
+		wan_members="$wan_members $members"
+	done
+	for candidate in $wan_devices $wan_members; do
+		case "$candidate" in
+			@wan) [ -n "$wan_known" ] || die "$wan has an unresolved WAN alias" ;;
+			@*) die "$wan has an ambiguous interface alias: $candidate" ;;
+		esac
+		for lan in $lan_devices; do
+			[ "$candidate" != "$lan" ] || die "LAN shares device $candidate with $wan"
+		done
+	done
+	[ "$wan" != wan ] || wan_known=1
+done
+
+firewall="$(uci show firewall)" || die 'cannot read firewall configuration'
+for section in $(printf '%s\n' "$firewall" | sed -n 's/^firewall\.\([^=]*\)=defaults$/\1/p'); do
+	for option in flow_offloading flow_offloading_hw; do
+		value="$(uci -q get "firewall.$section.$option" || true)"
+		case "$value" in ''|0|off|false|no) ;; *) die "fw4 $option is incompatible with Gofro's packet guard; disable it in OpenWrt before activation" ;; esac
+	done
+done
+
+ipcalc=${GOFRO_IPCALC:-/bin/ipcalc.sh}; [ -x "$ipcalc" ] || ipcalc=/usr/bin/ipcalc.sh
+network="$("$ipcalc" "$address/$prefix" 2>/dev/null | sed -n 's/^NETWORK=//p' | tr -d "'")"
+case "$network" in ''|*[!0-9.]*|.*|*..*|*.) die 'cannot derive canonical LAN subnet' ;; esac
+subnet="$network/$prefix"
+overlap="$(awk -v ip="$address" -v prefix="$prefix" 'BEGIN {
+ split(ip,a,"."); value=a[1]*16777216+a[2]*65536+a[3]*256+a[4]; size=2^(32-prefix); first=int(value/size)*size; last=first+size-1
+ if ((first <= 181010687 && last >= 181010432) || (first <= 3323199487 && last >= 3323068416)) print "yes"
+}')"
+[ -z "$overlap" ] || die "LAN subnet overlaps Gofro-reserved space: $subnet"
+
+zone=
+for section in $(printf '%s\n' "$firewall" | sed -n 's/^firewall\.\([^=]*\)=zone$/\1/p'); do
+	members="$(uci -q get "firewall.$section.network" 2>/dev/null || true)"
+	case " $members " in *' lan '*) ;; *) continue ;; esac
+	[ -z "$zone" ] || die 'LAN belongs to multiple firewall zones'
+	[ "$members" = lan ] || die 'LAN firewall zone is not exclusive to logical lan'
+	[ -z "$(uci -q get "firewall.$section.device" || true)$(uci -q get "firewall.$section.subnet" || true)" ] || die 'LAN firewall zone has ambiguous device/subnet membership'
+	zone="$(uci -q get "firewall.$section.name" || true)"
+	if [ "$zone" = wan ] || [ "$zone" = wan6 ]; then die 'LAN uses a WAN firewall zone'; fi
+done
+case "$zone" in ''|*[!A-Za-z0-9_.-]*|????????????????*) die 'LAN has no valid firewall zone' ;; esac
+count=0
+for section in $(printf '%s\n' "$firewall" | sed -n 's/^firewall\.\([^=]*\)=zone$/\1/p'); do
+	[ "$(uci -q get "firewall.$section.name" || true)" != "$zone" ] || count=$((count + 1))
+done
+[ "$count" = 1 ] || die 'LAN firewall zone name is ambiguous'
+printf '{"device":"%s","address":"%s","subnet":"%s","prefix":%s,"zone":"%s"}\n' "$device" "$address" "$subnet" "$prefix" "$zone"

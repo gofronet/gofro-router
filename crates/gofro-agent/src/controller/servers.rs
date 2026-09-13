@@ -1,11 +1,11 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 
-use super::mode::switch_mode;
+use super::{Change, update_config};
+
 use crate::{
     AppState,
-    config::{normalize_server_name, parse_server_profile, save, validate_server},
+    config::{normalize_server_name, parse_server_profile, validate_server},
     model::{ControllerConfig, ServerProfile, ServerUpdate},
-    network::select_server_peer,
 };
 
 pub(crate) fn import_server(state: &AppState, name: String, profile: String) -> Result<()> {
@@ -15,42 +15,29 @@ pub(crate) fn import_server(state: &AppState, name: String, profile: String) -> 
 
 pub(crate) fn upsert_server(state: &AppState, server: ServerProfile) -> Result<()> {
     validate_server(&server)?;
-    let mut config = state
-        .config
-        .lock()
-        .map_err(|_| anyhow!("configuration lock poisoned"))?;
-    let Some((next, previous, reconnect, index)) = replace_imported_server(&config, &server) else {
-        drop(config);
-        return add_server(state, server);
-    };
-    if reconnect {
-        select_server_peer(state, &next.servers[index])?;
-    }
-
-    if let Err(error) = save(&state.config_path, &next) {
-        if reconnect {
-            return match select_server_peer(state, &previous) {
-                Ok(()) => Err(error),
-                Err(rollback) => Err(anyhow!(
-                    "configuration save failed: {error:#}; server rollback failed: {rollback:#}"
-                )),
-            };
+    update_config(state, |config| {
+        if let Some((next, reconnect)) = replace_imported_server(config, &server) {
+            *config = next;
+            Ok(if reconnect {
+                Change::Network
+            } else {
+                Change::Config
+            })
+        } else {
+            insert_server(config, server)
         }
-        return Err(error);
-    }
-    *config = next;
-    Ok(())
+    })
 }
 
 fn replace_imported_server(
     config: &ControllerConfig,
     server: &ServerProfile,
-) -> Option<(ControllerConfig, ServerProfile, bool, usize)> {
+) -> Option<(ControllerConfig, bool)> {
     let index = config
         .servers
         .iter()
         .position(|item| item.public_key == server.public_key)?;
-    let previous = config.servers[index].clone();
+    let previous = &config.servers[index];
     let reconnect =
         config.vpn_enabled && config.active_server_key.as_deref() == Some(&server.public_key);
     let mut next = config.clone();
@@ -61,15 +48,15 @@ fn replace_imported_server(
     }
     server.emoji = previous.emoji.clone();
     next.servers[index] = server;
-    Some((next, previous, reconnect, index))
+    Some((next, reconnect))
 }
 
 pub(crate) fn add_server(state: &AppState, server: ServerProfile) -> Result<()> {
     validate_server(&server)?;
-    let mut config = state
-        .config
-        .lock()
-        .map_err(|_| anyhow!("configuration lock poisoned"))?;
+    update_config(state, |config| insert_server(config, server))
+}
+
+fn insert_server(config: &mut ControllerConfig, server: ServerProfile) -> Result<Change> {
     if config
         .servers
         .iter()
@@ -78,170 +65,110 @@ pub(crate) fn add_server(state: &AppState, server: ServerProfile) -> Result<()> 
         bail!("сервер с таким public key уже существует");
     }
 
-    let mut next = config.clone();
-    if next.active_server_key.is_none() {
-        next.active_server_key = Some(server.public_key.clone());
+    let becomes_active = config.active_server_key.is_none();
+    if becomes_active {
+        config.active_server_key = Some(server.public_key.clone());
     }
-    next.servers.push(server);
-    save(&state.config_path, &next)?;
-    *config = next;
-    Ok(())
+    config.servers.push(server);
+    Ok(if becomes_active && config.vpn_enabled {
+        Change::Network
+    } else {
+        Change::Config
+    })
 }
 
 pub(crate) fn update_server(state: &AppState, mut update: ServerUpdate) -> Result<()> {
     normalize_server_name(&mut update.name)?;
-    let mut config = state
-        .config
-        .lock()
-        .map_err(|_| anyhow!("configuration lock poisoned"))?;
-    let index = config
-        .servers
-        .iter()
-        .position(|server| server.public_key == update.previous_public_key)
-        .context("сервер не найден")?;
-    let mut server = config.servers[index].clone();
-    if server.management.is_some()
-        && (server.endpoint != update.endpoint || server.public_key != update.public_key)
-    {
-        bail!("нельзя изменить endpoint или public key управляемого сервера");
-    }
-    server.name = update.name;
-    server.endpoint = update.endpoint;
-    server.public_key = update.public_key;
-    if let Some(emoji) = update.emoji {
-        server.emoji = emoji;
-    }
-    validate_server(&server)?;
-    if config
-        .servers
-        .iter()
-        .enumerate()
-        .any(|(other, item)| other != index && item.public_key == server.public_key)
-    {
-        bail!("сервер с таким public key уже существует");
-    }
-
-    let previous = config.clone();
-    let was_active = config.active_server_key.as_deref() == Some(&update.previous_public_key);
-    let connection_changed = config.servers[index].endpoint != server.endpoint
-        || config.servers[index].public_key != server.public_key;
-    if was_active && config.vpn_enabled && connection_changed {
-        select_server_peer(state, &server)?;
-    }
-    if was_active {
-        config.active_server_key = Some(server.public_key.clone());
-    }
-    config.servers[index] = server;
-    if let Err(error) = save(&state.config_path, &config) {
-        *config = previous.clone();
-        if was_active && previous.vpn_enabled && connection_changed {
-            return match select_server_peer(state, &previous.servers[index]) {
-                Ok(()) => Err(error),
-                Err(rollback) => Err(anyhow!(
-                    "configuration save failed: {error:#}; server rollback failed: {rollback:#}"
-                )),
-            };
+    update_config(state, |config| {
+        let index = config
+            .servers
+            .iter()
+            .position(|server| server.public_key == update.previous_public_key)
+            .context("сервер не найден")?;
+        let mut server = config.servers[index].clone();
+        if server.management.is_some()
+            && (server.endpoint != update.endpoint || server.public_key != update.public_key)
+        {
+            bail!("нельзя изменить endpoint или public key управляемого сервера");
         }
-        return Err(error);
-    }
-    Ok(())
+        server.name = update.name;
+        server.endpoint = update.endpoint;
+        server.public_key = update.public_key;
+        if let Some(emoji) = update.emoji {
+            server.emoji = emoji;
+        }
+        validate_server(&server)?;
+        if config
+            .servers
+            .iter()
+            .enumerate()
+            .any(|(other, item)| other != index && item.public_key == server.public_key)
+        {
+            bail!("сервер с таким public key уже существует");
+        }
+
+        let was_active = config.active_server_key.as_deref() == Some(&update.previous_public_key);
+        let connection_changed = config.servers[index].endpoint != server.endpoint
+            || config.servers[index].public_key != server.public_key;
+        if was_active {
+            config.active_server_key = Some(server.public_key.clone());
+        }
+        config.servers[index] = server;
+        Ok(if was_active && config.vpn_enabled && connection_changed {
+            Change::Network
+        } else {
+            Change::Config
+        })
+    })
 }
 
 pub(crate) fn select_server(state: &AppState, public_key: &str) -> Result<()> {
-    let mut config = state
-        .config
-        .lock()
-        .map_err(|_| anyhow!("configuration lock poisoned"))?;
-    let server = config
-        .servers
-        .iter()
-        .find(|server| server.public_key == public_key)
-        .context("сервер не найден")?
-        .clone();
-    if config.active_server_key.as_deref() == Some(public_key) {
-        return Ok(());
-    }
-
-    let previous_key = config.active_server_key.clone();
-    let previous_server = previous_key
-        .as_deref()
-        .and_then(|key| {
-            config
-                .servers
-                .iter()
-                .find(|server| server.public_key == key)
-        })
-        .cloned();
-    if config.vpn_enabled {
-        select_server_peer(state, &server)?;
-    }
-    config.active_server_key = Some(server.public_key);
-    if let Err(error) = save(&state.config_path, &config) {
-        config.active_server_key = previous_key;
-        if let (true, Some(previous_server)) = (config.vpn_enabled, previous_server) {
-            return match select_server_peer(state, &previous_server) {
-                Ok(()) => Err(error),
-                Err(rollback) => Err(anyhow!(
-                    "configuration save failed: {error:#}; server rollback failed: {rollback:#}"
-                )),
-            };
+    update_config(state, |config| {
+        let server = config
+            .servers
+            .iter()
+            .find(|server| server.public_key == public_key)
+            .context("сервер не найден")?
+            .clone();
+        if config.active_server_key.as_deref() == Some(public_key) {
+            return Ok(Change::Config);
         }
-        return Err(error);
-    }
-    Ok(())
+
+        config.active_server_key = Some(server.public_key);
+        Ok(if config.vpn_enabled {
+            Change::Network
+        } else {
+            Change::Config
+        })
+    })
 }
 
 pub(crate) fn delete_server(state: &AppState, public_key: &str) -> Result<()> {
-    let _update = state.fake_dns.begin_update()?;
-    let mut config = state
-        .config
-        .lock()
-        .map_err(|_| anyhow!("configuration lock poisoned"))?;
-    let previous = config.clone();
-    let mut next = previous.clone();
-    let original_len = next.servers.len();
-    next.servers
-        .retain(|server| server.public_key != public_key);
-    if next.servers.len() == original_len {
-        bail!("сервер не найден");
-    }
+    update_config(state, |config| {
+        // Preserve legacy profile pins before removing their only stored copy.
+        crate::managed::preserve_host_pins(&state.management_dir, config)?;
+        let original_len = config.servers.len();
+        config
+            .servers
+            .retain(|server| server.public_key != public_key);
+        if config.servers.len() == original_len {
+            bail!("сервер не найден");
+        }
 
-    if next.active_server_key.as_deref() == Some(public_key) {
-        next.active_server_key = next.servers.first().map(|server| server.public_key.clone());
-        if next.vpn_enabled {
-            if let Some(server) = next.servers.first() {
-                if let Err(error) = select_server_peer(state, server) {
-                    return match switch_mode(state, &previous, previous.vpn_enabled) {
-                        Ok(()) => Err(error),
-                        Err(rollback) => Err(anyhow!(
-                            "server switch failed: {error:#}; rollback failed: {rollback:#}"
-                        )),
-                    };
+        if config.active_server_key.as_deref() == Some(public_key) {
+            config.active_server_key = config
+                .servers
+                .first()
+                .map(|server| server.public_key.clone());
+            if config.vpn_enabled {
+                if config.servers.is_empty() {
+                    bail!("сначала отключите VPN, затем удалите последний сервер");
                 }
-            } else {
-                next.vpn_enabled = false;
-                if let Err(error) = switch_mode(state, &next, false) {
-                    return match switch_mode(state, &previous, previous.vpn_enabled) {
-                        Ok(()) => Err(error),
-                        Err(rollback) => Err(anyhow!(
-                            "mode switch failed: {error:#}; rollback failed: {rollback:#}"
-                        )),
-                    };
-                }
+                return Ok(Change::Network);
             }
         }
-    }
-
-    if let Err(error) = save(&state.config_path, &next) {
-        return match switch_mode(state, &previous, previous.vpn_enabled) {
-            Ok(()) => Err(error),
-            Err(rollback) => Err(anyhow!(
-                "configuration save failed: {error:#}; server rollback failed: {rollback:#}"
-            )),
-        };
-    }
-    *config = next;
-    Ok(())
+        Ok(Change::Config)
+    })
 }
 
 #[cfg(test)]
@@ -280,7 +207,7 @@ mod tests {
             management: None,
         };
 
-        let (next, previous, reconnect, _) = replace_imported_server(&config, &new).unwrap();
+        let (next, reconnect) = replace_imported_server(&config, &new).unwrap();
         assert!(reconnect);
         assert_eq!(next.servers.len(), 1);
         assert_eq!(next.servers[0].name, "New");
@@ -292,7 +219,10 @@ mod tests {
             next.servers[0].client_private_key.as_deref(),
             Some("new-private")
         );
-        assert_eq!(previous.client_private_key.as_deref(), Some("old-private"));
+        assert_eq!(
+            config.servers[0].client_private_key.as_deref(),
+            Some("old-private")
+        );
         assert!(next.servers[0].management.is_some());
         assert_eq!(next.servers[0].emoji, "🛰");
     }

@@ -30,6 +30,17 @@ export const serverProbeSchema = z.object({
   fingerprint: z.string(),
 });
 
+export const vpsHostInputSchema = z.ipv4({ error: "Введите публичный IPv4-адрес VPS. IPv6 не поддерживается; получите IPv4 у провайдера VPS." }).refine(value => {
+  const [a, b, c] = value.split(".").map(Number);
+  return ![0, 10, 127].includes(a) && a < 224
+    && !(a === 100 && b >= 64 && b <= 127)
+    && !(a === 169 && b === 254)
+    && !(a === 172 && b >= 16 && b <= 31)
+    && !(a === 192 && (b === 0 || b === 168 || (b === 88 && c === 99)))
+    && !(a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100)))
+    && !(a === 203 && b === 0 && c === 113);
+}, "Введите публичный IPv4-адрес VPS из панели провайдера, без ведущих нулей.");
+
 export const serverVersionSchema = z.object({
   version: z.string(),
   update_available: z.boolean(),
@@ -38,6 +49,12 @@ export const serverVersionSchema = z.object({
 export const profileSchema = z.object({ profile: z.string() });
 
 export const authStatusSchema = z.union([
+  z.object({
+    state: z.literal("setup"),
+    csrf_token: z.string(),
+    setup_method: z.literal("code"),
+    setup_window_seconds: z.number().int().nonnegative(),
+  }),
   z.object({
     state: z.literal("setup"),
     csrf_token: z.string(),
@@ -55,6 +72,7 @@ export const authStatusSchema = z.union([
 
 export const wifiBandSchema = z.enum(["2g", "5g"]);
 
+// Legacy Wi-Fi states remain parseable for the paused development mock only.
 export const onboardingStatusSchema = z.object({
   step: z.enum(["admin", "wifi", "wifi_applying", "server", "complete"]),
   networks: z.array(z.object({ band: wifiBandSchema, ssid: z.string() })),
@@ -74,9 +92,9 @@ export const historyPointSchema = z.object({
   timestamp: z.number(),
   rx_bps: z.number(),
   tx_bps: z.number(),
-  load_percent: z.number(),
-  memory_percent: z.number(),
-  temperature_c: z.number().nullable(),
+  load_percent: z.number().optional(),
+  memory_percent: z.number().optional(),
+  temperature_c: z.number().nullable().optional(),
 });
 
 export const deviceSchema = z.object({
@@ -95,6 +113,12 @@ export const deviceSchema = z.object({
 });
 
 export const routeTargetSchema = z.enum(["direct", "vpn", "block"]);
+// Rust str::trim uses Unicode White_Space, unlike JavaScript trim (NEL/BOM differ).
+export const routingNameInputSchema = z.string()
+  .transform(value => value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, ""))
+  .refine(value => Array.from(value).length >= 1 && Array.from(value).length <= 64
+    && !/[\p{Cc}\p{Cs}]/u.test(value),
+  "Название правила должно содержать от 1 до 64 символов без управляющих знаков.");
 export const domainRuleSchema = z.object({
   name: z.string(),
   enabled: z.boolean(),
@@ -120,6 +144,12 @@ export const routingConfigSchema = z.object({
   domain_rules: z.array(domainRuleSchema),
   ip_rules: z.array(ipRuleSchema),
   default_target: routeTargetSchema,
+});
+export const domainRuleInputSchema = domainRuleSchema.extend({ name: routingNameInputSchema });
+export const ipRuleInputSchema = ipRuleSchema.extend({ name: routingNameInputSchema });
+export const routingConfigInputSchema = routingConfigSchema.extend({
+  domain_rules: z.array(domainRuleInputSchema),
+  ip_rules: z.array(ipRuleInputSchema),
 });
 export const routingTestSchema = z.object({
   value: z.string(),
@@ -161,7 +191,7 @@ export const statusSchema = z.object({
   interface: z.string(),
   active_server_key: z.string().nullable(),
   servers: z.array(serverSchema),
-  ap: apStatusSchema,
+  ap: apStatusSchema.optional().default({ networks: [], address: "", domain: "" }),
   peer: z.object({
     public_key: z.string(),
     endpoint: z.string().nullable(),
@@ -175,14 +205,14 @@ export const statusSchema = z.object({
   stats: z.object({
     rx_bps: z.number(),
     tx_bps: z.number(),
-    load_percent: z.number(),
-    memory_percent: z.number(),
-    temperature_c: z.number().nullable(),
-    uptime_seconds: z.number(),
-    wifi_clients: z.number(),
+    load_percent: z.number().optional(),
+    memory_percent: z.number().optional(),
+    temperature_c: z.number().nullable().optional(),
+    uptime_seconds: z.number().optional(),
+    wifi_clients: z.number().optional(),
   }),
   history: z.array(historyPointSchema),
-  devices: z.array(deviceSchema),
+  devices: z.array(deviceSchema).default([]),
   routing: z.object({
     config: routingConfigSchema,
     dns_active: z.boolean(),
@@ -199,7 +229,20 @@ export const serverInputSchema = serverSchema.pick({
   endpoint: true,
   public_key: true,
   emoji: true,
+}).extend({
+  endpoint: z.string().refine(value => !/[:\[\]]/.test(value.slice(0, value.lastIndexOf(":"))),
+    "IPv6 endpoint не поддерживается. Укажите IPv4-адрес или имя сервера с IPv4 в формате host:port."),
 });
+export const bootstrapStageSchema = z.enum([
+  "waiting", "host_key", "connect", "inspect", "install", "authorize", "profile", "save",
+]);
+export const bootstrapEventSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("stage"), stage: bootstrapStageSchema }).strict(),
+  z.object({ type: z.literal("complete"), status: statusSchema }).strict(),
+  z.object({ type: z.literal("error"), stage: bootstrapStageSchema, message: z.string().trim().min(1).max(4096) }).strict(),
+]);
+export type BootstrapStage = z.infer<typeof bootstrapStageSchema>;
+export type BootstrapEvent = z.infer<typeof bootstrapEventSchema>;
 export const profileInputSchema = z.object({
   name: z.string(),
   profile: z.string(),

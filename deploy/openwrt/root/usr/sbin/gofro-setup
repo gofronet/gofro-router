@@ -1,146 +1,84 @@
 #!/bin/sh
 set -eu
 
-die() {
-	echo "error: $*" >&2
-	exit 1
-}
-
+die() { echo "error: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || die 'run as root'
-[ "$#" = 1 ] || die 'usage: gofro-setup COUNTRY (for example: DE)'
-case "$1" in
-	[A-Z][A-Z]) country="$1" ;;
-	*) die 'country must be a two-letter uppercase code' ;;
-esac
+[ "$#" -le 1 ] || die 'usage: gofro-setup [COUNTRY]'
+if [ "$#" = 1 ]; then case "$1" in [A-Z][A-Z]) ;; *) die 'country must be a two-letter uppercase code' ;; esac; fi
+lock=/tmp/gofro-setup.lock
+mkdir "$lock" 2>/dev/null || die 'another setup is running'
+trap 'rmdir "$lock"' EXIT
+trap 'exit 1' HUP INT TERM
 
-if [ "${GOFRO_INSTALL_QUIET:-}" != 1 ]; then
-	log=$(mktemp /tmp/gofro-install.XXXXXX)
-	chmod 600 "$log"
-	if GOFRO_INSTALL_QUIET=1 sh "$0" "$@" > "$log" 2>&1; then
-		printf '%s\n' 'GofroNET Wi-Fi Setup' 'https://wifi.gofro.net'
-		exit 0
-	fi
-	die "installation failed; see $log"
-fi
+state_dir=/etc/gofro; marker=$state_dir/openwrt-owned-v16; state=$state_dir/onboarding-state; window=$state_dir/onboarding-window
+[ ! -e "$state_dir/routing-legacy.json" ] || die 'fresh setup cannot adopt legacy routing history'
+interface="$(uci -q get gofro.main.interface || printf '%s' gt0)"
+[ "$interface" = gt0 ] || die 'Gofro only owns the gt0 interface'
+[ ! -e "$marker" ] || [ "$(cat "$marker")" = "$interface" ] || die 'invalid Gofro ownership marker'
+[ ! -e "$state_dir/admin-password" ] || die 'an administrator is already configured'
+[ ! -e "$state" ] || [ "$(cat "$state")" = admin ] || die 'finish legacy onboarding manually before setup'
+uci -q get network.gofro_setup >/dev/null && die 'finish legacy setup manually in OpenWrt before continuing'
+[ ! -d /sys/class/net/br-gofro-setup ] || die 'finish legacy setup manually in OpenWrt before continuing'
 
-if [ -e /etc/gofro/onboarding-state ]; then
-	case "$(cat /etc/gofro/onboarding-state)" in admin|wifi) ;; *) die 'Wi-Fi setup is already applying or complete';; esac
-	/etc/init.d/uhttpd stop || { ! /etc/init.d/uhttpd running || die 'failed to stop the factory web panel'; }
-	/usr/libexec/gofro/onboarding begin
-	/etc/init.d/network reload
-	/etc/init.d/firewall reload
-	/etc/init.d/dnsmasq restart
-	wifi reload
-	/etc/init.d/gofro-onboarding restart
-	/etc/init.d/uhttpd restart
-	/etc/init.d/gofro-agent restart
-	/etc/init.d/gofro-finalize boot
-	exit 0
-fi
-if [ -e /etc/gofro/version ] || [ -e /etc/gofro/admin-password ] || [ -e /etc/gofro/ap-password ]; then
-	die 'existing installation cannot be reset by setup'
-fi
-[ "$(uci -q get network.lan.ipaddr || true)" != 10.203.1.1 ] || die '10.203.1.1 is already assigned to LAN'
-
-interface="$(uci -q get gofro.main.interface || echo gt0)"
-case "$interface" in ''|*[!a-zA-Z0-9_]*) die 'invalid WireGuard interface' ;; esac
-install_version=${GOFRO_INSTALL_VERSION:-}
-
-wifi_sections="$(uci show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p')"
-[ -n "$wifi_sections" ] || die 'OpenWrt has no configured Wi-Fi interface'
-wan_zone="$(uci -q show firewall | sed -n "s/^firewall\.\([^=]*\)\.name='wan'$/\1/p")"
-[ -n "$wan_zone" ] || die 'OpenWrt has no wan firewall zone'
-
-mkdir -p /etc/gofro /etc/wireguard
-chmod 700 /etc/gofro /etc/wireguard
-if [ ! -s /etc/wireguard/client.key ]; then
-	umask 077
-	wg genkey > /etc/wireguard/client.key
-fi
-wg pubkey < /etc/wireguard/client.key > /etc/wireguard/client.pub
-
-uci -q delete "network.$interface" || true
-uci set "network.$interface=interface"
-uci set "network.$interface.proto=wireguard"
-uci batch <<EOF
-set network.$interface.private_key='$(cat /etc/wireguard/client.key)'
-EOF
-uci add_list "network.$interface.addresses=10.202.0.2/32"
-uci set "network.$interface.listen_port=51821"
-uci set "network.$interface.mtu=1280"
-uci set "network.$interface.auto=0"
-
-uci -q del_list "firewall.$wan_zone.network=$interface" || true
-uci -q delete firewall.gofro_vpn || true
-uci set firewall.gofro_vpn='zone'
-uci set firewall.gofro_vpn.name='gofro_vpn'
-uci add_list "firewall.gofro_vpn.network=$interface"
-uci set firewall.gofro_vpn.input='REJECT'
-uci set firewall.gofro_vpn.output='ACCEPT'
-uci set firewall.gofro_vpn.forward='REJECT'
-uci set firewall.gofro_vpn.mtu_fix='1'
-uci set firewall.gofro_vpn.masq='1'
-uci -q delete firewall.gofro_lan_vpn || true
-uci set firewall.gofro_lan_vpn='forwarding'
-uci set firewall.gofro_lan_vpn.src='lan'
-uci set firewall.gofro_lan_vpn.dest='gofro_vpn'
-
-uci set dhcp.lan.start='2'
-uci set dhcp.lan.limit='249'
-uci set dhcp.lan.leasetime='12h'
-uci -q delete dhcp.@dnsmasq[0].server || true
-uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5353'
-uci set dhcp.@dnsmasq[0].noresolv='1'
-uci set dhcp.@dnsmasq[0].localuse='0'
-uci -q del_list dhcp.@dnsmasq[0].address='/gofrowifi.net/10.203.1.1' || true
-uci add_list dhcp.@dnsmasq[0].address='/gofrowifi.net/10.203.1.1'
-uci -q del_list dhcp.@dnsmasq[0].address='/wifi.gofro.net/10.203.1.1' || true
-uci add_list dhcp.@dnsmasq[0].address='/wifi.gofro.net/10.203.1.1'
-uci -q delete uhttpd.main.listen_http || true
-uci add_list uhttpd.main.listen_http='10.203.1.1:81'
-uci -q delete uhttpd.main.listen_https || true
-uci add_list uhttpd.main.listen_https='10.203.1.1:444'
-
-configured_wifi=0
-for section in $wifi_sections; do
-	[ "$(uci -q get "wireless.$section.mode")" = ap ] || continue
-	device="$(uci -q get "wireless.$section.device" || true)"
-	band="$(uci -q get "wireless.$device.band" || true)"
-	case "$band" in 2g|5g) ;; *) continue;; esac
-	[ -z "$device" ] || uci set "wireless.$device.country=$country"
-	configured_wifi=1
+# Do every collision check before generating a key or editing UCI.
+for name in gofro_vpn gofro_lan_vpn gofro_lan_http gofro_lan_https gofro_lan_dns; do
+	if uci -q get "firewall.$name" >/dev/null && [ ! -s "$marker" ]; then die "firewall.$name already exists"; fi
 done
-[ "$configured_wifi" = 1 ] || die 'OpenWrt has no supported Wi-Fi access point'
+if uci -q get "network.$interface" >/dev/null && [ ! -s "$marker" ]; then die "network.$interface already exists"; fi
+[ ! -e /etc/wireguard/client.key ] || [ -s "$marker" ] || die 'existing WireGuard key has no Gofro ownership marker'
+[ ! -e /etc/wireguard/client.pub ] || [ -s "$marker" ] || die 'existing WireGuard public key has no Gofro ownership marker'
+[ ! -e "$state_dir/guard-device" ] || [ -s "$marker" ] || die 'existing boot guard has no Gofro setup ownership marker'
 
-uci commit network
-uci commit firewall
-uci commit dhcp
-uci commit wireless
-uci commit uhttpd
-/etc/init.d/gofro-relay enable
-/etc/init.d/gofro-agent enable
-/etc/init.d/gofro-onboarding enable
-/usr/bin/gofro-agent --init-security >/dev/null
-if [ -n "$install_version" ]; then
-	printf '%s\n' "$install_version" > /etc/gofro/install-pending.new
-	chmod 600 /etc/gofro/install-pending.new
-	mv -f /etc/gofro/install-pending.new /etc/gofro/install-pending
-	sync
+rollback() {
+	status=$?; trap - EXIT HUP INT TERM; set +e
+	# Keep ownership, keys and the enabled boot guard so retry can finish partial writes.
+	if [ "$status" != 0 ]; then
+		[ -s "$state_dir/guard-device" ] || echo 'warning: boot guard is not persisted; retry setup before relying on reboot protection' >&2
+		/etc/init.d/gofro-agent stop
+		/etc/init.d/gofro-relay stop
+	fi
+	rmdir "$lock"
+	exit "$status"
+}
+trap rollback EXIT
+trap 'exit 1' HUP INT TERM
+
+mkdir -p "$state_dir" /etc/wireguard; chmod 700 "$state_dir"; umask 077
+printf '%s\n' "$interface" > "$marker.new"; mv -f "$marker.new" "$marker"; sync
+/etc/init.d/gofro-guard enable
+snapshot="$(/usr/libexec/gofro/guard prepare)"
+device="$(printf '%s' "$snapshot" | jsonfilter -e '@.device')"; subnet="$(printf '%s' "$snapshot" | jsonfilter -e '@.subnet')"
+/usr/libexec/gofro/mode check "$device" "$subnet"
+address="$(printf '%s' "$snapshot" | jsonfilter -e '@.address')"; zone="$(printf '%s' "$snapshot" | jsonfilter -e '@.zone')"
+if [ ! -s /etc/wireguard/client.key ]; then
+	wg genkey > /etc/wireguard/client.key.new; mv -f /etc/wireguard/client.key.new /etc/wireguard/client.key
 fi
-# Do not expose the still-running factory listeners on the passwordless setup AP.
-/etc/init.d/uhttpd stop || { ! /etc/init.d/uhttpd running || die 'failed to stop the factory web panel'; }
-GOFRO_ONBOARDING_FRESH=1 /usr/libexec/gofro/onboarding begin
-/etc/init.d/gofro-onboarding start
+wg pubkey < /etc/wireguard/client.key > /etc/wireguard/client.pub.new; mv -f /etc/wireguard/client.pub.new /etc/wireguard/client.pub
+uci set "network.$interface=interface"; uci set "network.$interface.proto=wireguard"; uci set "network.$interface.private_key=$(cat /etc/wireguard/client.key)"
+if uci -q get "network.$interface.addresses" >/dev/null; then uci delete "network.$interface.addresses"; fi
+uci add_list "network.$interface.addresses=10.202.0.2/32"; uci set "network.$interface.listen_port=51821"; uci set "network.$interface.mtu=1280"; uci set "network.$interface.auto=0"; uci commit network
+uci set firewall.gofro_vpn='zone'; uci set firewall.gofro_vpn.name='gofro_vpn'
+if uci -q get firewall.gofro_vpn.network >/dev/null; then uci delete firewall.gofro_vpn.network; fi
+uci add_list firewall.gofro_vpn.network="$interface"
+uci set firewall.gofro_vpn.input=REJECT; uci set firewall.gofro_vpn.output=ACCEPT; uci set firewall.gofro_vpn.forward=REJECT; uci set firewall.gofro_vpn.mtu_fix=1; uci set firewall.gofro_vpn.masq=1
+uci set firewall.gofro_lan_vpn='forwarding'; uci set firewall.gofro_lan_vpn.src="$zone"; uci set firewall.gofro_lan_vpn.dest=gofro_vpn
+for rule in http https dns; do case "$rule" in http) proto=tcp; port=8081 ;; https) proto=tcp; port=8443 ;; dns) proto='tcp udp'; port=5353 ;; esac; uci set "firewall.gofro_lan_$rule=rule"; uci set "firewall.gofro_lan_$rule.src=$zone"; uci set "firewall.gofro_lan_$rule.proto=$proto"; uci set "firewall.gofro_lan_$rule.dest_port=$port"; uci set "firewall.gofro_lan_$rule.target=ACCEPT"; done
+uci commit firewall
 
-(
-	sleep 2
-	/etc/init.d/network restart
-	sleep 5
-	/etc/init.d/firewall restart
-	/etc/init.d/dnsmasq restart
-	ln -sf /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf
-	/etc/init.d/sysntpd restart
-	/etc/init.d/uhttpd restart
-	/etc/init.d/gofro-agent restart
-	[ -z "$install_version" ] || /etc/init.d/gofro-finalize boot
-) >/dev/null 2>&1 &
+if [ ! -s "$state_dir/setup-code" ]; then
+	openssl rand -hex 16 > "$state_dir/setup-code.new"; chmod 600 "$state_dir/setup-code.new"; mv -f "$state_dir/setup-code.new" "$state_dir/setup-code"
+fi
+boot="$(cat /proc/sys/kernel/random/boot_id)"; read -r now _ < /proc/uptime; now=${now%%.*}; printf '%s %s\n' "$boot" "$((now + 900))" > "$window.new"; chmod 600 "$window.new"; mv -f "$window.new" "$window"
+printf '%s\n' admin > "$state.new"; chmod 600 "$state.new"; mv -f "$state.new" "$state"; sync
+
+/usr/bin/gofro-agent --https-listen "$address:8443" --init-security >/dev/null
+if [ -n "${GOFRO_INSTALL_VERSION:-}" ]; then
+	printf '%s\n' "$GOFRO_INSTALL_VERSION" > "$state_dir/install-pending.new"; chmod 600 "$state_dir/install-pending.new"; mv -f "$state_dir/install-pending.new" "$state_dir/install-pending"
+fi
+/etc/init.d/firewall reload; /etc/init.d/gofro-relay enable; /etc/init.d/gofro-agent enable; /etc/init.d/gofro-agent restart
+if [ -n "${GOFRO_INSTALL_VERSION:-}" ]; then
+	/etc/init.d/gofro-finalize boot || die 'Gofro did not become healthy'
+fi
+rmdir "$lock"
+trap - EXIT HUP INT TERM
+printf 'Gofro setup URL: https://%s:8443\nSetup code: %s\n' "$address" "$(cat "$state_dir/setup-code")"

@@ -67,6 +67,7 @@ route_release_assets() {
 	[ "$mode" = update ] || return 0
 	[ "$BASE_URL" = "$DEFAULT_BASE_URL" ] || return 0
 	interface="$(uci -q get gofro.main.interface || echo gt0)"
+	[ "$interface" = gt0 ] || return 1
 	ip link show "$interface" >/dev/null 2>&1 || return 0
 	# ponytail: The ISP blocks GitHub's current assets CIDR; update this if GitHub moves it.
 	if ip route add "$GITHUB_ASSETS_CIDR" dev "$interface" 2>/dev/null; then
@@ -107,33 +108,20 @@ detect_platform() {
 }
 
 [ "$(id -u)" = 0 ] || die 'run as root'
-case "${1:-}" in
-	'') mode=update ;;
-	--install)
-		[ "$#" = 2 ] || die 'usage: gofro-update [--install COUNTRY]'
-		case "$2" in [A-Z][A-Z]) country=$2 ;; *) die 'country must be a two-letter uppercase code' ;; esac
-		mode=install
-		;;
-	*) die 'usage: gofro-update [--install COUNTRY]' ;;
+case "$#:${1:-}" in
+	0:) mode=update ;;
+	1:--install) mode=install; country= ;;
+	2:--install) case "$2" in [A-Z][A-Z]) mode=install; country=$2 ;; *) die 'country must be a two-letter uppercase code' ;; esac ;;
+	*) die 'usage: gofro-update [--install [COUNTRY]]' ;;
 esac
-
-if [ "$mode" = install ] && [ "${GOFRO_INSTALL_QUIET:-}" != 1 ]; then
-	log=$(mktemp /tmp/gofro-install.XXXXXX)
-	chmod 600 "$log"
-	if GOFRO_INSTALL_QUIET=1 sh "$0" "$@" > "$log" 2>&1; then
-		printf '%s\n' 'GofroNET Wi-Fi Setup' 'https://wifi.gofro.net'
-		exit 0
-	fi
-	die "installation failed; see $log"
-fi
 if [ -e /etc/gofro/onboarding-state ]; then
 	case "$(cat /etc/gofro/onboarding-state)" in
-		admin|wifi)
-			[ "$mode" = install ] || die 'finish onboarding before updating'
-			/usr/sbin/gofro-setup "$country"
-			exit 0;;
 		server) ;;
-		*) die 'finish onboarding before updating';;
+		admin)
+			if [ "$mode" != install ] || { [ -e /etc/gofro/version ] && [ ! -s /etc/gofro/install-pending ]; }; then
+				die 'setup is already open; use the existing console setup code'
+			fi ;;
+		*) die 'finish legacy onboarding manually before updating';;
 	esac
 fi
 
@@ -142,7 +130,7 @@ MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2; exit }' /proc/meminfo)" || die 
 enough_memory "$MEMORY_KIB" || die 'at least 192 MiB RAM must be visible to OpenWrt'
 
 if [ "$mode" = install ]; then
-	[ ! -e /etc/gofro/version ] || die 'Gofro is already installed'
+	[ ! -e /etc/gofro/version ] || [ -s /etc/gofro/install-pending ] || die 'Gofro is already installed'
 else
 	[ -s "$KEY" ] || die 'update public key is missing'
 fi
@@ -180,11 +168,11 @@ case "$sha256" in ''|*[!0-9a-f]*) die 'release checksum is invalid' ;; esac
 if [ "$mode" = update ]; then
 	IFS= read -r installed < /etc/gofro/version || die 'installed version is missing'
 	valid_version "$installed" || die 'installed version is invalid'
-	if [ "$version" = "$installed" ]; then
+	if [ "$version" = "$installed" ] && [ ! -s /etc/gofro/update-previous ]; then
 		echo "Gofro $installed is up to date"
 		exit 0
 	fi
-	version_newer "$version" "$installed" || die "Gofro $version is older than $installed"
+	[ "$version" = "$installed" ] || version_newer "$version" "$installed" || die "Gofro $version is older than $installed"
 fi
 
 asset_url=$BASE_URL
@@ -198,7 +186,7 @@ tar -xzf "$TMP/$ARCHIVE" -C "$TMP/bundle"
 [ -x "$TMP/bundle/install.sh" ] || die 'release installer is missing'
 [ "$(cat "$TMP/bundle/VERSION")" = "$version" ] || die 'release version mismatch'
 if [ "$mode" = install ]; then
-	"$TMP/bundle/install.sh" "$country"
+	"$TMP/bundle/install.sh" ${country:+"$country"}
 else
 	"$TMP/bundle/install.sh" --update
 fi

@@ -1,6 +1,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
+    net::Ipv4Addr,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::Path,
 };
@@ -19,16 +20,21 @@ use openssl::{
     },
 };
 
-pub(crate) fn ensure(cert: &Path, key: &Path) -> Result<String> {
+pub(crate) fn ensure(cert: &Path, key: &Path, address: Ipv4Addr) -> Result<String> {
     let certificate_tmp = cert.with_extension("new");
     let key_tmp = key.with_extension("new");
     match (cert.exists(), key.exists()) {
         (false, false) => {
             let _ = fs::remove_file(&certificate_tmp);
             let _ = fs::remove_file(&key_tmp);
-            generate(cert, key)?;
+            generate(cert, key, address)?;
         }
-        (true, true) => validate(cert, key)?,
+        (true, true) => {
+            validate(cert, key)?;
+            if !has_address(cert, address)? {
+                generate(cert, key, address)?;
+            }
+        }
         (false, true) if certificate_tmp.exists() => {
             validate(&certificate_tmp, key)?;
             fs::rename(certificate_tmp, cert)?;
@@ -41,10 +47,15 @@ pub(crate) fn ensure(cert: &Path, key: &Path) -> Result<String> {
         }
         _ => bail!("TLS certificate and key must be created together"),
     }
+    validate(cert, key)?;
+    if !has_address(cert, address)? {
+        generate(cert, key, address)?;
+        validate(cert, key)?;
+    }
     fingerprint(&fs::read(cert)?)
 }
 
-fn generate(cert: &Path, key: &Path) -> Result<()> {
+fn generate(cert: &Path, key: &Path, address: Ipv4Addr) -> Result<()> {
     if let Some(parent) = cert.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -52,7 +63,11 @@ fn generate(cert: &Path, key: &Path) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
-    let private = PKey::from_ec_key(EcKey::generate(&group)?)?;
+    let private = if key.exists() {
+        PKey::private_key_from_pem(&fs::read(key)?)?
+    } else {
+        PKey::from_ec_key(EcKey::generate(&group)?)?
+    };
     let mut name = X509NameBuilder::new()?;
     name.append_entry_by_text("CN", "wifi.gofro.net")?;
     let name = name.build();
@@ -79,15 +94,17 @@ fn generate(cert: &Path, key: &Path) -> Result<()> {
     certificate.append_extension(
         SubjectAlternativeName::new()
             .dns("wifi.gofro.net")
-            .ip("10.203.1.1")
+            .ip(&address.to_string())
             .build(&context)?,
     )?;
     certificate.sign(&private, MessageDigest::sha256())?;
     let certificate_tmp = cert.with_extension("new");
     let key_tmp = key.with_extension("new");
     write_private(&certificate_tmp, &certificate.build().to_pem()?)?;
-    write_private(&key_tmp, &private.private_key_to_pem_pkcs8()?)?;
-    fs::rename(key_tmp, key)?;
+    if !key.exists() {
+        write_private(&key_tmp, &private.private_key_to_pem_pkcs8()?)?;
+        fs::rename(key_tmp, key)?;
+    }
     fs::rename(certificate_tmp, cert)?;
     Ok(())
 }
@@ -112,19 +129,22 @@ fn validate(cert: &Path, key: &Path) -> Result<()> {
     if !certificate.public_key()?.public_eq(&private) {
         bail!("TLS certificate does not match private key");
     }
-    let sans = certificate
+    if !certificate
         .subject_alt_names()
-        .context("TLS certificate has no SAN")?;
-    if !sans
+        .context("TLS certificate has no SAN")?
         .iter()
         .any(|san| san.dnsname() == Some("wifi.gofro.net"))
-        || !sans
-            .iter()
-            .any(|san| san.ipaddress() == Some(&[10, 203, 1, 1][..]))
     {
         bail!("TLS certificate SAN is invalid");
     }
     Ok(())
+}
+fn has_address(cert: &Path, address: Ipv4Addr) -> Result<bool> {
+    Ok(X509::from_pem(&fs::read(cert)?)?
+        .subject_alt_names()
+        .context("TLS certificate has no SAN")?
+        .iter()
+        .any(|san| san.ipaddress() == Some(address.octets().as_slice())))
 }
 fn fingerprint(pem: &[u8]) -> Result<String> {
     Ok(X509::from_pem(pem)?
@@ -144,7 +164,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let cert = dir.join("cert.pem");
         let key = dir.join("key.pem");
-        let first = ensure(&cert, &key).unwrap();
+        let first = ensure(&cert, &key, Ipv4Addr::new(192, 168, 0, 1)).unwrap();
         assert_eq!(
             X509::from_pem(&fs::read(&cert).unwrap())
                 .unwrap()
@@ -153,11 +173,28 @@ mod tests {
             "Jan  1 00:00:00 2050 GMT"
         );
         fs::rename(&cert, cert.with_extension("new")).unwrap();
-        assert_eq!(first, ensure(&cert, &key).unwrap());
+        assert_eq!(
+            first,
+            ensure(&cert, &key, Ipv4Addr::new(192, 168, 0, 1)).unwrap()
+        );
         assert_eq!(
             fs::metadata(key).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reissues_for_a_changed_lan_address_with_the_existing_key() {
+        let dir = std::env::temp_dir().join(format!("gofro-tls-address-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let cert = dir.join("cert.pem");
+        let key = dir.join("key.pem");
+        ensure(&cert, &key, Ipv4Addr::new(192, 168, 0, 1)).unwrap();
+        let before = fs::read(&key).unwrap();
+        ensure(&cert, &key, Ipv4Addr::new(192, 168, 1, 1)).unwrap();
+        assert_eq!(before, fs::read(&key).unwrap());
+        assert!(has_address(&cert, Ipv4Addr::new(192, 168, 1, 1)).unwrap());
         fs::remove_dir_all(dir).unwrap();
     }
 }

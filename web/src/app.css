@@ -76,9 +76,6 @@
   .nav-link:hover, .nav-link.active { color: var(--fg); background: var(--bg); }
   .nav-link.active { background: oklch(from var(--bg) calc(l - .035) c h); }
   .nav-link.active::after { width: 4px; height: 4px; margin-left: auto; border-radius: 50%; background: currentColor; content: ""; }
-  .side-bottom { margin-top: auto; padding: 16px 12px 0; }
-  .router-label { display: flex; align-items: center; gap: 11px; border-top: 1px solid var(--border); padding-top: 18px; }
-  .router-label .icon { color: var(--muted); }
   .workspace { min-height: 100vh; margin-left: 216px; }
   .topbar { display: flex; height: 69px; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); background: var(--bg); padding: 0 44px; }
   .breadcrumb { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
@@ -96,6 +93,9 @@
   .grid-two { margin-top: 20px; }
   .system-grid { grid-template-columns: 1.35fr 1fr; }
   .overview-summary-grid, .system-summary-grid { align-items: stretch; }
+  .overview-summary-grid { margin-top: 20px; }
+  .overview-summary-grid > .panel { display: flex; flex-direction: column; }
+  .overview-summary-grid .chart-note, .overview-summary-grid .wifi-shortcut { margin-top: auto; }
   .grid-two > .panel + .panel, .system-grid > .panel + .panel, .stack > .panel + .panel { margin-top: 0; }
   .system-grid + .panel { margin-top: 20px; }
   .stack { display: grid; gap: 20px; }
@@ -317,7 +317,7 @@
   .access-submit { width: 100%; margin-top: 4px; }
   .access-link { display: block; width: fit-content; min-height: 44px; margin: 23px auto 0; padding: 12px; color: var(--muted); font-size: 12px; }
   .access-link:hover { color: var(--fg); text-decoration: underline; text-underline-offset: 4px; }
-  .setup-progress { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 36px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 11px; }
+  .setup-progress { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin: 36px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 11px; }
   .setup-progress li { display: flex; min-width: 0; align-items: center; gap: 6px; }
   .setup-progress span { display: grid; width: 20px; height: 20px; flex: 0 0 auto; place-items: center; border: 1px solid var(--border); border-radius: 50%; font: 11px var(--font-mono); }
   .setup-progress .current, .setup-progress .done { color: var(--fg); }

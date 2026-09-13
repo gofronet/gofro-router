@@ -17,6 +17,8 @@ valid_endpoint() (
 
 if [[ $command == version ]]; then
   exec /usr/local/bin/gofro-router-server --version
+elif [[ $command == capabilities ]]; then
+  exec /usr/local/bin/gofro-router-server capabilities
 elif [[ $command == update ]]; then
   exec timeout 900 /usr/local/sbin/gofro-server-install >/dev/null
 elif [[ $command =~ ^managed-status$ ]]; then
@@ -35,14 +37,12 @@ elif [[ $command == restart-vpn ]]; then
   exec timeout 60 /usr/local/bin/gofro-router-server restart-vpn
 elif [[ $command =~ ^create-router-profile\ ((\[[0-9a-f:]+\]|[0-9]{1,3}(\.[0-9]{1,3}){3}):8443)$ ]]; then
   valid_endpoint "${BASH_REMATCH[1]}" || exit 126
-  exec timeout 30 /usr/local/bin/gofro-router-server create-profile \
-    --endpoint "${BASH_REMATCH[1]}" --subnet 10.203.1.0/24
+  exec timeout 30 /usr/local/bin/gofro-router-server create-router-profile "${BASH_REMATCH[1]}"
 elif [[ $command =~ ^create-profile\ ((\[[0-9a-f:]+\]|[0-9]{1,3}(\.[0-9]{1,3}){3}):8443)$ ]]; then
   valid_endpoint "${BASH_REMATCH[1]}" || exit 126
   exec timeout 30 /usr/local/bin/gofro-router-server create-profile --endpoint "${BASH_REMATCH[1]}"
 elif [[ $command =~ ^remove-router-peer\ ([A-Za-z0-9+/]{43}=)$ ]]; then
-  exec timeout 30 /usr/local/bin/gofro-router-server remove-peer \
-    --public-key "${BASH_REMATCH[1]}" --subnet 10.203.1.0/24
+  exec timeout 30 /usr/local/bin/gofro-router-server remove-router-peer "${BASH_REMATCH[1]}"
 else
   exit 126
 fi
