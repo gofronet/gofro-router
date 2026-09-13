@@ -8,7 +8,9 @@ ROOT="$(CDPATH='' cd "$(dirname "$0")/../../.." && pwd)"
 if [ "$(uname -s)" != Linux ] || [ "$(id -u)" != 0 ] || [ ! -f /.dockerenv ]; then
 	printf '%s\n' 'BLOCKED: requires a disposable root Linux Docker container' >&2; exit 1;
 fi
-for command in ip nft python3 sysctl; do command -v "$command" >/dev/null; done
+for command in ip nft python3 mount; do
+    command -v "$command" >/dev/null || { printf 'missing required command: %s\n' "$command" >&2; exit 1; }
+done
 [ -x "${AGENT_BIN:?mount the production agent read-only}" ]
 [ -s "${FIXTURES:?mount real rendered fixtures read-only}/routing.nft" ]
 [ -f "$ROOT/deploy/openwrt/root/usr/libexec/gofro/guard" ]
@@ -54,10 +56,17 @@ ip -n "$r" rule add pref 81 fwmark 0x20000/0x30000 lookup 100
 ip -n "$r" route add default dev gt0 table 100 metric 10 proto 186
 ip -n "$r" route add unreachable default table 100 metric 32767 proto 186
 ip -n "$r" route add 192.168.0.0/24 dev lan0 table 100 proto 186
-ip netns exec "$r" sysctl -q -w net.ipv4.ip_forward=1
-for device in all default lan0 wan0 gt0; do
-    ip netns exec "$r" sysctl -q -w "net.ipv4.conf.$device.rp_filter=0"
-done
+# CI's minimal image has no procps/sysctl, and Docker masks /proc/sys read-only.
+# ip netns exec creates a slave mount namespace: this fresh proc mount and all
+# sysctl writes are confined to this invocation and our owned router netns.
+# shellcheck disable=SC2016 # device is expanded by the namespace's child shell.
+ip netns exec "$r" sh -eu -c '
+    mount -t proc -o nosuid,nodev,noexec proc /proc
+    printf "1\n" > /proc/sys/net/ipv4/ip_forward
+    for device in all default lan0 wan0 gt0; do
+        printf "0\n" > "/proc/sys/net/ipv4/conf/$device/rp_filter"
+    done
+'
 # Deliberately install ULA before GUA, with two addresses in each global-scope prefix.
 for address in fe80::1 fd12:3456::1 fd12:3456::11 2001:db8:1::1 2001:db8:1::11; do
 	ip -n "$r" -6 addr add "$address/64" dev lan0 nodad
