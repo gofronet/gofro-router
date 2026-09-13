@@ -7,7 +7,10 @@ TMP="$(CDPATH='' cd "$TMP" && pwd -P)"
 cleanup() {
 	status=$?
 	if [ "$status" = 0 ]; then guard_untouched || status=1; fi
-	if [ "$status" != 0 ]; then printf 'FAIL fixture: %s\n' "${FS:-initialization}" >&2; cat "$FS/output" >&2; fi
+	if [ "$status" != 0 ]; then
+		printf 'FAIL fixture: %s\n' "${FS:-initialization}" >&2
+		if [ -f "${FS:-}/output" ]; then cat "$FS/output" >&2; fi
+	fi
 	rm -rf "$TMP"
 	exit "$status"
 }
@@ -33,9 +36,12 @@ copy_script() {
 	# Dollar expressions belong to the copied script, not this shell.
 	# shellcheck disable=SC2016
 	sed -E 's#(^|[[:space:]="<>(:-])/(etc|usr|tmp|proc|sys|var)/#\1@ROOT@/\2/#g; s#destination=/#destination=@ROOT@/#; s#"/\$path"#"@ROOT@/$path"#; s#"/\$\(dirname#"@ROOT@/$(dirname#' "$1" > "$2.new"
+	# Check before expanding @ROOT@: Linux fixture paths themselves start in /tmp.
+	if grep -Eq '(^|[[:space:]="<>(:-])/(etc|usr|tmp|proc|sys)/' "$2.new"; then
+		printf 'FAIL unconfined OS path in %s\n' "$1" >&2; exit 1
+	fi
 	sed "1s|.*|#!/bin/sh|; s|@ROOT@|$FS|g" "$2.new" > "$2"
 	rm "$2.new"
-	if grep -Eq '(^|[[:space:]="<>(:-])/(etc|usr|tmp|proc|sys)/' "$2"; then exit 1; fi
 	chmod 755 "$2"
 }
 
@@ -187,6 +193,7 @@ for install_mode in install update; do
 	if [ "$install_mode" = install ]; then fails sh "$FS/bundle/install.sh"; else fails sh "$FS/bundle/install.sh" --update; fi
 	[ ! -e "$FS/stat-installed" ]
 	if grep -Eq '^stat:|^uci:(set|add_list|del_list|commit)|^gofro-agent:(stop|restart)' "$FS/commands"; then exit 1; fi
+	printf 'PASS missing stat %s dependency failure refuses before security validation or mutation\n' "$install_mode"
 done
 upgrade interrupted-before-guard-prepare
 copy_script "$SOURCE/root/etc/init.d/gofro-agent" "$FS/native-agent"
