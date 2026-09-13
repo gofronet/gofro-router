@@ -12,6 +12,129 @@ const PANEL_PORTS: PanelPorts = PanelPorts {
 };
 
 #[test]
+fn full_exclusions_precede_all_policy_and_dns_redirect_but_preserve_dnat_and_vip_safety() {
+    let lan = LanContext {
+        device: "br-home".into(),
+        address: "192.168.4.1".parse().unwrap(),
+        subnet: "192.168.4.0/24".parse().unwrap(),
+    };
+    let mac = "02:ab:cd:ef:00:01".parse().unwrap();
+    for mode in [RoutingMode::All, RoutingMode::Rules] {
+        for enabled in [false, true] {
+            let policy = RoutingPolicy::compile(
+                RoutingConfig {
+                    domain_rules: vec![],
+                    ip_rules: vec![],
+                    default_target: RouteTarget::Block,
+                    mode,
+                    rule_order: None,
+                },
+                Arc::new(GeoData::default()),
+            )
+            .unwrap();
+            let mapping = FakeMapping {
+                fake: "198.18.0.1".parse().unwrap(),
+                real: "1.1.1.1".parse().unwrap(),
+                target: RouteTarget::Block,
+            };
+            let script = render_with_exclusions(
+                &lan,
+                5353,
+                enabled,
+                &policy,
+                &[mapping],
+                PANEL_PORTS,
+                &[mac],
+            );
+            let bypass = script
+                .find("ether saddr @device_exclusions meta mark set")
+                .unwrap();
+            assert!(
+                script
+                    .find("ip daddr 198.18.0.0 meta l4proto != tcp drop")
+                    .unwrap()
+                    < bypass
+            );
+            for protocol in ["udp", "tcp"] {
+                assert!(script.find(&format!("ct direction original {protocol} dport 53 ct mark set ct mark | 0x40000000")).unwrap() < bypass);
+            }
+            assert!(script.contains("ether saddr @device_exclusions meta mark set (meta mark & 0xfffcffff) | 65536 ct mark set (ct mark & 0xfffcffff) | 65536 return"));
+            assert!(bypass < script.find("ip daddr @fake_block").unwrap());
+            assert!(script.contains("fake_to_real { 198.18.0.1 : 1.1.1.1 }"));
+            assert!(script.contains("dnat ip to ip daddr map @fake_to_real"));
+            assert!(
+                script
+                    .find("gofro_dns iifname \"br-home\" ether saddr @device_exclusions return")
+                    .unwrap()
+                    < script.find("udp dport 53 redirect").unwrap()
+            );
+            assert_eq!(
+                script.contains("ether saddr != @device_exclusions meta nfproto ipv6 drop"),
+                enabled
+            );
+            assert!(
+                script
+                    .contains("add set inet gofro_routing device_exclusions { type ether_addr; }")
+            );
+            assert!(script.contains(
+                "add element inet gofro_routing device_exclusions { 02:ab:cd:ef:00:01 }"
+            ));
+        }
+    }
+}
+
+#[test]
+fn cold_guard_and_atomic_publication_cover_add_remove_and_legacy_tables() {
+    let lan = LanContext {
+        device: "br-home".into(),
+        address: "192.168.4.1".parse().unwrap(),
+        subnet: "192.168.4.0/24".parse().unwrap(),
+    };
+    let mac = "02:ab:cd:ef:00:01".parse().unwrap();
+    let empty = render_guard_with_exclusions(&lan, &[]);
+    let chain = empty
+        .lines()
+        .filter(|line| line.contains("add chain") || line.contains("add rule"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        chain,
+        "add chain inet gofro_guard gofro_guard { type filter hook forward priority filter; policy accept; }\nadd rule inet gofro_guard gofro_guard iifname \"br-home\" oifname != \"br-home\" drop"
+    );
+    let cold = render_startup(&lan, &[mac], false, false).unwrap();
+    assert!(cold.contains("oifname != \"br-home\" ether saddr != @device_exclusions drop"));
+    assert!(!cold.contains("gofro_routing"));
+    assert!(render_startup(&lan, &[mac], true, false).is_err());
+    assert!(render_startup(&lan, &[], true, false).is_ok());
+    for exclusions in [vec![mac], vec![]] {
+        let publish = render_publish_exclusions(&lan, &exclusions);
+        assert_eq!(
+            render_startup(&lan, &exclusions, true, true).unwrap(),
+            publish
+        );
+        assert!(publish.starts_with("flush set inet gofro_routing device_exclusions\n"));
+        assert!(publish.contains("destroy table inet gofro_guard\n"));
+        assert_eq!(
+            publish.contains("ether saddr != @device_exclusions"),
+            !exclusions.is_empty()
+        );
+    }
+}
+
+#[test]
+fn startup_does_not_mistake_a_placeholder_set_for_an_upgraded_table() {
+    use serde_json::json;
+    let mut entries = vec![json!({"set": {"name": "device_exclusions", "type": "ether_addr"}})];
+    assert!(!has_exclusion_return(&entries, "gofro_mark"));
+    entries.push(json!({"rule": {"chain": "gofro_mark", "expr": [
+        {"match": {"op": "==", "left": {"payload": {"protocol": "ether", "field": "saddr"}}, "right": "@device_exclusions"}},
+        {"return": null}
+    ]}}));
+    assert!(has_exclusion_return(&entries, "gofro_mark"));
+    assert!(!has_exclusion_return(&entries, "gofro_dns"));
+}
+
+#[test]
 fn panel_vip_is_direct_and_dnat_is_lan_only_with_unsupported_traffic_dropped() {
     for device in ["br-home", "lan0"] {
         let lan = LanContext {
@@ -401,6 +524,32 @@ fn emit_netns_fixtures() {
     )
     .unwrap();
     fs::write(format!("{directory}/guard.nft"), render_guard(&lan)).unwrap();
+    let exclusions = ["02:00:00:00:00:02".parse().unwrap()];
+    for (name, script) in [
+        (
+            "excluded",
+            render_with_exclusions(
+                &lan,
+                5353,
+                true,
+                &policy,
+                &mappings,
+                PANEL_PORTS,
+                &exclusions,
+            ),
+        ),
+        (
+            "guard-excluded",
+            render_guard_with_exclusions(&lan, &exclusions),
+        ),
+        (
+            "publish-excluded",
+            render_publish_exclusions(&lan, &exclusions),
+        ),
+        ("publish-empty", render_publish_exclusions(&lan, &[])),
+    ] {
+        fs::write(format!("{directory}/{name}.nft"), script).unwrap();
+    }
     fs::write(
         format!("{directory}/off.nft"),
         render(&lan, 5353, false, &policy, &mappings, PANEL_PORTS),

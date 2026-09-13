@@ -1,5 +1,6 @@
 {
   "vpn_enabled": false,
+  "device_exclusions": [],
   "active_server_key": null,
   "servers": []
 }

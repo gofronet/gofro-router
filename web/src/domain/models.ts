@@ -1,4 +1,7 @@
 export type {
+  DeviceExclusionInput,
+  LanDevices,
+  Mac,
   Device,
   AuthStatus,
   DomainRule,

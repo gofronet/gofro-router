@@ -82,6 +82,7 @@ fresh() {
 	for path in usr/bin/gofro-agent usr/bin/gofro-relay usr/libexec/gofro/network \
 		usr/libexec/gofro/mode usr/libexec/gofro/onboarding usr/libexec/gofro/service \
 		usr/libexec/gofro/tunnel usr/libexec/gofro/update usr/libexec/gofro/wifi \
+		usr/libexec/gofro/dns-flows \
 		etc/init.d/gofro-agent etc/init.d/gofro-relay etc/init.d/gofro-onboarding etc/init.d/gofro-updater \
 		etc/hotplug.d/iface/90-gofro-route; do
 		cp "$SOURCE/tests/fixtures/commands" "$FS/bundle/root/$path"

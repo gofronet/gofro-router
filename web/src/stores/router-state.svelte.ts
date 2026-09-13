@@ -1,5 +1,6 @@
 import { api, ApiError } from "../api";
 import { clearCsrfToken, setCsrfToken } from "../api/client";
+import { deviceExclusionInputSchema, deviceExclusionsSchema } from "../api/schemas";
 import type {
   ProfileInput,
   AuthStatus,
@@ -12,6 +13,8 @@ import type {
   ManagedServerStatus,
   Profile,
   Status,
+  DeviceExclusionInput,
+  LanDevices,
 } from "../domain/models";
 
 const refreshRequired = "Состояние после изменения не подтверждено. Сначала обновите состояние; новая команда не отправлена.";
@@ -39,6 +42,9 @@ export class RouterState {
   statusUncertain = $state(false);
   private warningKind = $state("");
   mutation = $state<string | null>(null);
+  lanDevices = $state<LanDevices>({ devices: [], discovery: "unavailable" });
+  inventoryLoading = $state(false);
+  inventoryError = $state("");
 
   get warningServerKey(): string | null {
     return /^(?:update|restart|friend-create|friend-rename|friend-revoke):(.+)$/.exec(this.warningKind)?.[1] ?? null;
@@ -228,6 +234,9 @@ export class RouterState {
     this.loading = false;
     this.mutation = null;
     this.actionWarning = "";
+    this.lanDevices = { devices: [], discovery: "unavailable" };
+    this.inventoryLoading = false;
+    this.inventoryError = "";
   }
 
   loadOnboarding = async (): Promise<void> => {
@@ -484,6 +493,43 @@ export class RouterState {
 
   saveRouting = (input: RoutingConfig): Promise<boolean> =>
     this.mutate("routing", () => api.routing.save(input));
+
+  refreshLanDevices = async (): Promise<void> => {
+    if (this.inventoryLoading || this.authState !== "authenticated") return;
+    const generation = this.generation;
+    const authVersion = this.authVersion;
+    this.inventoryLoading = true;
+    try {
+      const inventory = await api.lanDevices.get();
+      if (generation !== this.generation || authVersion !== this.authVersion) return;
+      this.lanDevices = inventory;
+      this.inventoryError = "";
+    } catch (error) {
+      if (generation !== this.generation || authVersion !== this.authVersion || this.handleAuthError(error)) return;
+      this.lanDevices = { ...this.lanDevices, discovery: "unavailable" };
+      this.inventoryError = this.message(error);
+    } finally {
+      if (generation === this.generation) this.inventoryLoading = false;
+    }
+  };
+
+  setDeviceExcluded = async (input: DeviceExclusionInput): Promise<boolean> => {
+    if (this.busy || this.authState !== "authenticated") return false;
+    if (!this.hasStatus || this.pollError || !this.requireFreshStatus()) {
+      this.actionError = refreshRequired;
+      return false;
+    }
+    const parsed = deviceExclusionInputSchema.safeParse(input);
+    if (!parsed.success) { this.actionError = parsed.error.issues[0].message; return false; }
+    const { mac, excluded } = parsed.data;
+    const saved = this.status.device_exclusions;
+    if (excluded && !saved.includes(mac) && !deviceExclusionsSchema.safeParse([...saved, mac]).success) {
+      this.actionError = "Можно сохранить не более 256 устройств.";
+      return false;
+    }
+    const ok = await this.mutate(`device-exclusion:${mac}`, () => api.deviceExclusions.set(parsed.data));
+    return ok && !this.statusUncertain;
+  };
 
   testRouting = async (value: string): Promise<RoutingTest> => {
     const generation = this.generation;

@@ -18,14 +18,36 @@ if [ "${FAIL_MATCH:-}" = "$name:$*" ] && { [ "${FAIL_ALWAYS:-0}" = 1 ] || [ ! -e
 fi
 case "$name" in
 uci)
-	[ "${1:-}" != -q ] || shift
+	case "${1:-}" in -q|-X|-m) shift ;; esac
 	action=$1; shift
 	key=${1:-}; value=${key#*=}; key=${key%%=*}; file=$FS/uci/$key
 	case "$action" in
 	get) [ -f "$file" ] || exit 1; paste -sd ' ' "$file" ;;
 	set) printf '%s\n' "$value" > "$file"; printf option > "$file.type" ;;
 	add_list) printf '%s\n' "$value" >> "$file"; printf list > "$file.type" ;;
-	delete) [ -f "$file" ] || exit 1; rm -f "$file" "$file.type" ;;
+	delete) [ -f "$file" ] || exit 1; rm -f "$file" "$file.type"; if [ "$key" = dhcp.gofro_panel ]; then rm -f "$file".*; fi ;;
+	show)
+		[ "$key" = dhcp ] || exit 2
+		printf 'dhcp.lan_dns=dnsmasq\n'
+		if [ -f "$FS/uci/dhcp.gofro_panel" ]; then
+			printf 'dhcp.gofro_panel=%s\n' "$(cat "$FS/uci/dhcp.gofro_panel")"
+			for option in name ip instance; do
+				file=$FS/uci/dhcp.gofro_panel.$option
+				[ ! -f "$file" ] || printf "dhcp.gofro_panel.%s='%s'\n" "$option" "$(cat "$file")"
+			done
+		fi ;;
+	import)
+		[ "$key" = dhcp ] || exit 2
+		while IFS= read -r line; do
+			# Only this fixture's own generated UCI, never external input.
+			eval "set -- $line"
+			case "${1:-}" in
+			package) [ "$2" = dhcp ] ;;
+			config) [ "$3" = gofro_panel ]; "$0" set "dhcp.gofro_panel=$2" ;;
+			option) "$0" set "dhcp.gofro_panel.$2=$3" ;;
+			*) exit 2 ;;
+			esac
+		done ;;
 	del_list)
 		[ -f "$file" ] || exit 1
 		awk -v value="$value" '$0 != value' "$file" > "$file.new"
@@ -42,6 +64,13 @@ uci)
 				printf "\t%s %s '%s'\n" "$(cat "$file.type")" "$option" "$value"
 			done < "$file"
 		done
+		if [ -f "$FS/uci/dhcp.gofro_panel" ]; then
+			printf "config %s 'gofro_panel'\n" "$(cat "$FS/uci/dhcp.gofro_panel")"
+			for option in name ip instance; do
+				file=$FS/uci/dhcp.gofro_panel.$option
+				[ ! -f "$file" ] || printf "\toption %s '%s'\n" "$option" "$(cat "$file")"
+			done
+		fi
 		;;
 	batch)
 		while IFS= read -r line; do
@@ -63,12 +92,23 @@ sync|sleep|logger) : ;;
 chown) case "$*" in "0:0 $FS/etc/gofro"|"0:0 $FS/etc/gofro/guard-device."*) : ;; *) exit 2 ;; esac ;;
 stat)
 	[ -e "$FS/stat-installed" ] || { : > "$FS/early-stat"; echo 'stat: not installed' >&2; exit 127; }
+	case "$2" in
+	'%u:%a:%h') printf '0:600:1\n'; exit ;;
+	'%d:%i')
+		if [ "$1" = -Lc ]; then
+			# Copies rewrite /proc paths, but the descriptor must actually exist.
+			perl -e 'open(my $fd, ">&=", 8) or exit 1;' || exit 1
+		fi
+		printf '1:8\n'; exit ;;
+	esac
 	[ "$1:$2" = '-c:%u:%a' ]
+	case "$3" in "$FS"|"$FS"/*) ;; *) printf '0:755\n'; exit ;; esac
 	permissions="$("$REAL_STAT" -c '%a' "$3" 2>/dev/null)" || permissions="$("$REAL_STAT" -f '%Lp' "$3")"
 	printf '0:%s\n' "$permissions" # Root UID is mocked; the file's actual mode is checked.
 	;;
 flock)
 	# macOS has flock(2), but no flock CLI; retain the actual descriptor-lock semantics.
+	case "$*" in '8') exec perl -MFcntl=LOCK_EX -e 'open(my $lock, ">&=", 8) or die $!; flock($lock, LOCK_EX) or exit 1;' ;; esac
 	[ "$*" = '-n 9' ]
 	exec perl -MFcntl=LOCK_EX,LOCK_NB -e 'open(my $lock, ">&=", 9) or die $!; flock($lock, LOCK_EX | LOCK_NB) or exit 1;'
 	;;
@@ -89,6 +129,8 @@ nft)
 		[ -n "$device" ] || exit 2
 		expected="add table inet gofro_guard
 flush table inet gofro_guard
+add set inet gofro_guard device_exclusions { type ether_addr; }
+flush set inet gofro_guard device_exclusions
 add chain inet gofro_guard gofro_guard { type filter hook forward priority filter; policy accept; }
 add rule inet gofro_guard gofro_guard iifname \"$device\" oifname != \"$device\" drop"
 		[ "$script" = "$expected" ] || exit 2
@@ -163,6 +205,11 @@ network)
 	;;
 mode) [ "$*" = 'check br-old 192.168.8.0/24' ] ;;
 jsonfilter)
+	if [ "$1" = -t ]; then
+		cat >/dev/null
+		case "$2" in '@') echo object ;; '@.device_exclusions') exit 1 ;; *) exit 2 ;; esac
+		exit
+	fi
 	manifest=0
 	json_file=
 	case "$*" in *routing-legacy.json*) json_file=$2 ;; esac
@@ -281,6 +328,7 @@ gofro-agent|gofro-relay)
 		;;
 	esac
 	;;
+dns-flows) [ "$*" = 'cleanup br-old 5353' ] || [ "$*" = 'cleanup br-home 5353' ] ;;
 gofro-*|firewall|dnsmasq) : ;;
 *) printf 'unexpected command: %s\n' "$name" >&2; exit 2 ;;
 esac

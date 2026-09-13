@@ -21,7 +21,7 @@ case "${1:-}" in
 			GOFRO_NFT_FIXTURE_DIR="$FIXTURES" cargo test --offline --locked -p gofro-agent \
 				dataplane::tests::emit_netns_fixtures -- --exact --ignored
 		)
-		for fixture in routing all off guard; do
+		for fixture in routing all off guard excluded guard-excluded publish-excluded publish-empty; do
 			[ -s "$FIXTURES/$fixture.nft" ] || {
 				printf 'FAIL: renderer fixture missing: %s.nft\n' "$fixture" >&2; exit 1;
 			}
@@ -45,15 +45,15 @@ esac
 
 [ "$(uname -s)" = Linux ] || { printf '%s\n' 'BLOCKED: --run requires Linux' >&2; exit 1; }
 [ "$(id -u)" = 0 ] || { printf '%s\n' '--run requires root' >&2; exit 1; }
-for command in ip nft python3 sysctl; do
+for command in ip nft python3 sysctl conntrack jsonfilter; do
 	command -v "$command" >/dev/null || { printf 'missing required command: %s\n' "$command" >&2; exit 1; }
 done
-for fixture in routing all off guard; do
+for fixture in routing all off guard excluded guard-excluded publish-excluded publish-empty; do
 	[ -s "${FIXTURES:?}/$fixture.nft" ] || { printf 'missing fixture: %s.nft\n' "$fixture" >&2; exit 1; }
 done
 
 tag="gfr$$"
-r="${tag}r" c="${tag}c" w="${tag}w" v="${tag}v"
+r="${tag}r" c="${tag}c" w="${tag}w" v="${tag}v" e="${tag}e"
 owned=''
 cleanup() {
 	for ns in $owned; do
@@ -64,7 +64,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-for ns in "$r" "$c" "$w" "$v"; do
+for ns in "$r" "$c" "$w" "$v" "$e"; do
 	ip netns add "$ns"
 	owned="$owned $ns"
 	ip -n "$ns" link set lo up
@@ -75,6 +75,13 @@ ip -n "$r" link add pppoe-wan type veth peer name wan0 netns "$w"
 ip -n "$r" link add gt0 type veth peer name vpn0 netns "$v"
 ip -n "$r" link set lan0 up
 ip -n "$c" link set client0 up
+ip -n "$c" link set client0 address 02:00:00:00:00:01
+# Both clients arrive on the very same router Ethernet interface.
+ip -n "$c" link add excluded0 link client0 type macvlan mode bridge
+ip -n "$c" link set excluded0 netns "$e"
+ip -n "$e" link set excluded0 address 02:00:00:00:00:02 up
+ip -n "$e" addr add 192.168.0.3/24 dev excluded0
+ip -n "$e" addr add 2001:db8:1::3/64 dev excluded0 nodad
 ip -n "$r" link set pppoe-wan mtu 1492 up
 ip -n "$w" link set wan0 mtu 1492 up
 ip -n "$r" link set gt0 mtu 1480 up
@@ -85,6 +92,12 @@ ip -n "$c" route add default via 192.168.0.1
 ip -n "$r" addr add 2001:db8:1::1/64 dev lan0 nodad
 ip -n "$c" addr add 2001:db8:1::2/64 dev client0 nodad
 ip -n "$c" route add default via 2001:db8:1::1
+ip -n "$e" route add default via 192.168.0.1
+ip -n "$e" route add default via 2001:db8:1::1
+ip -n "$r" addr add 2001:db8:ff::1/64 dev pppoe-wan nodad
+ip -n "$w" addr add 2001:db8:ff::2/64 dev wan0 nodad
+ip -n "$r" -6 route add default via 2001:db8:ff::2
+ip -n "$w" -6 route add default via 2001:db8:ff::1
 ip -n "$r" addr add 192.0.2.1 peer 192.0.2.2/32 dev pppoe-wan
 ip -n "$w" addr add 192.0.2.2 peer 192.0.2.1/32 dev wan0
 for address in 198.51.100.2 203.0.113.2 8.8.8.8 9.9.9.9 1.1.1.1; do
@@ -95,6 +108,7 @@ ip -n "$r" addr add 10.0.0.1/24 dev gt0
 ip -n "$v" addr add 10.0.0.2/24 dev vpn0
 ip -n "$v" addr add 8.8.8.8/32 dev lo
 ip -n "$v" addr add 198.51.100.2/32 dev lo
+ip -n "$v" addr add 203.0.113.2/32 dev lo
 ip -n "$r" addr add 2001:db8:2::1/64 dev gt0 nodad
 ip -n "$v" addr add 2001:db8:2::2/64 dev vpn0 nodad
 ip -n "$v" route add 192.168.0.0/24 via 10.0.0.1
@@ -113,14 +127,14 @@ ip -n "$r" route replace default dev gt0 table 100 metric 10 proto 186 mtu 1480
 ip -n "$r" route replace unreachable default table 100 metric 32767 proto 186
 ip -n "$r" route replace 192.168.0.0/24 dev lan0 table 100 proto 186 mtu 1500
 
-python3 - "$r" "$c" "$w" "$v" "$FIXTURES" <<'PY'
+python3 - "$r" "$c" "$w" "$v" "$e" "$FIXTURES" "$ROOT/deploy/openwrt/root/usr/libexec/gofro/dns-flows" <<'PY'
 import json
 import pathlib
 import select
 import subprocess
 import sys
 
-r, c, w, v, fixtures = sys.argv[1:]
+r, c, w, v, e, fixtures, dns_flows = sys.argv[1:]
 processes = []
 traffic_checks = 0
 udp_retries = 0
@@ -219,11 +233,12 @@ hold = r'''
 import socket, sys
 address, port, source = sys.argv[1:4]
 udp = sys.argv[4:5] == ["udp"]
-s = socket.socket(type=socket.SOCK_DGRAM if udp else socket.SOCK_STREAM); s.settimeout(2)
-if udp: s.bind(("192.168.0.2", int(sys.argv[5])))
+s = socket.socket(socket.AF_INET6 if ":" in address else socket.AF_INET,
+                  socket.SOCK_DGRAM if udp else socket.SOCK_STREAM); s.settimeout(2)
+if udp: s.bind(("::" if ":" in address else "0.0.0.0", int(sys.argv[5])))
 if source: s.bind((source, 0))
 s.connect((address, int(port)))
-assert s.getpeername() == (address, int(port))
+assert s.getpeername()[:2] == (address, int(port))
 print("ready")
 for line in sys.stdin:
     try:
@@ -290,12 +305,13 @@ add counter inet observe original_wan_egress
 add counter inet observe original_vpn_egress
 add counter inet observe mode_wan_egress
 add counter inet observe mode_vpn_egress
+add counter inet observe native_dns
 add chain inet observe seed { type filter hook prerouting priority -151; policy accept; }
 add rule inet observe seed iifname "lan0" meta mark set meta mark | 0x4
 add rule inet observe seed ct mark set ct mark | 0x8
 add chain inet observe marks { type filter hook prerouting priority -149; policy accept; }
-add rule inet observe marks iifname "lan0" meta nfproto ipv4 meta mark & 0xfffcffff != 0x4 counter name bad_meta
-add rule inet observe marks iifname "lan0" meta nfproto ipv4 ct mark & 0xfffcffff != 0x8 counter name bad_ct
+add rule inet observe marks iifname "lan0" meta mark & 0xfffcffff != 0x4 counter name bad_meta
+add rule inet observe marks iifname "lan0" ct mark & 0xbffcffff != 0x8 counter name bad_ct
 add rule inet observe marks iifname "lan0" meta mark 0x10004 ct mark 0x10008 counter name direct
 add rule inet observe marks iifname "lan0" meta mark 0x20004 ct mark 0x20008 counter name vpn
 add rule inet observe marks iifname "lan0" ip daddr 8.8.8.8 udp sport 31000 meta mark 0x10004 ct mark 0x10008 counter name mode_direct
@@ -303,6 +319,7 @@ add rule inet observe marks iifname "lan0" ip daddr 8.8.8.8 udp sport 31000 meta
 add rule inet observe marks iifname "lan0" ip daddr 198.51.100.2 udp sport 31001 meta mark 0x10004 ct mark 0x10008 counter name original_direct
 add rule inet observe marks iifname "lan0" ip daddr 198.51.100.2 udp sport 31001 meta mark 0x20004 ct mark 0x20008 counter name revised_vpn
 add chain inet observe egress { type filter hook postrouting priority 110; policy accept; }
+add rule inet observe egress iifname "lan0" oifname "pppoe-wan" meta l4proto { tcp, udp } th dport 53 counter name native_dns
 add rule inet observe egress oifname "pppoe-wan" ip daddr 9.9.9.9 tcp sport 18080 ct direction reply ct status dnat meta mark 0x10004 ct mark 0x10008 counter name port_forward
 add rule inet observe egress oifname "pppoe-wan" ip daddr 8.8.8.8 counter name wan_leak
 add rule inet observe egress oifname != "lan0" ip daddr 203.0.113.2 counter name blocked_leak
@@ -315,8 +332,10 @@ add rule inet observe egress oifname "gt0" ip daddr 8.8.8.8 udp sport 31000 coun
 ''')
     start(w, server, json.dumps([[address, 8080, "wan:"] for address in
                                 ("198.51.100.2", "203.0.113.2", "8.8.8.8")]
-                               + [["1.1.1.1", 53, "upstream:"]]))
+                               + [["1.1.1.1", 53, "upstream:"], ["2001:db8:ff::2", 53, "upstream6:"],
+                                  ["2001:db8:ff::2", 8080, "wan6:"]]))
     start(v, server, json.dumps([["8.8.8.8", 8080, "vpn:"], ["198.51.100.2", 8080, "vpn:"],
+                                ["203.0.113.2", 8080, "vpn:"],
                                 ["2001:db8:2::2", 8080, "ipv6:"], ["2001:db8:2::2", 53, "upstream6:"]]))
     start(c, server, json.dumps([["192.168.0.2", 8080, "lan:"]]))
     # Transport double with the real helper's dual-stack/device-bound shape.
@@ -468,6 +487,123 @@ add rule inet observe egress oifname "gt0" ip daddr 8.8.8.8 udp sport 31000 coun
     assert all(p.poll() is None for p in processes), "endpoint died during regression"
     assert traffic_checks == 145, f"existing network coverage changed: {traffic_checks}/145"
     print(f"PASS: kernel namespace regression, {traffic_checks} socket checks, {udp_retries} verified UDP NAT-switch retries (simulated pppoe-wan; no PPPoE negotiation)")
+
+    def cleanup_dns():
+        run(r, "sh", dns_flows, "cleanup", "lan0", "5353")
+
+    def publish(name):
+        load(name)
+        cleanup_dns()
+
+    def cached():
+        # Model cache contents, using production sets/map and production DNAT.
+        nft('''add element inet gofro_routing fake_to_real { 198.18.0.2 : 8.8.8.8, 198.18.0.3 : 203.0.113.2 }
+add element inet gofro_routing fake_vpn { 198.18.0.2 }
+add element inet gofro_routing fake_block { 198.18.0.3 }
+''')
+
+    for mode in ("excluded", "all"):
+        load(mode)
+        load("guard-excluded")
+        publish("publish-excluded")
+        nft("destroy table inet gofro_guard\n")
+        cached()
+        for address in ("8.8.8.8", "203.0.113.2", "198.18.0.1", "198.18.0.2", "198.18.0.3"):
+            probe(e, address, "wan:")
+        probe(e, "2001:db8:ff::2", "wan6:")
+        probe(c, "8.8.8.8", "vpn:")
+        before_block = counter("blocked_leak")
+        probe(c, "203.0.113.2", "blocked" if mode == "excluded" else "vpn:")
+        if mode == "excluded":
+            assert counter("blocked_leak") == before_block, "IP block leaked"
+        before_block = counter("blocked_leak")
+        probe(c, "198.18.0.3", "blocked")
+        assert counter("blocked_leak") == before_block, "cached Block leaked"
+        probe(c, "2001:db8:ff::2", "blocked")
+        for ns, excluded in ((e, True), (c, False)):
+            probe(ns, "1.1.1.1", "upstream:" if excluded else "fake-dns:", 53)
+            probe(ns, "2001:db8:ff::2", "upstream6:" if excluded else "fake-dns:", 53)
+        print("PASS: same-LAN exact MAC Full Direct, cached VPN/BLOCK DNAT and dual-stack native DNS:", mode, flush=True)
+
+    # IP lease changes require no publication, neighbor inventory, or classifier reload.
+    run(e, "ip", "addr", "del", "192.168.0.3/24", "dev", "excluded0")
+    run(e, "ip", "addr", "add", "192.168.0.4/24", "dev", "excluded0")
+    run(e, "ip", "-6", "addr", "del", "2001:db8:1::3/64", "dev", "excluded0")
+    run(e, "ip", "-6", "addr", "add", "2001:db8:1::4/64", "dev", "excluded0", "nodad")
+    run(e, "ip", "route", "replace", "default", "via", "192.168.0.1")
+    run(e, "ip", "-6", "route", "replace", "default", "via", "2001:db8:1::1")
+    probe(e, "8.8.8.8", "wan:")
+    probe(e, "2001:db8:ff::2", "wan6:")
+    run(e, "ip", "link", "set", "excluded0", "address", "02:00:00:00:00:09")
+    probe(e, "8.8.8.8", "vpn:")
+    probe(e, "2001:db8:ff::2", "blocked")
+    run(e, "ip", "link", "set", "excluded0", "address", "02:00:00:00:00:02")
+    # Refresh return neighbors after the deliberate identity swap, never enforcement.
+    run(r, "ip", "neigh", "flush", "dev", "lan0")
+    run(r, "ip", "-6", "neigh", "flush", "dev", "lan0")
+    load("guard-excluded")
+    run(r, "ip", "link", "set", "gt0", "down")
+    run(r, "ip", "route", "flush", "table", "100", "dev", "gt0", "exact", "0.0.0.0/0")
+    for ns, expected in ((e, "wan:"), (c, "blocked")):
+        probe(ns, "8.8.8.8", expected)
+        probe(ns, "203.0.113.2", expected)
+        probe(ns, "2001:db8:ff::2", "wan6:" if ns == e else "blocked")
+    print("PASS: changed IP unchanged MAC, changed MAC same IP, tunnel down AND forward guard installed", flush=True)
+    nft("destroy table inet gofro_guard\n")
+    run(r, "ip", "link", "set", "gt0", "up")
+    run(r, "ip", "route", "replace", "default", "dev", "gt0", "table", "100", "metric", "10", "proto", "186")
+
+    # Four persistent native DNS tuples must own the stable bit BEFORE exempt return.
+    flows = []
+    for address, label in (("1.1.1.1", "upstream:"), ("2001:db8:ff::2", "upstream6:")):
+        for proto in ("udp", "tcp"):
+            source_port += 1
+            p = start(e, hold, address, "53", "", *(["udp", str(source_port)] if proto == "udp" else []))
+            exchange(p, label + "same-connection")
+            flows.append((p, proto, address, label))
+    snapshots = {}
+    for family in ("ipv4", "ipv6"):
+        snapshot = "".join(run(r, "conntrack", "-L", "-f", family, "-p", proto, "--orig-port-dst", "53", capture_output=True).stdout for proto in ("udp", "tcp"))
+        entries = [line for line in snapshot.splitlines() if "src=" + ("192.168.0.4" if family == "ipv4" else "2001:db8:1::4") + " " in line]
+        assert len(entries) == 2, entries
+        assert all("mark=1073807368 " in line for line in entries), entries  # DNS|Direct|foreign 0x8
+        assert all("sport=53 " in line for line in entries), "native tuples unexpectedly redirected"
+        snapshots[family] = entries
+    print("PASS: stable native no-DNAT DNS ownership snapshot:", json.dumps(snapshots), flush=True)
+    control = start(e, hold, "8.8.8.8", "8080", "", "udp", "32001")
+    exchange(control, "wan:same-connection")
+    control_before = run(r, "conntrack", "-L", "-p", "udp", "--sport", "32001", "-o", "id", capture_output=True).stdout
+    load("guard-excluded")
+    publish("publish-empty")
+    nft("destroy table inet gofro_guard\n")
+    native_before = counter("native_dns")
+    for family in ("ipv4", "ipv6"):
+        remaining = "".join(run(r, "conntrack", "-L", "-f", family, "-p", proto, "--orig-port-dst", "53", "--mark", "0x40000000/0x40000000", capture_output=True).stdout for proto in ("udp", "tcp"))
+        assert not remaining.strip(), remaining
+    control_after = run(r, "conntrack", "-L", "-p", "udp", "--sport", "32001", "-o", "id", capture_output=True).stdout
+    assert control_before.split("id=")[1] == control_after.split("id=")[1], (control_before, control_after)
+    redirected_tcp = []
+    for p, proto, address, label in flows:
+        exchange(p, "fake-dns:same-connection" if proto == "udp" else "blocked")
+        probe(e, address, "fake-dns:", 53)
+        if proto == "tcp":
+            redirected = start(e, hold, address, "53", "")
+            exchange(redirected, "fake-dns:same-connection")
+            redirected_tcp.append(redirected)
+    probe(e, "8.8.8.8", "vpn:")
+    assert counter("native_dns") == native_before, "removed exclusion leaked persistent/new DNS to native WAN"
+    load("guard-excluded")
+    publish("publish-excluded")
+    nft("destroy table inet gofro_guard\n")
+    for p in redirected_tcp:
+        exchange(p, "blocked")
+    for p, proto, address, label in flows:
+        if proto == "udp": exchange(p, label + "same-connection")
+        probe(e, address, label, 53)
+    assert counter("bad_meta") == counter("bad_ct") == 0, "Full Direct clobbered foreign mark bits"
+    assert traffic_checks == 254, f"Full Direct coverage changed: {traffic_checks - 145}/109"
+    print(f"PASS: {traffic_checks - 145} additional Full Direct socket checks; persistent DNS transitions, TCP reconnect, non-DNS conntrack ID retained", flush=True)
+    print("PACKET COUNTS:", json.dumps({name: counter(name) for name in ("direct", "vpn", "bad_meta", "bad_ct", "forwarded", "blocked_leak", "wan_leak", "native_dns")}), flush=True)
 except BaseException:
     print(f"FAIL: kernel regression after {traffic_checks} completed socket checks", flush=True)
     run(r, "nft", "list", "ruleset")

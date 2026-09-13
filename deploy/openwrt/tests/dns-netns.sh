@@ -8,7 +8,7 @@ ROOT="$(CDPATH='' cd "$(dirname "$0")/../../.." && pwd)"
 if [ "$(uname -s)" != Linux ] || [ "$(id -u)" != 0 ] || [ ! -f /.dockerenv ]; then
 	printf '%s\n' 'BLOCKED: requires a disposable root Linux Docker container' >&2; exit 1;
 fi
-for command in ip nft python3 mount; do
+for command in ip nft python3 mount conntrack jq jsonfilter dnsmasq; do
     command -v "$command" >/dev/null || { printf 'missing required command: %s\n' "$command" >&2; exit 1; }
 done
 [ -x "${AGENT_BIN:?mount the production agent read-only}" ]
@@ -16,6 +16,15 @@ done
 [ -f "$ROOT/deploy/openwrt/root/usr/libexec/gofro/guard" ]
 # Loaded kernel tunnel modules may create down, unaddressed template devices.
 ip -j address show | python3 -c 'import json,sys; links=json.load(sys.stdin); assert [x["ifname"] for x in links if "UP" in x["flags"]] == ["lo"] and all(x["ifname"] == "lo" or not x.get("addr_info") for x in links), "requires --network none; refusing existing networking"'
+
+# The real agent invokes this installed path, independently of GOFRO_HELPERS.
+# Provision it in the disposable container even when CI mounts only /src.
+if [ ! -e /usr/libexec/gofro/dns-flows ]; then
+	mkdir -p /usr/libexec/gofro
+	ln -s "$ROOT/deploy/openwrt/root/usr/libexec/gofro/dns-flows" /usr/libexec/gofro/dns-flows
+fi
+[ -x /usr/libexec/gofro/dns-flows ]
+cmp "$ROOT/deploy/openwrt/root/usr/libexec/gofro/dns-flows" /usr/libexec/gofro/dns-flows
 
 tag="gdn$$" owned=''
 r="${tag}r" c="${tag}c" w="${tag}w" v="${tag}v"
@@ -43,6 +52,7 @@ for pair in "$r lan0" "$c client0" "$r wan0" "$w peer0" "$r gt0" "$v vpn0"; do
 done
 ip -n "$r" addr add 192.168.0.1/24 dev lan0
 ip -n "$c" addr add 192.168.0.2/24 dev client0
+ip -n "$c" link set client0 address 02:00:00:00:00:01
 ip -n "$r" addr add 192.0.2.1/24 dev wan0
 ip -n "$w" addr add 192.0.2.2/24 dev peer0
 ip -n "$c" route add default via 192.168.0.1
@@ -444,6 +454,55 @@ with socket.socket(type=socket.SOCK_STREAM if transport == "tcp" else socket.SOC
             print(f"PASS: VIP alias/management/drop isolation: {mode}, guard={guarded}, tunnel_down={tunnel_down}", flush=True)
         assert (panel_checks, alias_checks, drop_checks) == (98, 14, 101)
         print(f"PASS: {panel_checks} real panel/LuCI checks, {alias_checks} mode DNS aliases, {drop_checks} observed VIP drops", flush=True)
+
+        # Native OpenWrt host-record contract, including a real AAAA positive
+        # control which FakeDNS filters under the ordinary VPN policy.
+        native = subprocess.Popen(["ip", "netns", "exec", r, "dnsmasq", "--keep-in-foreground",
+            "--no-resolv", "--no-hosts", "--bind-interfaces", "--interface=lan0", "--interface=lo",
+            "--port=53", "--user=root", f"--pid-file={root / 'dnsmasq.pid'}", "--local-ttl=30",
+            "--host-record=wifi.gofro.net,198.18.0.0",
+            "--host-record=full-direct.test,2001:db8:99::1"], stderr=subprocess.PIPE)
+        aaaa = r'''
+import socket,struct,sys
+address,transport,expected=sys.argv[1:]
+question=b"\x0bfull-direct\x04test\0"+struct.pack("!HH",28,1)
+packet=struct.pack("!6H",789,256,1,0,0,0)+question
+with socket.socket(socket.AF_INET6 if ":" in address else socket.AF_INET,
+                   socket.SOCK_DGRAM if transport=="udp" else socket.SOCK_STREAM) as s:
+    s.settimeout(3); s.connect((address,53))
+    if transport=="udp":
+        s.send(packet); data=s.recv(4096)
+    else:
+        s.sendall(struct.pack("!H",len(packet))+packet)
+        with s.makefile("rb") as stream:
+            prefix=stream.read(2); assert len(prefix)==2
+            size=struct.unpack("!H",prefix)[0]; data=stream.read(size); assert len(data)==size
+    ident,flags,qd,an,_,_=struct.unpack_from("!6H",data)
+    assert ident==789 and flags & 0x820f==0x8000 and qd==1 and an==int(expected),(address,transport,data.hex())
+    if an: assert data[-16:]==socket.inet_pton(socket.AF_INET6,"2001:db8:99::1"),data.hex()
+'''
+        native_checks = 0
+        try:
+            time.sleep(.15)
+            assert native.poll() is None, native.stderr.read().decode()
+            run(r, "nft", "-f", str(pathlib.Path(fixtures) / "excluded.nft"))
+            run(r, "nft", "-f", str(pathlib.Path(fixtures) / "guard-excluded.nft"))
+            for excluded in (False, True, False):
+                run(c, "ip", "link", "set", "client0", "address", "02:00:00:00:00:02" if excluded else "02:00:00:00:00:01")
+                run(r, "sh", str(pathlib.Path(guard_helper).with_name("dns-flows")), "cleanup", "lan0", "5353")
+                for source, address in (("192.168.0.2", "192.168.0.1"), ("2001:db8:1::2", "2001:db8:1::1")):
+                    for transport in ("udp", "tcp"):
+                        run(c, "python3", "-c", query, source, address, "53", transport, str(3000 + native_checks), "")
+                        run(c, "python3", "-c", aaaa, address, transport, "1" if excluded else "0")
+                        native_checks += 2
+            print(f"PASS: {native_checks} native dnsmasq/FakeDNS checks: excluded panel VIP and unfiltered AAAA, ordinary MAC filters AAAA", flush=True)
+        finally:
+            native.terminate()
+            try: native.wait(timeout=5)
+            except subprocess.TimeoutExpired: native.kill(); native.wait()
+        # Restore the old helper ownership controls' original empty guard.
+        run(r, "nft", "-f", str(pathlib.Path(fixtures) / "all.nft"))
+        run(r, "nft", "-f", str(pathlib.Path(fixtures) / "guard.nft"))
     finally:
         if luci is not None:
             luci.terminate()
@@ -459,20 +518,62 @@ with socket.socket(type=socket.SOCK_STREAM if transport == "tcp" else socket.SOC
     guard_state.mkdir(mode=0o700)
     (guard_state / "guard-device").write_text("lan0\n")
     (guard_state / "guard-device").chmod(0o600)
-    before = json.loads(run(r, "nft", "-j", "-s", "list", "table", "inet", "gofro_routing", capture_output=True).stdout)
+    def routing_objects():
+        result = json.loads(run(r, "nft", "-j", "-s", "list", "table", "inet", "gofro_routing", capture_output=True).stdout)
+        # Full Direct additionally synchronizes this owned set, including adoption of
+        # older tables without it. Every other object must remain byte-identical.
+        result["nftables"] = [x for x in result["nftables"] if x.get("set", {}).get("name") != "device_exclusions"]
+        return result
+    before = routing_objects()
     assert any(item.get("chain", {}).get("name") == "gofro_dns" for item in before["nftables"])
     without_dns = {"nftables": [item for item in before["nftables"]
                                if item.get("chain", {}).get("name") != "gofro_dns"
                                and item.get("rule", {}).get("chain") != "gofro_dns"]}
-    forward_guard = run(r, "nft", "-s", "-y", "list", "table", "inet", "gofro_guard", capture_output=True).stdout
+    forward_guard = run(r, "nft", "-s", "-y", "list", "chain", "inet", "gofro_guard", "gofro_guard", capture_output=True).stdout
     run(r, "nft", "-s", "-y", "list", "chain", "inet", "gofro_routing", "gofro_dns")
     for action in ("boot", "boot", "stop", "stop"):
         run(r, "env", f"GOFRO_GUARD_DIR={guard_state}", f"GOFRO_MODE_LOCK={root / 'mode.lock'}",
+            f"GOFRO_HELPERS={pathlib.Path(guard_helper).parent}",
             "sh", guard_helper, action)
-        after = json.loads(run(r, "nft", "-j", "-s", "list", "table", "inet", "gofro_routing", capture_output=True).stdout)
+        after = routing_objects()
         assert after == (before if action == "boot" else without_dns), f"guard {action} changed unexpected dataplane objects or retained DNS"
-        assert run(r, "nft", "-s", "-y", "list", "table", "inet", "gofro_guard", capture_output=True).stdout == forward_guard, f"guard {action} altered forwarding protection"
+        assert run(r, "nft", "-s", "-y", "list", "chain", "inet", "gofro_guard", "gofro_guard", capture_output=True).stdout == forward_guard, f"guard {action} altered forwarding protection"
+        for table_name in ("gofro_guard", "gofro_routing"):
+            listing = run(r, "nft", "-s", "list", "set", "inet", table_name, "device_exclusions", capture_output=True).stdout
+            assert "type ether_addr" in listing and "elements" not in listing
         print(f"PASS: actual guard {action}; expected DNS state, other dataplane objects and forwarding guard preserved", flush=True)
     print(f"PASS: {completed} actual DNS cases and 4 real guard boot/stop checks")
+
+    # Real startup and shell lifecycle synchronize the committed JSON before
+    # fallible TLS setup. No rendered guard may mask a stale exemption here.
+    config = json.loads((root / "config.json").read_text())
+    config["device_exclusions"] = ["02:00:00:00:00:02"]
+    committed = guard_state / "controller.json"
+    committed.write_text(json.dumps(config)); committed.chmod(0o600)
+    (guard_state / "controller.json.new").write_text('{"device_exclusions": []}')
+    failed_args = list(args)
+    failed_args[failed_args.index("--config") + 1] = str(committed)
+    failed_args[failed_args.index("--tls-cert") + 1] = str(root)  # directory, deterministic TLS failure
+    failed = subprocess.run(["ip", "netns", "exec", r, *failed_args], text=True, capture_output=True, timeout=15)
+    print("FAILED TLS STARTUP STDOUT:", failed.stdout, "STDERR:", failed.stderr, flush=True)
+    assert failed.returncode != 0 and "Is a directory (os error 21)" in failed.stderr, "startup did not fail reading the TLS certificate directory"
+    for action in (None, "boot", "stop"):
+        if action:
+            run(r, "nft", "-f", str(pathlib.Path(fixtures) / "publish-empty.nft"))
+            run(r, "env", f"GOFRO_GUARD_DIR={guard_state}", f"GOFRO_MODE_LOCK={root / 'mode.lock'}",
+                f"GOFRO_HELPERS={pathlib.Path(guard_helper).parent}", "sh", guard_helper, action)
+        for table_name in ("gofro_guard", "gofro_routing"):
+            listing = json.loads(run(r, "nft", "-j", "list", "set", "inet", table_name, "device_exclusions", capture_output=True).stdout)
+            actual = next(item["set"].get("elem", []) for item in listing["nftables"] if "set" in item)
+            assert actual == ["02:00:00:00:00:02"], (action, table_name, actual)
+        for excluded in (True, False):
+            run(c, "ip", "link", "set", "client0", "address", "02:00:00:00:00:02" if excluded else "02:00:00:00:00:01")
+            before_forward = counts()
+            run(c, "python3", "-c", 'import socket; s=socket.socket(type=socket.SOCK_DGRAM); s.sendto(b"committed guard", ("198.51.100.2",2080)); s.close()')
+            after_forward = counts()
+            assert after_forward["forward_before"] == before_forward["forward_before"] + 1, (action, before_forward, after_forward)
+            assert after_forward["forward_after"] == before_forward["forward_after"] + int(excluded), (action, excluded, before_forward, after_forward)
+        print("PASS: actual nft packet enforcement after", action or "failed TLS startup", "committed exclusion wins over candidate JSON", flush=True)
+    print("PACKET COUNTS:", json.dumps(counts()), flush=True)
     assert cold.returncode == 0, "PRODUCTION BUG: cold reconcile failure answers VIP DNS but canonical TLS/auth is unreachable; rendered fixture preload masks it"
 PY

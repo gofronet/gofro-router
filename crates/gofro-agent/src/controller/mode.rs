@@ -2,9 +2,9 @@ use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, anyhow};
 
-use super::{Change, apply_policy, clear_guard, external, update_config};
+use super::{Change, apply_policy, clear_guard, external, install_guard, update_config};
 use crate::{
-    AppState, dataplane,
+    AppState,
     model::{ControllerConfig, ServerProfile},
     network::{apply_mode, start_and_select, stop_tunnel},
     routing::RoutingPolicy,
@@ -25,24 +25,37 @@ pub(crate) fn set_mode(state: &AppState, vpn_enabled: bool) -> Result<()> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn reconcile(state: &AppState) -> Result<()> {
-    let _apply = crate::network::lock_apply(state)?;
+    let apply = crate::network::lock_apply(state)?;
+    reconcile_locked(state, &apply)
+}
+
+pub(crate) fn reconcile_locked(state: &AppState, _apply: &std::fs::File) -> Result<()> {
     let _update = state.fake_dns.begin_update()?;
     let config = state
         .config
         .lock()
         .map_err(|_| anyhow!("configuration lock poisoned"))?;
     state.routing_degraded.store(true, Ordering::Relaxed);
+    // Retry durability after a known rename before making desired exclusions effective.
+    crate::config::sync_committed(&state.config_path)?;
     let policy = RoutingPolicy::compile(config.routing.clone(), state.geodata.clone())?;
     let mut active = state
         .routing
         .write()
         .map_err(|_| anyhow!("routing lock poisoned"))?;
-    external("guard", || dataplane::install_guard(&state.lan))?;
+    install_guard(state, &config.device_exclusions)?;
     // Only a full reconcile may take ownership of a guard left by a failed update.
-    apply_policy(state, config.vpn_enabled, &policy)?;
+    apply_policy(
+        state,
+        config.vpn_enabled,
+        &policy,
+        &config.device_exclusions,
+    )?;
     *active = policy;
     state.fake_dns.set_vpn_enabled(config.vpn_enabled);
+    external("dns-cleanup", || crate::network::cleanup_dns_flows(state))?;
     external("network", || apply_network(state, &config))?;
     external("retire", || crate::network::retire_legacy_routing(state))?;
     clear_guard(state)?;

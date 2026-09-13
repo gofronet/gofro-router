@@ -43,6 +43,7 @@ test.skipIf(!process.env.ASSET_DIR || !process.env.PLAYWRIGHT_MODULE)("all mutat
           if (endpoint === "GET /api/auth/status") return await json({ state: "authenticated", csrf_token: "csrf" });
           if (endpoint === "GET /api/onboarding") return await json({ step, networks: [], setup_window_seconds: null, error: null });
           if (endpoint === "GET /api/status") return await json(failStatus ? { error: "observation unavailable" } : status, failStatus ? 500 : 200);
+          if (endpoint === "GET /api/lan-devices") return await json({ devices: [], discovery: "complete" });
           if (endpoint === "POST /api/routing") {
             status.routing.config = request.postDataJSON();
             failStatus = true;

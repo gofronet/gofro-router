@@ -96,6 +96,7 @@ link_runtime() {
 		usr/bin/gofro-relay \
 		usr/libexec/gofro/mode \
 		usr/libexec/gofro/network \
+		usr/libexec/gofro/dns-flows \
 		usr/libexec/gofro/guard \
 		usr/libexec/gofro/onboarding \
 		usr/libexec/gofro/service \
@@ -120,8 +121,8 @@ link_runtime() {
 		destination=/$path
 		mkdir -p "/$(dirname "$path")"
 		target=$CURRENT/$path
-		case "$path" in usr/libexec/gofro/guard|etc/init.d/gofro-guard)
-			# These must survive rollback to v15, which has neither guard file.
+		case "$path" in usr/libexec/gofro/guard|usr/libexec/gofro/dns-flows|etc/init.d/gofro-guard)
+			# Publish guard dependencies first; all survive rollback to v15.
 			target=$release/$path
 			if [ -L "$destination" ]; then
 				existing="$(readlink "$destination")"
@@ -381,6 +382,7 @@ for path in \
 	usr/libexec/gofro/update \
 	usr/libexec/gofro/network \
 	usr/libexec/gofro/guard \
+	usr/libexec/gofro/dns-flows \
 	usr/libexec/gofro/mode \
 	usr/libexec/gofro/onboarding \
 	usr/share/gofro/geosite.dat \
@@ -400,6 +402,7 @@ done
 mkdir "$LOCK" 2>/dev/null || die 'another installation or update is running'
 LOCKED=1
 STATUS_FILE="$(mktemp /tmp/gofro-status.XXXXXX)"
+"$ROOTFS/usr/libexec/gofro/transaction" panel-check || die 'panel DNS ownership validation failed'
 [ "$mode" != update ] || [ -s "$PENDING" ] || preflight_legacy_dns
 rm -rf "$RELEASES"/.[0-9]* "$APP_ROOT"/current.new.*
 
@@ -422,12 +425,12 @@ fi
 # OpenWrt does not ship stat by default; guard/transaction/service require it.
 if [ "$mode" = install ]; then
 	apk update
-	apk add ca-bundle coreutils-stat dnsmasq firewall4 ip-full jsonfilter kmod-wireguard \
+	apk add ca-bundle conntrack coreutils-stat dnsmasq firewall4 ip-full jq jsonfilter kmod-wireguard \
 		openssl-util openssh-client openssh-client-utils openssh-keygen sshpass uclient-fetch uhttpd wireguard-tools
 else
 	[ -n "$previous" ] || die 'Gofro is not installed'
 	apk update
-	apk add coreutils-stat openssh-client openssh-client-utils openssh-keygen sshpass
+	apk add conntrack coreutils-stat ip-full jq jsonfilter openssh-client openssh-client-utils openssh-keygen sshpass
 fi
 
 if [ -s "$PENDING" ]; then
@@ -530,7 +533,7 @@ link_runtime
 # Pre-init must guard the attested OLD device; only full agent reconcile retires history.
 transaction attest "$BACKUP" || die 'cannot publish proven legacy routing history'
 switch_current "$release"
-if init_security && migrate_legacy_dns && configure_vpn_zone && restart_services && healthy; then
+if init_security && migrate_legacy_dns && transaction panel-apply && configure_vpn_zone && restart_services && healthy; then
 	write_version "$VERSION"
 	clear_pending
 	ROLLBACK=

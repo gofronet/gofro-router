@@ -12,7 +12,44 @@ case "$1" in boot|prepare|stop) ;; *) exit 2 ;; esac
 [ "$(id -u)" = 0 ] || die 'root required'
 state=${GOFRO_GUARD_DIR:-/etc/gofro}
 helpers=${GOFRO_HELPERS:-/usr/libexec/gofro}
-# Never nest this lock with mode: release it before invoking mode check.
+# Same persistent inode as the controller; order is apply (8), then mode (9).
+case "$state" in /*) ;; *) die 'state directory must be absolute' ;; esac
+umask 077
+[ -e "$state" ] || [ -L "$state" ] || mkdir -p "$state"
+ancestor=$state
+while :; do
+	if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then die 'unsafe state ancestor'; fi
+	case "$(stat -c '%u:%a' "$ancestor")" in
+		0:*[2367][0-7]|0:*[2367]) die 'writable state ancestor' ;;
+		0:*) ;; *) die 'non-root state ancestor' ;;
+	esac
+	[ "$ancestor" != / ] || break
+	ancestor="$(dirname "$ancestor")"
+done
+[ "$(stat -c '%u:%a' "$state")" = 0:700 ] || die 'unsafe state directory'
+if [ ! -e "$state/apply.lock" ] && [ ! -L "$state/apply.lock" ]; then
+	(set -C; : > "$state/apply.lock") || die 'cannot create apply lock'
+fi
+if [ -L "$state/apply.lock" ] || [ ! -f "$state/apply.lock" ] ||
+	[ "$(stat -c '%u:%a:%h' "$state/apply.lock")" != 0:600:1 ]; then die 'unsafe apply lock'; fi
+case "${GOFRO_APPLY_LOCK_FD:-}" in
+	''|8) ;;
+	*) die 'invalid inherited apply lock descriptor' ;;
+esac
+# v17 procd holds FD8 without the environment contract. Never reopen that
+# inode while its parent holds the lock: a second open description deadlocks.
+if inherited="$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)"; then
+	[ "$inherited" = "$(stat -c '%d:%i' "$state/apply.lock")" ] || die 'inherited apply lock inode mismatch'
+	# Also safely acquires a same-inode descriptor that was not yet locked.
+	flock -n 8 || die 'inherited apply lock unavailable'
+else
+	if [ "${GOFRO_APPLY_LOCK_FD:-}" = 8 ] || [ -e /proc/self/fd/8 ] || [ -L /proc/self/fd/8 ]; then
+		die 'cannot validate inherited apply lock'
+	fi
+	exec 8>>"$state/apply.lock"
+	flock 8 || die 'cannot acquire apply lock'
+fi
+# Release mode before the caller invokes mode check.
 exec 9>"${GOFRO_MODE_LOCK:-/var/lock/gofro-mode.lock}"
 flock -n 9 || die 'another routing operation is in progress'
 umask 077
@@ -27,20 +64,60 @@ if [ -e "$state/guard-device" ] || [ -L "$state/guard-device" ]; then
 	valid_device "$previous"
 fi
 
+exclusions=
+read_exclusions() (
+	config=$state/controller.json
+	[ -e "$config" ] || [ -L "$config" ] || exit 0
+	[ ! -L "$config" ] && [ -f "$config" ] &&
+		[ "$(stat -c '%u:%a:%h' "$config")" = 0:600:1 ] || exit 1
+	# One strict parse of one committed file. jsonfilter accepts trailing
+	# garbage/commas and scalar output truncates NUL; neither may grant access.
+	jq --stream -ers '
+		. as $events
+		| [.[] | select((length == 2 and (.[0] | length) == 1) or (length == 1 and (.[0] | length) == 2)) | .[0][0]]
+		| if (group_by(.) | any(.[]; length > 1)) then error("duplicate controller member") else [$events | fromstream(.[])] end
+		| if length != 1 or (.[0] | type) != "object" then error("controller must be one object") else .[0] end
+		| if has("device_exclusions") then .device_exclusions else [] end
+		| if type != "array" then error("device_exclusions must be an array") else . end
+		| if length > 256 then error("too many device exclusions") else . end
+		| if all(.[]; type == "string" and test("^[0-9a-f][02468ace](:[0-9a-f]{2}){5}\\z") and . != "00:00:00:00:00:00")
+		  then join(", ") else error("invalid device exclusion") end
+	' "$config"
+)
+
 arm() {
 	# One atomic replacement, including when the table does not exist yet.
+	tables="$(nft list tables)" || die 'cannot inspect nft tables'
 	script="add table inet gofro_guard
 flush table inet gofro_guard
+add set inet gofro_guard device_exclusions { type ether_addr; }
+flush set inet gofro_guard device_exclusions
 add chain inet gofro_guard gofro_guard { type filter hook forward priority filter; policy accept; }
-add rule inet gofro_guard gofro_guard iifname \"$1\" oifname != \"$1\" drop"
+add rule inet gofro_guard gofro_guard iifname \"$1\" oifname != \"$1\"${exclusions:+ ether saddr != @device_exclusions} drop"
+	if [ -n "$exclusions" ]; then script="$script
+add element inet gofro_guard device_exclusions { $exclusions }"; fi
+	if printf '%s\n' "$tables" | grep -qx 'table inet gofro_routing'; then
+		script="$script
+add set inet gofro_routing device_exclusions { type ether_addr; }
+flush set inet gofro_routing device_exclusions"
+		if [ -n "$exclusions" ]; then script="$script
+add element inet gofro_routing device_exclusions { $exclusions }"; fi
+	fi
 	printf '%s\n' "$script" | nft -c -f - || die 'guard check failed'
 	printf '%s\n' "$script" | nft -f - || die 'cannot arm guard'
 }
 
-# No ubus, UCI, Rust, or address dependency when booting or stopping.
+# Invalid committed configuration revokes all exceptions before reporting failure.
+config_valid=1
+exclusions="$(read_exclusions)" || { exclusions=; config_valid=0; }
+# No ubus, UCI, Rust, or address dependency for enforcement.
 if [ -n "$previous" ]; then arm "$previous"; fi
 case "$1" in
-	boot) [ -n "$previous" ] || die 'missing validated boot device'; exit 0 ;;
+	boot)
+		[ -n "$previous" ] || die 'missing validated boot device'
+		[ "$config_valid" = 1 ] || die 'invalid controller device_exclusions; guard armed fail-closed'
+		"$helpers/dns-flows" cleanup "$previous" 5353
+		exit 0 ;;
 	prepare)
 		snapshot="$("$helpers/network")" || die 'network validation failed'
 		device="$(printf '%s' "$snapshot" | jsonfilter -e '@.device')"
@@ -60,15 +137,24 @@ case "$1" in
 		chmod 600 "$tmp"
 		mv -f "$tmp" "$state/guard-device"
 		sync
+		[ "$config_valid" = 1 ] || die 'invalid controller device_exclusions; guard armed fail-closed'
+		"$helpers/dns-flows" cleanup "$device" 5353 || die 'DNS flow cleanup failed; guard retained'
 		printf '%s\n' "$snapshot"
 		exit 0 ;;
 esac
 
 [ -n "$previous" ] || die 'missing validated boot device; cannot safely stop'
+[ "$config_valid" = 1 ] || die 'invalid controller device_exclusions; guard armed fail-closed'
 tables="$(nft list tables)" || die 'cannot inspect nft tables'
-printf '%s\n' "$tables" | grep -qx 'table inet gofro_routing' || exit 0
+if ! printf '%s\n' "$tables" | grep -qx 'table inet gofro_routing'; then
+	"$helpers/dns-flows" cleanup "$previous" 5353
+	exit 0
+fi
 table="$(nft -s list table inet gofro_routing)" || die 'cannot inspect routing table'
-printf '%s\n' "$table" | grep -q '^[[:space:]]*chain gofro_dns {' || exit 0
+if ! printf '%s\n' "$table" | grep -q '^[[:space:]]*chain gofro_dns {'; then
+	"$helpers/dns-flows" cleanup "$previous" 5353
+	exit 0
+fi
 chain="$(nft -s -y list chain inet gofro_routing gofro_dns)" || die 'cannot inspect DNS chain'
 chain="$(printf '%s\n' "$chain" | normalize)"
 base="table inet gofro_routing {
@@ -81,10 +167,12 @@ end='}
 [ "$chain" = "$base
 $rules
 $end" ] || [ "$chain" = "$base
+iifname \"$previous\" ether saddr @device_exclusions return
+$rules
+$end" ] || [ "$chain" = "$base
 $end" ] || die 'refusing foreign gofro_dns chain'
 script='flush chain inet gofro_routing gofro_dns
 delete chain inet gofro_routing gofro_dns'
 printf '%s\n' "$script" | nft -c -f - || die 'DNS cleanup check failed'
 printf '%s\n' "$script" | nft -f - || die 'DNS cleanup failed'
-# No broad conntrack deletion: only new flows are restored without conntrack-tools.
-echo 'gofro guard: new DNS flows use dnsmasq; existing redirected NAT flows remain until conntrack expiry or client tuple renewal' >&2
+"$helpers/dns-flows" cleanup "$previous" 5353 || die 'DNS flow cleanup failed; guard retained'

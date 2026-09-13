@@ -4,6 +4,7 @@
   import Plus from "lucide-svelte/icons/plus";
   import Search from "lucide-svelte/icons/search";
   import Dialog from "../components/dialog.svelte";
+  import DeviceExclusions from "../components/device-exclusions.svelte";
   import { routingNameInputSchema } from "../api/schemas";
   import type { RouteTarget, RoutingConfig, RoutingTest } from "../domain/models";
   import { getAppContext } from "../app-context";
@@ -155,6 +156,8 @@
     <p>{mode === "all" ? "Правила сохранены, но сейчас не применяются." : defaultTarget === "block" ? "Остальные сайты блокируются." : defaultTarget === "vpn" ? "Остальные сайты открываются через VPN." : "Остальные сайты открываются без VPN."}</p>
     {#if !status.vpn_enabled}<p>VPN отключён. Правила блокировки могут оставаться активными.</p>{/if}
   </section>
+
+  <DeviceExclusions />
 
   <div class="section-caption">
     <div><h2 id="routing-rules-title">Правила <span class="count">{draft.length}</span></h2><p>Если сайту подходят несколько правил, сработает верхнее.</p></div>

@@ -21,6 +21,7 @@ uci -q get network.gofro_setup >/dev/null && die 'finish legacy setup manually i
 [ ! -d /sys/class/net/br-gofro-setup ] || die 'finish legacy setup manually in OpenWrt before continuing'
 
 # Do every collision check before generating a key or editing UCI.
+/usr/libexec/gofro/transaction panel-check || die 'panel DNS ownership validation failed'
 for name in gofro_vpn gofro_lan_vpn gofro_lan_http gofro_lan_https gofro_lan_dns; do
 	if uci -q get "firewall.$name" >/dev/null && [ ! -s "$marker" ]; then die "firewall.$name already exists"; fi
 done
@@ -64,6 +65,7 @@ uci set firewall.gofro_vpn.input=REJECT; uci set firewall.gofro_vpn.output=ACCEP
 uci set firewall.gofro_lan_vpn='forwarding'; uci set firewall.gofro_lan_vpn.src="$zone"; uci set firewall.gofro_lan_vpn.dest=gofro_vpn
 for rule in http https dns; do case "$rule" in http) proto=tcp; port=8081 ;; https) proto=tcp; port=8443 ;; dns) proto='tcp udp'; port=5353 ;; esac; uci set "firewall.gofro_lan_$rule=rule"; uci set "firewall.gofro_lan_$rule.src=$zone"; uci set "firewall.gofro_lan_$rule.proto=$proto"; uci set "firewall.gofro_lan_$rule.dest_port=$port"; uci set "firewall.gofro_lan_$rule.target=ACCEPT"; done
 uci commit firewall
+/usr/libexec/gofro/transaction panel-apply
 
 if [ ! -s "$state_dir/setup-code" ]; then
 	openssl rand -hex 16 > "$state_dir/setup-code.new"; chmod 600 "$state_dir/setup-code.new"; mv -f "$state_dir/setup-code.new" "$state_dir/setup-code"

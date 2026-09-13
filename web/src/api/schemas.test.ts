@@ -2,9 +2,20 @@ import assert from "node:assert/strict";
 import {
   domainRuleInputSchema, ipRuleInputSchema, routingConfigInputSchema,
   routingConfigSchema, routingNameInputSchema, serverInputSchema, serverSchema, vpsHostInputSchema,
+  macSchema, deviceExclusionsSchema, statusSchema,
 } from "./schemas";
 
 declare function test(name: string, run: () => void): void;
+
+test("device exclusions normalize unicast MACs and stay outside destination packs", () => {
+  assert.equal(macSchema.parse(" 02:AB:cd:EF:01:23 "), "02:ab:cd:ef:01:23");
+  for (const mac of ["00:00:00:00:00:01", "fe:ff:ff:ff:ff:ff"]) assert.ok(macSchema.safeParse(mac).success);
+  for (const mac of ["00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff", "01:00:5e:00:00:01", "33:33:00:00:00:01", "02-ab-cd-ef-01-23", "2:ab:cd:ef:01:23", "02:gg:cd:ef:01:23", "02:ab:cd:ef:01:23:45"]) assert.equal(macSchema.safeParse(mac).success, false, mac);
+  assert.ok(deviceExclusionsSchema.safeParse(Array(256).fill("02:00:00:00:00:01")).success);
+  assert.equal(deviceExclusionsSchema.safeParse(Array(257).fill("02:00:00:00:00:01")).success, false);
+  assert.deepEqual(statusSchema.shape.device_exclusions.parse(undefined), []);
+  assert.equal("device_exclusions" in routingConfigSchema.parse({ domain_rules: [], ip_rules: [], default_target: "vpn", device_exclusions: ["02:00:00:00:00:01"] }), false);
+});
 
 test("routing input names count Unicode scalars and use Rust whitespace/control semantics", () => {
   for (const character of ["a", "\u044f", "\u{1f680}"]) {

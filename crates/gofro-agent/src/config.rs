@@ -2,7 +2,7 @@ use std::{
     fs::{self, OpenOptions, Permissions},
     io::Write,
     net::{IpAddr, Ipv4Addr},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::Path,
 };
 
@@ -328,7 +328,65 @@ pub(crate) fn load(path: &Path) -> Result<ControllerConfig> {
         validate_saved_server(server)?;
     }
     normalize_routing(&mut config.routing)?;
+    normalize_exclusions(&mut config.device_exclusions)?;
     Ok(config)
+}
+
+// Called under the lifecycle lock, whose parent/ancestor checks protect the namespace.
+pub(crate) fn load_committed(path: &Path) -> Result<ControllerConfig> {
+    let metadata = fs::symlink_metadata(path)?;
+    let parent = fs::symlink_metadata(path.parent().context("configuration has no parent")?)?;
+    anyhow::ensure!(
+        metadata.is_file()
+            && metadata.nlink() == 1
+            && metadata.mode() & 0o022 == 0
+            && metadata.uid() == parent.uid(),
+        "unsafe configuration file"
+    );
+    load(path)
+}
+
+pub(crate) fn normalize_exclusions(macs: &mut Vec<crate::model::MacAddress>) -> Result<()> {
+    macs.sort_unstable();
+    macs.dedup();
+    anyhow::ensure!(
+        macs.len() <= 256,
+        "at most 256 device exclusions are allowed"
+    );
+    Ok(())
+}
+
+pub(crate) fn sync_committed(path: &Path) -> Result<()> {
+    fs::File::open(path)?.sync_all()?;
+    fs::File::open(path.parent().context("configuration has no parent")?)?.sync_all()?;
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) struct PublishedSaveError(pub(crate) std::io::Error);
+impl std::fmt::Display for PublishedSaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "configuration published but directory sync failed: {}",
+            self.0
+        )
+    }
+}
+impl std::error::Error for PublishedSaveError {}
+
+#[cfg(test)]
+thread_local! { pub(crate) static FAIL_SYNC: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) }; }
+
+#[cfg(test)]
+fn check_sync(stage: &str) -> std::io::Result<()> {
+    FAIL_SYNC.with(|failure| {
+        if failure.get() == Some(stage) {
+            failure.set(None);
+            return Err(std::io::Error::other("injected sync failure"));
+        }
+        Ok(())
+    })
 }
 
 pub(crate) fn save(path: &Path, config: &ControllerConfig) -> Result<()> {
@@ -344,13 +402,69 @@ pub(crate) fn save(path: &Path, config: &ControllerConfig) -> Result<()> {
         .with_context(|| format!("failed to protect {}", temporary.display()))?;
     file.write_all(&serde_json::to_vec_pretty(config)?)
         .with_context(|| format!("failed to write {}", temporary.display()))?;
+    #[cfg(test)]
+    check_sync("file")?;
+    file.sync_all().context("failed to sync configuration")?;
     drop(file);
-    fs::rename(&temporary, path).with_context(|| format!("failed to replace {}", path.display()))
+    fs::rename(&temporary, path)
+        .with_context(|| format!("failed to replace {}", path.display()))?;
+    #[cfg(test)]
+    check_sync("parent").map_err(PublishedSaveError)?;
+    fs::File::open(path.parent().unwrap_or(Path::new(".")))
+        .and_then(|parent| parent.sync_all())
+        .map_err(PublishedSaveError)?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exclusion_load_deduplicates_and_bounds_unique_macs() {
+        let path =
+            std::env::temp_dir().join(format!("gofro-exclusions-{}.json", std::process::id()));
+        let mut config: ControllerConfig = serde_json::from_str(r#"{"vpn_enabled":false,"active_server_key":null,"servers":[],"routing":{"domain_rules":[],"ip_rules":[],"default_target":"direct"}}"#).unwrap();
+        config.device_exclusions = vec!["02:00:00:00:00:01".parse().unwrap(); 300];
+        save(&path, &config).unwrap();
+        assert_eq!(load(&path).unwrap().device_exclusions.len(), 1);
+        config.device_exclusions = (0..256)
+            .map(|n| format!("02:00:00:00:00:{n:02x}").parse().unwrap())
+            .collect();
+        save(&path, &config).unwrap();
+        assert_eq!(load(&path).unwrap().device_exclusions.len(), 256);
+        config
+            .device_exclusions
+            .push("02:00:00:00:01:00".parse().unwrap());
+        save(&path, &config).unwrap();
+        assert!(load(&path).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn committed_config_rejects_symlink_hardlink_and_foreign_writable_file() {
+        let directory =
+            std::env::temp_dir().join(format!("gofro-committed-config-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.json");
+        fs::write(
+            &path,
+            r#"{"vpn_enabled":false,"active_server_key":null,"servers":[]}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+        load_committed(&path).unwrap();
+        let alias = directory.join("alias");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(load_committed(&alias).is_err());
+        fs::remove_file(&alias).unwrap();
+        fs::hard_link(&path, &alias).unwrap();
+        assert!(load_committed(&path).is_err());
+        fs::remove_file(&alias).unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o622)).unwrap();
+        assert!(load_committed(&path).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn validates_server_profile() {
@@ -438,6 +552,7 @@ mod tests {
     fn saves_private_keys_with_owner_only_permissions() {
         let path = std::env::temp_dir().join(format!("gofro-config-{}.json", std::process::id()));
         let config = ControllerConfig {
+            device_exclusions: vec![],
             vpn_enabled: false,
             active_server_key: None,
             servers: vec![ServerProfile {
