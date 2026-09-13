@@ -248,7 +248,8 @@ test("inventory failures preserve exclusions and manual writes; late inventory c
   assert.deepEqual(app.status.device_exclusions, [mac]);
   const html = render(payload => { setAppContext(app); DeviceExclusions(payload, {}); }).body;
   assert.match(html, /02:00:00:00:00:01/);
-  assert.match(html, /Обнаружение устройств недоступно/);
+  assert.match(html, /Список устройств недоступен/);
+  assert.match(html, /Нет текущего IP/);
   assert.match(html, /<input[^>]*placeholder="02:ab:cd:ef:01:23"/);
   assert.match(html, /<button class="btn">Добавить напрямую/);
   api.lanDevices.get = async () => ({ devices: [], discovery: "partial" });

@@ -399,8 +399,7 @@ async function deviceChecks(browser) {
     assert.equal(Object.hasOwn(state.status, "device_exclusions"), false, "legacy status omits exclusions");
     assert.equal(await devicePanel(page).locator(".count").innerText(), "0/256", "missing status field defaults to []");
     const copy = await devicePanel(page).innerText();
-    assert.match(copy, /все VPN-, блокирующие и DNS-правила Gofro обходятся/);
-    assert.match(copy, /IPv6 тоже работает напрямую/);
+    assert.match(copy, /Включите переключатель, чтобы весь интернет устройства шёл напрямую/);
     await deviceSwitch(page).click();
     await checked(page, "Ноутбук", true);
     await checked(page, "Телефон", false);
@@ -423,7 +422,7 @@ async function deviceChecks(browser) {
     await refreshDevices(page);
     await checked(page, pickedMac, true);
     assert.deepEqual(state.status.device_exclusions, [pickedMac, manualMac], "disappearing discovered device remains saved");
-    await close(test, `devices omitted status defaults [], discovered pick, only selected MAC, IPv6/DNS copy, DHCP same MAC, uppercase manual canonical POST, reload ${width}px`);
+    await close(test, `devices omitted status defaults [], discovered pick, only selected MAC, current IP, DHCP same MAC, uppercase manual canonical POST, reload ${width}px`);
 
     test = await open(browser, "/#/routing", width, false, theme); ({ page, state } = test);
     await checked(page, "Ноутбук", false);
@@ -485,7 +484,7 @@ async function deviceChecks(browser) {
       state.inventory = { discovery: discovery === "partial" ? "partial" : "unavailable", devices: [] };
       if (discovery === "error") state.fail = { endpoint: "GET /api/lan-devices", error: "inventory_failed" };
       await page.reload(); await checked(page, offlineMac, true);
-      await devicePanel(page).getByText(discovery === "partial" ? /Список устройств неполный/ : /Обнаружение устройств недоступно/).waitFor();
+      await devicePanel(page).getByText(discovery === "partial" ? /Список устройств неполный/ : /Список устройств недоступен/).waitFor();
       if (discovery === "error") await devicePanel(page).getByText("inventory_failed", { exact: true }).waitFor();
       const before = structuredClone(state.status.routing.config);
       assert.equal(await page.getByRole("button", { name: "Добавить напрямую", exact: true }).isDisabled(), false);

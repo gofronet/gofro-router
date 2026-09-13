@@ -27,22 +27,17 @@
 <section class="panel" aria-labelledby="device-exclusions-title">
   <div class="panel-head"><h2 id="device-exclusions-title">Устройства напрямую <span class="count">{saved.length}/256</span></h2></div>
   <div class="panel-body">
-    <p>Весь интернет этих устройств идёт напрямую через OpenWrt: все VPN-, блокирующие и DNS-правила Gofro обходятся. IPv6 тоже работает напрямую. Это не зависит от режима VPN, состояния туннеля или работы Gofro.</p>
-    <details class="disclosure">
-      <summary>Как определяется устройство</summary>
-      <p>Исключение привязано к MAC, а не к IP: смена адреса по DHCP его не меняет. Новый приватный MAC — новое устройство. За другим роутером с NAT виден MAC этого роутера, и исключение относится ко всем устройствам за ним.</p>
-    </details>
+    <p>Включите переключатель, чтобы весь интернет устройства шёл напрямую.</p>
     <button class="btn ghost" type="button" disabled={app.inventoryLoading} onclick={() => app.refreshLanDevices()}>{app.inventoryLoading ? "Ищем устройства…" : "Обновить список устройств"}</button>
-    <p class="small">Имена и IP помогают выбрать устройство; список не подтверждает, что оно сейчас в сети. Сохранённые MAC остаются и без обнаружения.</p>
     {#if app.lanDevices.discovery !== "complete"}
-      <p class="notice" role="status">{app.lanDevices.discovery === "partial" ? "Список устройств неполный." : "Обнаружение устройств недоступно."} Можно добавить MAC вручную; сохранённые исключения действуют независимо от списка.</p>
+      <p class="notice" role="status">{app.lanDevices.discovery === "partial" ? "Список устройств неполный." : "Список устройств недоступен."} Можно добавить MAC вручную.</p>
     {/if}
     {#if app.inventoryError}<p class="small">{app.inventoryError}</p>{/if}
     {#each devices as device (device.mac)}
       {@const excluded = saved.includes(device.mac)}
       <div class="flex items-center gap-3 py-3">
         <button class="switch" type="button" role="switch" aria-checked={excluded} aria-label={`Напрямую: ${device.name || device.mac}`} disabled={disabled || (!excluded && saved.length >= 256)} onclick={() => app.setDeviceExcluded({ mac: device.mac, excluded: !excluded })}><span class="switch-track"></span></button>
-        <div class="min-w-0 break-words"><strong>{device.name || "Устройство без имени"}</strong><p>{device.mac}{#if excluded} · Сохранено{/if}</p><p class="small">{device.addresses.join(", ") || "Нет данных об IP"}</p></div>
+        <div class="min-w-0 break-words"><strong>{device.name || "Устройство без имени"}</strong><p>{device.addresses.join(", ") || "Нет текущего IP"}</p><p class="small">{device.mac}{#if excluded} · Сохранено{/if}</p></div>
       </div>
     {/each}
     <form onsubmit={add}>
