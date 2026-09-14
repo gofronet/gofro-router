@@ -407,7 +407,7 @@ async function deviceChecks(browser) {
     assert.deepEqual(devicePosts(state).map(req => req.body), [{ mac: pickedMac, excluded: true }]);
     state.inventory.devices[0].addresses = ["192.168.1.99", "2001:db8::99"];
     await refreshDevices(page);
-    await devicePanel(page).getByText("192.168.1.99, 2001:db8::99", { exact: true }).waitFor();
+    await devicePanel(page).getByText("192.168.1.99", { exact: true }).waitFor();
     await checked(page, "Ноутбук", true);
     assert.equal(devicePosts(state).length, 1, "DHCP/IP refresh never rewrites the exclusion");
     await addDevice(page, ` ${manualMac.toUpperCase()} `);

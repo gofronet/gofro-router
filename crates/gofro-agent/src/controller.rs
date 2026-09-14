@@ -36,6 +36,19 @@ pub(crate) fn update_device_exclusion(
     })
 }
 
+pub(crate) fn set_auto_update(state: &AppState, enabled: bool) -> Result<()> {
+    let _apply = crate::network::lock_apply(state)?;
+    let mut config = state
+        .config
+        .lock()
+        .map_err(|_| anyhow!("configuration lock poisoned"))?;
+    let mut next = config.clone();
+    next.auto_update_enabled = enabled;
+    save(&state.config_path, &next)?;
+    *config = next;
+    Ok(())
+}
+
 // All desired-state writers take the same locks, including offline server edits.
 fn update_config(
     state: &AppState,

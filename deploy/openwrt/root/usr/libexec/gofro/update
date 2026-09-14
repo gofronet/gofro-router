@@ -14,10 +14,15 @@ CHECK_INTERVAL=${GOFRO_UPDATE_CHECK_INTERVAL:-21600}
 START_DELAY=${GOFRO_UPDATE_START_DELAY:-300}
 POLL_INTERVAL=${GOFRO_UPDATE_POLL_INTERVAL:-5}
 ONBOARDING=${GOFRO_ONBOARDING_STATE:-/etc/gofro/onboarding-state}
+CONFIG=${GOFRO_CONTROLLER_CONFIG:-/etc/gofro/controller.json}
 
 setup_pending() {
 	[ -e "$ONBOARDING" ] || return 1
 	[ "$(cat "$ONBOARDING" 2>/dev/null)" != server ]
+}
+
+auto_update_enabled() {
+	[ -r "$CONFIG" ] && [ "$(jsonfilter -i "$CONFIG" -e '@.auto_update_enabled' 2>/dev/null)" = true ]
 }
 
 write_result() {
@@ -70,7 +75,7 @@ esac
 mkdir -p "$STATE_DIR"
 delay=$START_DELAY
 while :; do
-	if [ -e "$TRIGGER" ] || [ "$delay" -le 0 ]; then
+	if [ -e "$TRIGGER" ] || { [ "$delay" -le 0 ] && auto_update_enabled; }; then
 		if ! setup_pending; then
 			run_update
 			delay=$CHECK_INTERVAL

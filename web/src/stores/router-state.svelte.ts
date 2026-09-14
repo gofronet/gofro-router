@@ -413,6 +413,9 @@ export class RouterState {
     await this.mutate("update", api.update.start);
   };
 
+  setAutoUpdate = (enabled: boolean): Promise<boolean> =>
+    this.mutate("auto-update", () => api.update.setAuto(enabled));
+
   importServer = (input: ProfileInput): Promise<boolean> =>
     this.mutate("import-server", () => api.servers.import(input));
 

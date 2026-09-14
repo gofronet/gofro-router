@@ -299,6 +299,7 @@ mod tests {
             device_exclusions: vec![],
             version: env!("CARGO_PKG_VERSION"),
             update: UpdateStatus {
+                auto_update_enabled: false,
                 running: false,
                 result: None,
             },
