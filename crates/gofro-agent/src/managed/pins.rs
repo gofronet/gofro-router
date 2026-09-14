@@ -133,15 +133,8 @@ pub(super) fn pin_host(dir: &Path, host: &str, port: u16, host_key: &str) -> Res
         }
         Err(error) => return Err(error).context("failed to persist SSH host pin"),
     }
-    let safe_metadata = |metadata: &fs::Metadata| {
-        metadata.is_file()
-            && !metadata.file_type().is_symlink()
-            && metadata.mode() & 0o7777 == 0o600
-            && metadata.len() <= 128
-            && (cfg!(test) || metadata.uid() == 0)
-    };
     let metadata = fs::symlink_metadata(&path)?;
-    if !safe_metadata(&metadata) {
+    if !safe_pin_metadata(&metadata) {
         bail!("unsafe stored SSH host pin");
     }
     let mut file = File::open(&path)?;
@@ -183,7 +176,7 @@ pub(super) fn pin_host(dir: &Path, host: &str, port: u16, host_key: &str) -> Res
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error).context("failed to inspect SSH host pin alias"),
             };
-            if safe_metadata(&alias_metadata)
+            if safe_pin_metadata(&alias_metadata)
                 && alias_metadata.uid() == metadata.uid()
                 && alias_metadata.dev() == metadata.dev()
                 && alias_metadata.ino() == metadata.ino()
@@ -199,7 +192,7 @@ pub(super) fn pin_host(dir: &Path, host: &str, port: u16, host_key: &str) -> Res
         }
     }
     let recovered = fs::symlink_metadata(&path)?;
-    if !safe_metadata(&recovered)
+    if !safe_pin_metadata(&recovered)
         || recovered.nlink() != 1
         || recovered.dev() != metadata.dev()
         || recovered.ino() != metadata.ino()
@@ -211,6 +204,44 @@ pub(super) fn pin_host(dir: &Path, host: &str, port: u16, host_key: &str) -> Res
     pin_io("pin-directory-sync", || File::open(dir)?.sync_all())
         .context("failed to persist SSH host pin directory entry")?;
     Ok(())
+}
+
+fn safe_pin_metadata(metadata: &fs::Metadata) -> bool {
+    metadata.is_file()
+        && !metadata.file_type().is_symlink()
+        && metadata.mode() & 0o7777 == 0o600
+        && metadata.len() <= 128
+        && (cfg!(test) || metadata.uid() == 0)
+}
+
+pub(super) fn reset_host_pin(dir: &Path, host: &str, port: u16) -> Result<()> {
+    management_directory(dir)?;
+    let path = dir.join(format!("host-{host}-{port}.pub"));
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("failed to inspect SSH host pin"),
+    };
+    if !safe_pin_metadata(&metadata) || metadata.nlink() != 1 {
+        bail!("unsafe stored SSH host pin");
+    }
+    let mut file = File::open(&path)?;
+    let opened = file.metadata()?;
+    if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
+        bail!("stored SSH host pin changed while opening");
+    }
+    let mut stored = String::new();
+    Read::by_ref(&mut file)
+        .take(129)
+        .read_to_string(&mut stored)?;
+    parse_host_key(&stored).context("invalid stored SSH host pin")?;
+    let current = fs::symlink_metadata(&path)?;
+    if current.dev() != metadata.dev() || current.ino() != metadata.ino() {
+        bail!("stored SSH host pin changed before removal");
+    }
+    fs::remove_file(path).context("failed to remove SSH host pin")?;
+    pin_io("pin-directory-sync", || File::open(dir)?.sync_all())
+        .context("failed to persist SSH host pin removal")
 }
 
 #[cfg(test)]
@@ -393,6 +424,33 @@ mod tests {
         std::os::unix::fs::symlink(fixture.root.join("missing"), &pin).unwrap();
         assert!(pin_host(dir, "1.1.1.1", 22, KEY).is_err());
         assert!(!fixture.root.join("missing").exists());
+    }
+
+    #[test]
+    fn reset_removes_only_an_unused_safe_pin() {
+        let fixture = Fixture::new();
+        let dir = &fixture.state.management_dir;
+        pin_host(dir, "1.1.1.1", 22, KEY).unwrap();
+        let alias = dir.join("unexpected-link");
+        fs::hard_link(dir.join("host-1.1.1.1-22.pub"), &alias).unwrap();
+        assert!(super::super::reset_host_pin(&fixture.state, "1.1.1.1", 22).is_err());
+        fs::remove_file(alias).unwrap();
+        super::super::reset_host_pin(&fixture.state, "1.1.1.1", 22).unwrap();
+        assert!(!dir.join("host-1.1.1.1-22.pub").exists());
+        super::super::reset_host_pin(&fixture.state, "1.1.1.1", 22).unwrap();
+
+        let server = fixture.server();
+        controller::add_server(&fixture.state, server).unwrap();
+        assert!(
+            super::super::reset_host_pin(&fixture.state, "1.1.1.1", 22)
+                .unwrap_err()
+                .to_string()
+                .contains("still used")
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("host-1.1.1.1-22.pub")).unwrap(),
+            KEY
+        );
     }
 
     #[test]

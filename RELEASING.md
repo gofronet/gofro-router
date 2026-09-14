@@ -3,8 +3,8 @@
 The next release workflow cross-compiles static musl binaries for eight
 supported OpenWrt 25.12 ABIs and one x86_64 VPS target: nine signed bundles,
 nine manifests, nine signatures and two installers (29 release assets total).
-The next signed candidate workspace version is `0.5.20`. The installed signed
-v0.5.19 candidate is the immutable, pinned baseline; changes require a new
+The next signed candidate workspace version is `0.5.21`. The installed signed
+v0.5.20 candidate is the immutable, pinned baseline; changes require a new
 candidate, not modification of its artifact. Published Latest remains v0.5.15.
 
 ## Create a release
@@ -13,7 +13,7 @@ candidate, not modification of its artifact. Published Latest remains v0.5.15.
    `Cargo.toml` and the workspace package versions in `Cargo.lock`.
 2. Run the checks below and squash-merge the pull request into `main`.
 3. Open **Actions -> Release -> Run workflow**, select `main`, and enter the
-   version without the `v` prefix (`0.5.20`). Leave **publish** unchecked
+   version without the `v` prefix (`0.5.21`). Leave **publish** unchecked
    (the default) to build a candidate.
 
 The workflow requires the latest `main` commit and a matching Cargo workspace
@@ -46,7 +46,7 @@ are scoped to a workflow run; record the run ID and artifact IDs as well.
    and router-to-VPS tunnel. Record untested ABIs explicitly. CI/emulation alone
    is not hardware qualification.
 
-For v0.5.20, also record the upgrade from the pinned signed v0.5.19 baseline.
+For v0.5.21, also record the upgrade from the pinned signed v0.5.20 baseline.
 Qualify bare `wifi.gofro.net` from LAN using the router's local LAN resolver:
 its DNS A answer is reserved VIP `198.18.0.0` (TTL 30 seconds), outside FakeDNS
 lease allocation. Renew stale cached DNS answers (wait out the previous TTL or

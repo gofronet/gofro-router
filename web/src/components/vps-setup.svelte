@@ -8,7 +8,7 @@
   import type { RouterState } from "../stores/router-state.svelte";
 
   let { app, running = $bindable(false), onadded, onclose }: {
-    app: Pick<RouterState, "busy" | "actionError" | "bootstrapServer">;
+    app: Pick<RouterState, "busy" | "actionError" | "bootstrapServer" | "resetHostPin">;
     running?: boolean;
     onadded?: () => Promise<void>;
     onclose: () => void;
@@ -23,6 +23,8 @@
   const busy = $derived(app.busy || running);
   let stages = $state<BootstrapStage[]>([]);
   let error = $state("");
+  let attemptedTarget = $state<{ host: string; port: number } | null>(null);
+  const hostKeyChanged = $derived(setup === "failed" && (error || app.actionError).includes("SSH host key changed"));
   const stageLabels: Record<BootstrapStage, string> = {
     waiting: "Ожидаем начало настройки",
     host_key: "Проверяем ключ SSH",
@@ -52,6 +54,7 @@
       return;
     }
     error = "";
+    attemptedTarget = { host: target.data, port: sshPort };
     running = true;
     stages = ["waiting"];
     try {
@@ -65,6 +68,15 @@
       password = "";
     }
     if (setup === "complete") await onadded?.();
+  }
+
+  async function resetHostPin() {
+    const target = attemptedTarget;
+    if (!hostKeyChanged || !target || !confirm(`Сбросить сохранённый ключ SSH для ${target.host}:${target.port}? Продолжайте только после проверки VPS через доверенную консоль.`)) return;
+    error = "";
+    if (await app.resetHostPin(target.host, target.port)) {
+      error = "Сохранённый ключ SSH сброшен. Введите пароль root и повторите настройку.";
+    }
   }
 </script>
 
@@ -126,6 +138,11 @@
   {#if error || app.actionError}
     <p class="error bootstrap-error" role="alert">{error || app.actionError}</p>
   {/if}
+  {#if hostKeyChanged}
+    <div class="form-actions bootstrap-reset">
+      <button class="btn" type="button" disabled={busy} onclick={resetHostPin}>Сбросить сохранённый ключ SSH</button>
+    </div>
+  {/if}
   <form onsubmit={bootstrap}>
     <label class="field">
       Название
@@ -171,4 +188,5 @@
   .stage-done .stage-symbol { color: var(--accent); }
   .stage-current { color: var(--fg); font-weight: 600; }
   .bootstrap-error { margin-bottom: 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .bootstrap-reset { justify-content: flex-start; margin-bottom: 20px; }
 </style>

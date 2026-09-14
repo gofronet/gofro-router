@@ -623,6 +623,7 @@ async fn managed_routes_reject_missing_sessions_and_bad_csrf_before_ssh() {
         (Method::POST, "/api/device-exclusions"),
         (Method::POST, "/api/servers/probe"),
         (Method::POST, "/api/servers/bootstrap"),
+        (Method::DELETE, "/api/servers/host-pin"),
         (Method::POST, "/api/servers/check"),
         (Method::POST, "/api/servers/update-managed"),
         (Method::POST, "/api/servers/create-profile"),

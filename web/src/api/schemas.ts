@@ -45,6 +45,7 @@ export const serverVersionSchema = z.object({
   version: z.string(),
   update_available: z.boolean(),
 });
+export const hostPinResetSchema = z.literal(true);
 
 export const profileSchema = z.object({ profile: z.string() });
 

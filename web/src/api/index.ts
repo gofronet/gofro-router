@@ -9,6 +9,7 @@ import {
   authStatusSchema,
   serverInputSchema,
   serverVersionSchema,
+  hostPinResetSchema,
   managedServerStatusSchema,
   friendNameSchema,
   routingConfigSchema,
@@ -128,6 +129,11 @@ export const api = {
       onStage: (stage: BootstrapStage) => void,
     ): Promise<Status> =>
       bootstrapStream({ name, host, port, password }, onStage),
+    resetHostPin: (host: string, port: number): Promise<true> =>
+      request(hostPinResetSchema, () => http.delete("/servers/host-pin", {
+        data: { host, port },
+        ...mutation,
+      })),
     check: (publicKey: string): Promise<ServerVersion> =>
       request(serverVersionSchema, () =>
         http.post("/servers/check", { public_key: publicKey }, inspection),

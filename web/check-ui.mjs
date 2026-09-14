@@ -155,6 +155,10 @@ async function open(browser, path = "/#/", width = 1440, setup = false, theme = 
       if (endpoint === "GET /api/status") return await route.fulfill(json(state.status));
       if (endpoint === "GET /api/lan-devices") return await route.fulfill(json(state.inventory));
       if (endpoint === "POST /api/device-exclusions") return await route.fulfill(json(state.status));
+      if (endpoint === "DELETE /api/servers/host-pin") {
+        assert.deepEqual(body, { host: "1.1.1.1", port: 2222 });
+        return await route.fulfill(json(true));
+      }
       if (endpoint === "POST /api/mode") {
         assert.equal(typeof body.vpn_enabled, "boolean");
         state.status.vpn_enabled = body.vpn_enabled; state.status.tunnel_active = body.vpn_enabled;
@@ -386,8 +390,8 @@ async function addDevice(page, mac) {
   await page.getByRole("button", { name: "Добавить напрямую", exact: true }).click();
 }
 async function refreshDevices(page) {
-  await page.getByRole("button", { name: "Обновить список устройств", exact: true }).click();
-  await page.getByRole("button", { name: "Обновить список устройств", exact: true }).waitFor();
+  await devicePanel(page).getByRole("button", { name: "Обновить устройства", exact: true }).click();
+  await devicePanel(page).getByRole("button", { name: "Обновить устройства", exact: true }).waitFor();
 }
 async function deviceChecks(browser) {
   const baseline = passed;
@@ -906,8 +910,11 @@ try {
     await startVps(test);
     await streamStages(page, Object.hasOwn(stageLabels, failure) ? Object.keys(stageLabels).slice(0, Object.keys(stageLabels).indexOf(failure)) : ["waiting", "host_key"]);
     if (Object.hasOwn(stageLabels, failure)) {
-      await streamEvent(page, { type: "error", stage: failure, message: `Ошибка этапа ${failure}: тестовый отказ` }, true);
-      await page.getByRole("dialog").getByRole("alert").getByText(`Ошибка этапа ${failure}: тестовый отказ`, { exact: true }).waitFor();
+      const message = failure === "host_key"
+        ? "SSH host key changed. Connection refused; the saved key was not replaced. Verify the VPS identity through a trusted console before resetting its pin."
+        : `Ошибка этапа ${failure}: тестовый отказ`;
+      await streamEvent(page, { type: "error", stage: failure, message }, true);
+      await page.getByRole("dialog").getByRole("alert").getByText(message, { exact: true }).waitFor();
       await page.locator(".bootstrap-stages").getByText(stageLabels[failure], { exact: false }).waitFor();
       assert.match(await page.locator(".stage-current").innerText(), new RegExp(stageLabels[failure]));
     } else {
@@ -940,6 +947,19 @@ try {
     assert.equal(await page.getByRole("dialog").getByRole("button", { name: "Закрыть", exact: true }).isDisabled(), false);
     assert.equal(await page.getByRole("heading", { name: "Сервер добавлен", exact: true }).count(), 0);
     await screenshot(page, `vps-error-${failure}`);
+    if (failure === "host_key") {
+      await page.getByLabel("Публичный IPv4-адрес VPS").fill("1.1.1.2");
+      await page.getByLabel("Порт SSH").fill("2223");
+      page.once("dialog", dialog => {
+        assert.match(dialog.message(), /1\.1\.1\.1:2222/);
+        dialog.accept();
+      });
+      await page.getByRole("button", { name: "Сбросить сохранённый ключ SSH", exact: true }).click();
+      await page.getByRole("alert").getByText("Сохранённый ключ SSH сброшен. Введите пароль root и повторите настройку.", { exact: true }).waitFor();
+      assert.equal(state.requests.filter(req => req.endpoint === "DELETE /api/servers/host-pin").length, 1);
+      await page.getByLabel("Публичный IPv4-адрес VPS").fill("1.1.1.1");
+      await page.getByLabel("Порт SSH").fill("2222");
+    }
     await page.getByRole("button", { name: "Повторить настройку", exact: true }).click();
     await page.waitForTimeout(1100);
     assert.equal(state.requests.filter(req => req.endpoint === "POST /api/servers/bootstrap").length, 1, "no auto-POST or passwordless retry after failure");

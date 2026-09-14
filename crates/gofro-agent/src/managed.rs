@@ -173,6 +173,28 @@ fn managed_lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, ()>> {
         .map_err(|_| anyhow!("managed operation lock poisoned"))
 }
 
+pub(crate) fn reset_host_pin(state: &AppState, host: &str, port: u16) -> Result<()> {
+    let _operation = managed_lock(state)?;
+    let address: IpAddr = host.parse().context("invalid SSH host address")?;
+    if address.to_string() != host || port == 0 {
+        bail!("invalid SSH host address or port");
+    }
+    let config = state
+        .config
+        .lock()
+        .map_err(|_| anyhow!("configuration lock poisoned"))?;
+    preserve_host_pins(&state.management_dir, &config)?;
+    if config.servers.iter().any(|server| {
+        server
+            .management
+            .as_ref()
+            .is_some_and(|managed| managed.host == host && managed.port == port)
+    }) {
+        bail!("SSH host pin is still used by a managed server");
+    }
+    pins::reset_host_pin(&state.management_dir, host, port)
+}
+
 fn managed_ssh_unlocked(state: &AppState, public_key: &str, remote: &str) -> Result<String> {
     let (managed, private_key) = managed_server(state, public_key)?;
     key_ssh(
