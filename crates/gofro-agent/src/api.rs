@@ -97,6 +97,10 @@ fn private_router() -> Router<AppState> {
         .route("/api/servers/import", post(import_server))
         .route("/api/servers/probe", post(managed::probe_server))
         .route("/api/servers/bootstrap", post(managed::bootstrap_server))
+        .route(
+            "/api/servers/host-pin",
+            axum::routing::delete(managed::reset_host_pin),
+        )
         .route("/api/servers/check", post(managed::check_managed_server))
         .route(
             "/api/servers/update-managed",

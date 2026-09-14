@@ -458,6 +458,9 @@ export class RouterState {
     );
   };
 
+  resetHostPin = async (host: string, port: number): Promise<boolean> =>
+    (await this.mutateResult("reset-host-pin", () => api.servers.resetHostPin(host, port))) === true;
+
   checkServer = (publicKey: string): Promise<ServerVersion | null> =>
     this.mutateResult(`check:${publicKey}`, () => api.servers.check(publicKey));
 

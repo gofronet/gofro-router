@@ -27,6 +27,12 @@ pub(super) struct BootstrapInput {
     port: u16,
     password: String,
 }
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct HostPinInput {
+    host: String,
+    port: u16,
+}
 #[derive(Serialize)]
 pub(super) struct ProbeResult {
     host: String,
@@ -98,6 +104,20 @@ pub(super) async fn bootstrap_server(
         )?;
         load_status(&state).map_err(|_| anyhow!("VPS enrolled, but local status could not be read. Refresh the server list before retrying."))
     })
+}
+
+pub(super) async fn reset_host_pin(
+    State(state): State<AppState>,
+    Json(input): Json<HostPinInput>,
+) -> Result<Json<bool>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed::reset_host_pin(&state, input.host.trim(), input.port)
+    })
+    .await
+    .context("host pin reset task failed")
+    .map_err(ApiError)?
+    .map_err(ApiError)?;
+    Ok(Json(true))
 }
 
 fn bootstrap_stream(

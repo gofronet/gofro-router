@@ -25,10 +25,9 @@
 </script>
 
 <section class="panel" aria-labelledby="device-exclusions-title">
-  <div class="panel-head"><h2 id="device-exclusions-title">Устройства напрямую <span class="count">{saved.length}/256</span></h2></div>
+  <div class="panel-head flex-wrap"><h2 id="device-exclusions-title">Устройства напрямую <span class="count">{saved.length}/256</span></h2><button class="btn" type="button" disabled={app.inventoryLoading} onclick={() => app.refreshLanDevices()}>{app.inventoryLoading ? "Обновляем…" : "Обновить устройства"}</button></div>
   <div class="panel-body">
     <p>Включите переключатель, чтобы весь интернет устройства шёл напрямую.</p>
-    <button class="btn ghost" type="button" disabled={app.inventoryLoading} onclick={() => app.refreshLanDevices()}>{app.inventoryLoading ? "Ищем устройства…" : "Обновить список устройств"}</button>
     {#if app.lanDevices.discovery !== "complete"}
       <p class="notice" role="status">{app.lanDevices.discovery === "partial" ? "Список устройств неполный." : "Список устройств недоступен."} Можно добавить MAC вручную.</p>
     {/if}

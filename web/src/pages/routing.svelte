@@ -159,7 +159,7 @@
 
   <DeviceExclusions />
 
-  <div class="section-caption">
+  <div class="section-caption mt-8">
     <div><h2 id="routing-rules-title">Правила <span class="count">{draft.length}</span></h2><p>Если сайту подходят несколько правил, сработает верхнее.</p></div>
     <button class="btn" type="button" disabled={saving || app.busy} onclick={openNew}><Plus class="icon" />Добавить</button>
   </div>
