@@ -365,6 +365,7 @@ impl Fixture {
         let geodata = Arc::new(GeoData::default());
         let first = server('A');
         let config = ControllerConfig {
+            auto_update_enabled: false,
             device_exclusions: vec![],
             vpn_enabled: true,
             active_server_key: Some(first.public_key.clone()),

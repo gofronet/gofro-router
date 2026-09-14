@@ -85,6 +85,8 @@ export const api = {
   update: {
     start: (): Promise<Status> =>
       statusRequest(() => http.post("/update", {}, mutation)),
+    setAuto: (enabled: boolean): Promise<Status> =>
+      statusRequest(() => http.put("/update", { enabled }, mutation)),
   },
   mode: {
     set: (vpnEnabled: boolean): Promise<Status> =>

@@ -194,6 +194,7 @@ export const statusSchema = z.object({
     os_version: z.string().nullable(),
   }).optional(),
   update: z.object({
+    auto_update_enabled: z.boolean().optional(),
     running: z.boolean(),
     result: z.enum(["current", "updated", "failed"]).nullable(),
   }),
