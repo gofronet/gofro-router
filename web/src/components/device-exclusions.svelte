@@ -35,9 +35,10 @@
     {#if app.inventoryError}<p class="small">{app.inventoryError}</p>{/if}
     {#each devices as device (device.mac)}
       {@const excluded = saved.includes(device.mac)}
+      {@const address = device.addresses.find(value => !value.includes(":")) || device.addresses[0]}
       <div class="flex items-center gap-3 py-3">
         <button class="switch" type="button" role="switch" aria-checked={excluded} aria-label={`Напрямую: ${device.name || device.mac}`} disabled={disabled || (!excluded && saved.length >= 256)} onclick={() => app.setDeviceExcluded({ mac: device.mac, excluded: !excluded })}><span class="switch-track"></span></button>
-        <div class="min-w-0 break-words"><strong>{device.name || "Устройство без имени"}</strong><p>{device.addresses.join(", ") || "Нет текущего IP"}</p><p class="small">{device.mac}{#if excluded} · Сохранено{/if}</p></div>
+        <div class="min-w-0"><strong>{device.name || "Устройство без имени"}</strong><p>{address || "Нет текущего IP"}</p><p class="small">{device.mac}{#if excluded} · Сохранено{/if}</p></div>
       </div>
     {/each}
     <form onsubmit={add}>

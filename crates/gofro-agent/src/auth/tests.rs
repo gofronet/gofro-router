@@ -24,6 +24,7 @@ fn test_state(dir: &std::path::Path, password: PathBuf, setup_code: PathBuf) -> 
         mode_command: dir.join("mode"),
         management_dir: dir.join("management"),
         config: Arc::new(Mutex::new(ControllerConfig {
+            auto_update_enabled: false,
             device_exclusions: vec![],
             vpn_enabled: false,
             active_server_key: None,

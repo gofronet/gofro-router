@@ -552,6 +552,7 @@ mod tests {
     fn saves_private_keys_with_owner_only_permissions() {
         let path = std::env::temp_dir().join(format!("gofro-config-{}.json", std::process::id()));
         let config = ControllerConfig {
+            auto_update_enabled: false,
             device_exclusions: vec![],
             vpn_enabled: false,
             active_server_key: None,

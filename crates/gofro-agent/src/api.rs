@@ -16,9 +16,9 @@ use wireguard_status::wireguard_peers;
 use crate::{
     AppState, auth, controller, dataplane,
     model::{
-        AgentStatus, ModeInput, ProfileInput, RoutingConfig, RoutingStatus, RoutingTestInput,
-        RoutingTestResult, ServerKeyInput, ServerStatus, ServerUpdate, UpdateInput, UpdateResult,
-        UpdateStatus,
+        AgentStatus, AutoUpdateInput, ModeInput, ProfileInput, RoutingConfig, RoutingStatus,
+        RoutingTestInput, RoutingTestResult, ServerKeyInput, ServerStatus, ServerUpdate,
+        UpdateInput, UpdateResult, UpdateStatus,
     },
     network::service_active,
     onboarding, stats,
@@ -87,7 +87,7 @@ fn private_router() -> Router<AppState> {
         .route("/api/onboarding", get(onboarding_status))
         .route("/api/onboarding/complete", post(onboarding_complete))
         .route("/api/status", get(status))
-        .route("/api/update", post(start_update))
+        .route("/api/update", post(start_update).put(set_auto_update))
         .route("/api/reboot", post(network_managed_by_openwrt))
         .route("/api/mode", post(set_mode))
         .route(
@@ -250,6 +250,16 @@ async fn start_update(
     run_blocking(state, |_| queue_update()).await
 }
 
+async fn set_auto_update(
+    State(state): State<AppState>,
+    Json(input): Json<AutoUpdateInput>,
+) -> Result<Json<AgentStatus>, ApiError> {
+    run_blocking(state, move |state| {
+        controller::set_auto_update(state, input.enabled)
+    })
+    .await
+}
+
 async fn set_mode(
     State(state): State<AppState>,
     Json(input): Json<ModeInput>,
@@ -384,7 +394,7 @@ fn load_status(state: &AppState) -> Result<AgentStatus> {
     Ok(AgentStatus {
         device_exclusions: config.device_exclusions,
         version: env!("CARGO_PKG_VERSION"),
-        update: update_status(),
+        update: update_status(config.auto_update_enabled),
         vpn_enabled: config.vpn_enabled,
         tunnel_active,
         interface: state.interface.clone(),
@@ -423,7 +433,7 @@ fn queue_update() -> Result<()> {
     Ok(())
 }
 
-fn update_status() -> UpdateStatus {
+fn update_status(auto_update_enabled: bool) -> UpdateStatus {
     let result = fs::read_to_string(UPDATE_RESULT)
         .ok()
         .and_then(|value| match value.trim() {
@@ -433,6 +443,7 @@ fn update_status() -> UpdateStatus {
             _ => None,
         });
     UpdateStatus {
+        auto_update_enabled,
         running: Path::new(UPDATE_LOCK).exists() || Path::new(UPDATE_TRIGGER).exists(),
         result,
     }

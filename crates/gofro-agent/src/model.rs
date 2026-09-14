@@ -91,6 +91,8 @@ pub(crate) struct LanContext {
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct ControllerConfig {
     #[serde(default)]
+    pub(crate) auto_update_enabled: bool,
+    #[serde(default)]
     pub(crate) device_exclusions: Vec<MacAddress>,
     pub(crate) vpn_enabled: bool,
     pub(crate) active_server_key: Option<String>,
@@ -177,6 +179,11 @@ pub(crate) struct ModeInput {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct UpdateInput {}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AutoUpdateInput {
+    pub(crate) enabled: bool,
+}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ServerKeyInput {
@@ -339,6 +346,7 @@ pub(crate) struct AgentStatus {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct UpdateStatus {
+    pub(crate) auto_update_enabled: bool,
     pub(crate) running: bool,
     pub(crate) result: Option<UpdateResult>,
 }
@@ -383,6 +391,7 @@ mod tests {
             serde_json::from_str(r#"{"vpn_enabled":false,"active_server_key":null,"servers":[]}"#)
                 .unwrap();
         assert!(legacy.device_exclusions.is_empty());
+        assert!(!legacy.auto_update_enabled);
     }
 
     #[test]

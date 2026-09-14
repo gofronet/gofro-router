@@ -1,4 +1,5 @@
 {
+  "auto_update_enabled": false,
   "vpn_enabled": false,
   "device_exclusions": [],
   "active_server_key": null,
