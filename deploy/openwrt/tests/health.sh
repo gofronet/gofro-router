@@ -32,8 +32,11 @@ jsonfilter() {
 }
 
 uci() {
-	[ "$*" = '-q get gofro.main.interface' ]
-	printf '%s\n' gt0
+	case "$*" in
+	'-q get gofro.main.interface') printf '%s\n' gt0 ;;
+	'-q get network.gt0.mtu') printf '%s\n' "$TEST_CONFIGURED_MTU" ;;
+	*) return 1 ;;
+	esac
 }
 
 ip() {
@@ -59,7 +62,8 @@ TEST_DEGRADED=false
 TEST_VPN=false
 TEST_TUNNEL=false
 TEST_HANDSHAKE_AGE=
-TEST_MTU=1280
+TEST_MTU=1379
+TEST_CONFIGURED_MTU=1379
 status_healthy
 
 sed -n '/^install_status_healthy() {$/,/^}$/p' \
@@ -85,6 +89,7 @@ install_status_healthy 0.4.0
 status=$?
 set -e
 [ "$status" -ne 0 ]
+
 TEST_DATAPLANE=true
 
 TEST_VPN=true
@@ -114,3 +119,11 @@ status_healthy
 status=$?
 set -e
 [ "$status" -ne 0 ]
+
+# Native MTU is the source of truth, including deliberately reduced uplinks.
+TEST_CONFIGURED_MTU=1360
+status_healthy
+TEST_MTU=1379
+if status_healthy; then exit 1; fi
+TEST_CONFIGURED_MTU=1379
+status_healthy

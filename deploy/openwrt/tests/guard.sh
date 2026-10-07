@@ -8,6 +8,23 @@ trap 'rm -rf "$TMP"' EXIT
 export TEST_ROOT="$TMP" GOFRO_HELPERS="$TMP/bin" GOFRO_GUARD_DIR="$TMP/state" GOFRO_MODE_LOCK="$TMP/lock"
 env mkdir "$TMP/bin"
 cp "$ROOT/deploy/openwrt/root/usr/libexec/gofro/guard" "$TMP/bin/guard"
+# OpenWrt's base jq has no Oniguruma regex builtins. Fail the test if guard
+# reintroduces test/match/capture/scan/splits/sub/gsub in any jq program.
+REAL_JQ="$(command -v jq)" || { echo 'jq is required' >&2; exit 1; }
+export REAL_JQ
+cat > "$TMP/bin/jq" <<'EOF'
+#!/bin/sh
+set -eu
+for arg in "$@"; do
+	case "$arg" in
+	*'test('*|*'match('*|*'capture('*|*'scan('*|*'splits('*|*'sub('*|*'gsub('*)
+		echo "regex jq builtin is unavailable in OpenWrt base jq: $arg" >&2
+		exit 1 ;;
+	esac
+done
+exec "$REAL_JQ" "$@"
+EOF
+chmod +x "$TMP/bin/jq"
 cat > "$TMP/bin/stub" <<'EOF'
 #!/bin/sh
 set -eu
@@ -22,6 +39,7 @@ stat)
 	fi
 	case "$3" in
 	*/guard-device) echo "${TEST_FILE_MODE:-0:600}" ;;
+	*/controller.json) echo "${TEST_CONFIG_MODE:-0:600:1}" ;;
 	*/apply.lock) echo "${TEST_APPLY_MODE:-0:600:1}" ;;
 	"$TEST_ROOT") echo "${TEST_ANCESTOR_MODE:-0:700}" ;;
 	*) echo 0:700 ;; esac ;;
@@ -79,7 +97,11 @@ nft)
 		cat > "$TEST_ROOT/batch"
 		if grep -q '^flush table inet gofro_guard$' "$TEST_ROOT/batch"; then
 			grep -Fxq 'add chain inet gofro_guard gofro_guard { type filter hook forward priority filter; policy accept; }' "$TEST_ROOT/batch"
-			grep -Fxq 'add rule inet gofro_guard gofro_guard iifname "br-home" oifname != "br-home" drop' "$TEST_ROOT/batch"
+			if grep -Fq 'ether saddr != @device_exclusions' "$TEST_ROOT/batch"; then
+				grep -Fxq 'add rule inet gofro_guard gofro_guard iifname "br-home" oifname != "br-home" ether saddr != @device_exclusions drop' "$TEST_ROOT/batch"
+			else
+				grep -Fxq 'add rule inet gofro_guard gofro_guard iifname "br-home" oifname != "br-home" drop' "$TEST_ROOT/batch"
+			fi
 			[ "${TEST_ARM_FAIL:-0}" = 0 ] || exit 1
 			[ "$1" = -c ] || cp "$TEST_ROOT/batch" "$TEST_ROOT/armed"
 		else
@@ -454,3 +476,33 @@ for failure in TEST_RESPAWN TEST_POST_QUERY_FAIL; do
 	[ ! -e "$TMP/armed" ]
 	printf 'PASS identity-less post-kill change refuses completion: %s\n' "$failure"
 done
+
+# Committed exclusions must parse without jq regex builtins (OpenWrt base jq).
+if "$TMP/bin/jq" -n 'test("x")' >/dev/null 2>&1; then
+	echo 'jq wrapper did not reject regex builtins' >&2; exit 1
+fi
+rm -rf "$TMP/armed" "$TMP/dns" "$GOFRO_GUARD_DIR/guard-device"
+printf '%s\n' '{"device_exclusions":["10:b4:1d:da:f6:2c","aa:bb:cc:dd:ee:fe"]}' > "$GOFRO_GUARD_DIR/controller.json"
+chmod 600 "$GOFRO_GUARD_DIR/controller.json"
+"$TMP/bin/guard" prepare > "$TMP/snapshot"
+grep -qx '{validated snapshot}' "$TMP/snapshot"
+grep -Fxq 'add rule inet gofro_guard gofro_guard iifname "br-home" oifname != "br-home" ether saddr != @device_exclusions drop' "$TMP/batch"
+grep -Fxq 'add element inet gofro_guard device_exclusions { 10:b4:1d:da:f6:2c, aa:bb:cc:dd:ee:fe }' "$TMP/batch"
+printf 'PASS regex-free exclusion parsing\n'
+
+# Invalid or ambiguous committed exclusions revoke every exception first.
+for json in \
+	'{"device_exclusions":["AA:BB:CC:DD:EE:FE"]}' \
+	'{"device_exclusions":["01:b4:1d:da:f6:2c"]}' \
+	'{"device_exclusions":["00:00:00:00:00:00"]}' \
+	'{"device_exclusions":["10:b4:1d:da:f6:2c",7]}' \
+	'{"device_exclusions":"10:b4:1d:da:f6:2c"}'
+do
+	printf '%s\n' "$json" > "$GOFRO_GUARD_DIR/controller.json"
+	chmod 600 "$GOFRO_GUARD_DIR/controller.json"
+	reject "$TMP/bin/guard" prepare
+	grep -Fxq 'add rule inet gofro_guard gofro_guard iifname "br-home" oifname != "br-home" drop' "$TMP/batch"
+	if grep -Fq 'ether saddr != @device_exclusions' "$TMP/batch"; then exit 1; fi
+done
+rm -f "$GOFRO_GUARD_DIR/controller.json"
+printf 'PASS invalid exclusions revoke every exception before failing\n'

@@ -8,7 +8,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.5.21"
+version = "0.5.22"
 
 edition = "2024"
 rust-version = "1.98"
@@ -33,6 +33,7 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wireguard-status = { path = "crates/wireguard-status" }
+gofro-relay = { path = "crates/gofro-relay" }
 
 [profile.release]
 lto = true

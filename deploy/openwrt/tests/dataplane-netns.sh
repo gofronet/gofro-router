@@ -84,8 +84,8 @@ ip -n "$e" addr add 192.168.0.3/24 dev excluded0
 ip -n "$e" addr add 2001:db8:1::3/64 dev excluded0 nodad
 ip -n "$r" link set pppoe-wan mtu 1492 up
 ip -n "$w" link set wan0 mtu 1492 up
-ip -n "$r" link set gt0 mtu 1480 up
-ip -n "$v" link set vpn0 mtu 1480 up
+ip -n "$r" link set gt0 mtu 1379 up
+ip -n "$v" link set vpn0 mtu 1379 up
 ip -n "$r" addr add 192.168.0.1/24 dev lan0
 ip -n "$c" addr add 192.168.0.2/24 dev client0
 ip -n "$c" route add default via 192.168.0.1
@@ -123,7 +123,7 @@ done
 ip -n "$r" route replace default via 192.0.2.2 dev pppoe-wan mtu 1492
 ip -n "$r" rule add pref 80 fwmark 0x10000/0x30000 lookup main
 ip -n "$r" rule add pref 81 fwmark 0x20000/0x30000 lookup 100
-ip -n "$r" route replace default dev gt0 table 100 metric 10 proto 186 mtu 1480
+ip -n "$r" route replace default dev gt0 table 100 metric 10 proto 186 mtu 1379
 ip -n "$r" route replace unreachable default table 100 metric 32767 proto 186
 ip -n "$r" route replace 192.168.0.0/24 dev lan0 table 100 proto 186 mtu 1500
 
@@ -345,7 +345,7 @@ add rule inet observe egress oifname "gt0" ip daddr 8.8.8.8 udp sport 31000 coun
                                 ["2001:db8:1::1", 8081, "router-control:"]]))
 
     for address, mark, device, mtu in (("198.51.100.2", "0x10004", "pppoe-wan", 1492),
-                                        ("8.8.8.8", "0x20004", "gt0", 1480),
+                                        ("8.8.8.8", "0x20004", "gt0", 1379),
                                         ("192.168.0.2", "0x20004", "lan0", 1500)):
         route = run(r, "ip", "route", "get", address, "mark", mark, capture_output=True).stdout
         assert "dev " + device in route and "mtu " + str(mtu) in route, route
@@ -380,6 +380,33 @@ add rule inet observe egress oifname "gt0" ip daddr 8.8.8.8 udp sport 31000 coun
     probe(c, "2001:db8:1::1", "lan6:", 546)
     probe(c, "2001:db8:2::2", "blocked")
     assert counter("ipv6_leak") == ipv6_before, "VPN-on IPv6 forwarding leak"
+    start(v, server, json.dumps([["8.8.8.8", 443, ""]]))
+    run(c, "python3", "-c", r'''
+import socket
+# A QUIC-sized UDP/443 datagram must pass without fragmentation or a UDP ban.
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+    s.settimeout(3)
+    s.setsockopt(socket.IPPROTO_IP, getattr(socket, "IP_MTU_DISCOVER", 10),
+                 getattr(socket, "IP_PMTUDISC_DO", 2))
+    s.connect(("8.8.8.8", 443))
+    for size in (1350, 1351):
+        packet = b"\xc0\x00\x00\x00\x01" + bytes(size - 5)
+        s.send(packet)
+        assert s.recv(4096) == packet
+# MSS must be safe in both directions, including LAN clients with a larger MTU.
+with socket.create_connection(("8.8.8.8", 8080), timeout=3) as s:
+    assert 0 < s.getsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG) <= 1240
+    payload = b"x" * 6400 + b"\n"
+    s.sendall(payload)
+    expected = b"vpn:" + payload
+    response = b""
+    while len(response) < len(expected):
+        chunk = s.recv(8192)
+        assert chunk
+        response += chunk
+    assert response == expected
+''')
+    print("PASS: unfragmented 1350/1351-byte UDP/443 and VPN TCP MSS", flush=True)
     print("PASS: rules direct/block/fake-IP/DNS TCP+UDP, no local DNS recursion, IPv6 input/forward split", flush=True)
 
     # Inbound WAN->LAN DNAT, NOT outbound fake-IP DNAT. The public WAN source
@@ -429,7 +456,7 @@ add rule inet observe egress oifname "gt0" ip daddr 8.8.8.8 udp sport 31000 coun
     # Link-down can remove IPv6 addresses; restore the simulated netifd topology.
     run(r, "ip", "-6", "addr", "replace", "2001:db8:2::1/64", "dev", "gt0", "nodad")
     run(r, "ip", "route", "replace", "default", "dev", "gt0", "table", "100",
-        "metric", "10", "proto", "186", "mtu", "1480")
+        "metric", "10", "proto", "186", "mtu", "1379")
     probe(c, "8.8.8.8", "vpn:")
 
     # Guard persists across classifier replacement and loss of the VPN rule.

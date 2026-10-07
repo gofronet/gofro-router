@@ -17,7 +17,7 @@ const MAX_RULES: usize = 128;
 const MAX_PROFILE_SIZE: usize = 4096;
 const ALLOWED_IPS: &str = "0.0.0.0/0";
 const KEEPALIVE: u16 = 10;
-const MTU: u16 = 1280;
+const MTU: u16 = gofro_relay::TUNNEL_MTU;
 
 pub(crate) fn validate_server(server: &ServerProfile) -> Result<()> {
     validate_saved_server(server)?;
@@ -196,8 +196,8 @@ pub(crate) fn parse_server_profile(name: String, profile: &str) -> Result<Server
     let mtu: u16 = required_profile_value(mtu, "MTU")?
         .parse()
         .context("MTU должен быть целым числом")?;
-    if !matches!(mtu, MTU | 1360) {
-        bail!("Gofro поддерживает MTU = {MTU} или 1360");
+    if !matches!(mtu, MTU | 1280 | 1360) {
+        bail!("Gofro поддерживает MTU = {MTU}, 1280 или 1360");
     }
 
     let mut server = ServerProfile {
@@ -538,6 +538,20 @@ mod tests {
                 &profile.replace("MTU = 1280", "MTU = 1360")
             )
             .is_ok()
+        );
+        assert!(
+            parse_server_profile(
+                "Primary".into(),
+                &profile.replace("MTU = 1280", "MTU = 1379")
+            )
+            .is_ok()
+        );
+        assert!(
+            parse_server_profile(
+                "Primary".into(),
+                &profile.replace("MTU = 1280", "MTU = 1380")
+            )
+            .is_err()
         );
         assert!(
             parse_server_profile(

@@ -280,7 +280,7 @@ for service in agent relay; do
 	[ "$(readlink "$FS/usr/lib/gofro/current")" = "$FS/usr/lib/gofro/releases/0.5.16" ]
 	[ ! -e "$FS/at-old-start" ]
 	[ "$(cat "$FS/etc/gofro/tls-cert.pem")" = new-cert ]
-	[ "$(uci get network.gt0.mtu)" = 1280 ]
+	[ "$(uci get network.gt0.mtu)" = 1379 ]
 	grep -q 'update rollback failed' "$FS/output"
 	cp "$FS/etc/gofro/update-previous" "$FS/pending-before"
 	cp -R "$FS/uci" "$FS/failed-before"

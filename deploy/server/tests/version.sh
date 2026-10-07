@@ -26,3 +26,4 @@ manifest_valid "$TMP/manifest" && exit 1
 bash "$ROOT/deploy/server/install.sh" invalid >/dev/null 2>&1 && exit 1
 grep -Fq 'drop; }' "$ROOT/deploy/server/install.sh"
 grep -Fq 'masquerade; }' "$ROOT/deploy/server/install.sh"
+bash "$ROOT/deploy/server/tests/mtu.sh"

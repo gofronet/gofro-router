@@ -435,7 +435,8 @@ fn format_profile(
     tunnel_ip: &str,
 ) -> String {
     format!(
-        "# ClientPublicKey = {client_public_key}\n[Interface]\nPrivateKey = {private_key}\nAddress = {tunnel_ip}\nMTU = 1280\n\n[Peer]\nPublicKey = {server_public_key}\nAllowedIPs = 0.0.0.0/0\nEndpoint = {endpoint}\nPersistentKeepalive = 10\n"
+        "# ClientPublicKey = {client_public_key}\n[Interface]\nPrivateKey = {private_key}\nAddress = {tunnel_ip}\nMTU = {}\n\n[Peer]\nPublicKey = {server_public_key}\nAllowedIPs = 0.0.0.0/0\nEndpoint = {endpoint}\nPersistentKeepalive = 10\n",
+        gofro_relay::TUNNEL_MTU
     )
 }
 
@@ -507,7 +508,7 @@ mod tests {
         assert!(profile.contains("[Interface]\nPrivateKey = private"));
         assert!(profile.contains("Address = 10.202.0.5/32"));
         assert!(profile.contains("[Peer]\nPublicKey = server"));
-        assert!(profile.contains("MTU = 1280"));
+        assert!(profile.contains("MTU = 1379"));
         assert!(profile.contains("AllowedIPs = 0.0.0.0/0"));
         assert!(profile.contains("PersistentKeepalive = 10"));
         assert!(profile.contains("Endpoint = vpn.test:8443"));

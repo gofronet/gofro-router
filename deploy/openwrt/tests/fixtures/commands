@@ -16,6 +16,7 @@ if [ "${FAIL_MATCH:-}" = "$name:$*" ] && { [ "${FAIL_ALWAYS:-0}" = 1 ] || [ ! -e
 	if [ -e "$FS/replacement-guard" ]; then cp "$FS/replacement-guard" "$FS/etc/gofro/guard-device"; fi
 	exit 1
 fi
+if [ "$name:$*" = 'gofro-relay:mtu' ]; then printf '1379\n'; exit 0; fi
 case "$name" in
 uci)
 	case "${1:-}" in -q|-X|-m) shift ;; esac

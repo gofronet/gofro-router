@@ -31,6 +31,8 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Mode {
+    /// Print the shared tunnel MTU for installers and native network helpers.
+    Mtu,
     Client {
         #[arg(long, default_value = "127.0.0.1:51822")]
         listen: SocketAddr,
@@ -49,6 +51,10 @@ enum Mode {
 
 fn main() -> Result<()> {
     match Args::parse().mode {
+        Mode::Mtu => {
+            println!("{}", gofro_relay::TUNNEL_MTU);
+            Ok(())
+        }
         Mode::Client {
             listen,
             server_file,

@@ -258,7 +258,9 @@ configure_vpn_zone() {
 	[ "$interface" = gt0 ] || return 1
 	[ "$(uci -q get network.gt0.proto)" = wireguard ] || return 1
 	[ "$(uci -q get firewall.gofro_vpn.name)" = gofro_vpn ] || return 1
-	uci set "network.$interface.mtu=1280" || return 1
+	mtu="$("$ROOTFS/usr/bin/gofro-relay" mtu)" || return 1
+	case "$mtu" in ''|*[!0-9]*) return 1 ;; esac
+	uci set "network.$interface.mtu=$mtu" || return 1
 	uci set firewall.gofro_vpn.mtu_fix='1' || return 1
 	uci set firewall.gofro_vpn.masq='1' || return 1
 	uci commit network || return 1
@@ -304,7 +306,9 @@ status_healthy() {
 	[ "$vpn_enabled" = true ] || return 1
 	[ "$(jsonfilter -i "$STATUS_FILE" -e '@.tunnel_active' 2>/dev/null)" = true ] || return 1
 	interface="$(uci -q get gofro.main.interface || echo gt0)"
-	ip link show "$interface" | grep -q ' mtu 1280 ' || return 1
+	mtu="$(uci -q get "network.$interface.mtu")" || return 1
+	case "$mtu" in ''|*[!0-9]*) return 1 ;; esac
+	ip link show "$interface" | grep -q " mtu $mtu " || return 1
 	handshake_age="$(jsonfilter -i "$STATUS_FILE" -e '@.handshake_age_seconds' 2>/dev/null)"
 	case "$handshake_age" in ''|*[!0-9]*) return 1 ;; esac
 	[ "$handshake_age" -le 180 ]
