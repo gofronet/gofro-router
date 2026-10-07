@@ -5,10 +5,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use gofro_relay::{RELAY_HEADER_SIZE as HEADER_SIZE, RELAY_MAX_PADDING as MAX_PADDING};
 
 pub(crate) const BUFFER_SIZE: usize = 4096;
-const HEADER_SIZE: usize = 10;
-const MAX_PADDING: usize = 31;
 const SEED_STEP: u32 = 0x9e37_79b9;
 static PACKET_COUNTER: AtomicU32 = AtomicU32::new(SEED_STEP);
 
@@ -99,5 +98,19 @@ mod tests {
         let mut decoded = [0_u8; 128];
         assert_eq!(decode(packet, &mut decoded), Some(plain.as_slice()));
         assert!(decode(&packet[..packet.len() - 1], &mut decoded).is_none());
+    }
+
+    #[test]
+    fn full_tunnel_packets_encode_within_the_real_uplink_mtu() {
+        use gofro_relay::{IPV4_UDP_OVERHEAD, MIN_UPLINK_MTU, TUNNEL_MTU, WIREGUARD_DATA_OVERHEAD};
+
+        let plain = vec![0x5a; usize::from(TUNNEL_MTU) + WIREGUARD_DATA_OVERHEAD];
+        let mut encoded = [0_u8; BUFFER_SIZE];
+        let mut decoded = [0_u8; BUFFER_SIZE];
+        for _ in 0..256 {
+            let packet = encode(&plain, &mut encoded).unwrap();
+            assert!(packet.len() + IPV4_UDP_OVERHEAD <= MIN_UPLINK_MTU);
+            assert_eq!(decode(packet, &mut decoded).unwrap(), plain);
+        }
     }
 }

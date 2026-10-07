@@ -4,11 +4,89 @@ set -euo pipefail
 WG_INTERFACE=${WG_INTERFACE:-gt0}
 WG_ADDRESS=${WG_ADDRESS:-10.202.0.1/24}
 WG_PORT=${WG_PORT:-51820}
-WG_MTU=${WG_MTU:-1280}
+WG_MTU=${WG_MTU:-}
 RELAY_PORT=${RELAY_PORT:-8443}
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+valid_mtu() {
+  [[ $1 =~ ^[1-9][0-9]{3,4}$ ]] && (( $1 >= 1280 && $1 <= 65535 ))
+}
+
+server_interface() {
+  local service=$1 line interface='' count=0
+  while IFS= read -r line; do
+    case "$line" in
+      Requires=wg-quick@*.service)
+        interface=${line#Requires=wg-quick@}
+        interface=${interface%.service}
+        [[ $interface =~ ^[a-zA-Z0-9_.:-]+$ ]] || return 1
+        count=$((count + 1)) ;;
+    esac
+  done < "$service"
+  [[ $count == 1 ]] || return 1
+  printf '%s\n' "$interface"
+}
+
+configured_mtu() {
+  local dropin=$1 interface=$2
+  awk -v interface="$interface" '
+    $1 == "ExecStartPost=/usr/sbin/ip" && $2 == "link" && $3 == "set" &&
+    $4 == "dev" && $5 == interface && $6 == "mtu" && NF == 7 { mtu=$7; count++ }
+    END { if (count != 1) exit 1; print mtu }
+  ' "$dropin"
+}
+
+updated_mtu() {
+  local configured=$1 default=$2 override=${3:-}
+  valid_mtu "$configured" && valid_mtu "$default" || return 1
+  if [[ -n $override ]]; then
+    valid_mtu "$override" || return 1
+    printf '%s\n' "$override"
+  elif [[ $configured == 1280 ]]; then
+    printf '%s\n' "$default"
+  else
+    # Preserve deliberate lower-MTU/operator settings instead of guessing.
+    printf '%s\n' "$configured"
+  fi
+}
+
+write_mtu() {
+  local dropin=$1 interface=$2 mtu=$3 temporary="$1.tmp.$$"
+  configured_mtu "$dropin" "$interface" >/dev/null && valid_mtu "$mtu" || return 1
+  if ! awk -v interface="$interface" -v mtu="$mtu" '
+    $1 == "ExecStartPost=/usr/sbin/ip" && $2 == "link" && $3 == "set" &&
+    $4 == "dev" && $5 == interface && $6 == "mtu" && NF == 7 {
+      print "ExecStartPost=/usr/sbin/ip link set dev " interface " mtu " mtu; next
+    }
+    { print }
+  ' "$dropin" > "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  chmod --reference="$dropin" "$temporary" && mv -f "$temporary" "$dropin"
+}
+
+live_mtu() {
+  ip -o link show dev "$1" | awk '
+    { for (i=1; i<NF; i++) if ($i == "mtu") { print $(i+1); found=1; break } }
+    END { if (!found) exit 1 }
+  '
+}
+
+activate_mtu() {
+  local dropin=$1 interface=$2 mtu=$3
+  write_mtu "$dropin" "$interface" "$mtu" &&
+    systemctl daemon-reload && systemctl restart gofro-relay.service &&
+    ip link set dev "$interface" mtu "$mtu"
+}
+
+restore_mtu() {
+  local backup=$1 dropin=$2 interface=$3 mtu=$4
+  cp -a "$backup" "$dropin" && systemctl daemon-reload || return 1
+  [[ -z $mtu ]] || ip link set dev "$interface" mtu "$mtu"
+}
 install_atomic() {
   local source=$1 destination=$2 temporary="$2.tmp.$$"
   install -m 755 "$source" "$temporary" || return 1
@@ -46,6 +124,9 @@ esac
 [[ -x $SCRIPT_DIR/root/usr/local/bin/gofro-relay ]] || die 'relay binary is missing'
 [[ -x $SCRIPT_DIR/root/usr/local/sbin/gofro-server-install ]] || die 'updater is missing'
 [[ -x $SCRIPT_DIR/root/usr/local/sbin/gofro-managed ]] || die 'management command is missing'
+DEFAULT_MTU=$("$SCRIPT_DIR/root/usr/local/bin/gofro-relay" mtu) || die 'relay MTU is unavailable'
+valid_mtu "$DEFAULT_MTU" || die 'invalid relay MTU'
+[[ -z $WG_MTU ]] || valid_mtu "$WG_MTU" || die 'invalid WG_MTU'
 
 if [[ $mode == update ]]; then
   [[ -e /etc/gofro/version ]] || die 'Gofro is not installed'
@@ -55,7 +136,13 @@ if [[ $mode == update ]]; then
     /usr/local/sbin/gofro-server-install "$backup/"
   [[ ! -e /usr/local/sbin/gofro-managed ]] || cp -a /usr/local/sbin/gofro-managed "$backup/"
   cp -a /etc/gofro/update-public.pem /etc/gofro/version "$backup/"
-  if install_programs && verify_programs && systemctl restart gofro-relay.service && \
+  interface=$(server_interface /etc/systemd/system/gofro-relay.service) || die 'cannot identify managed WireGuard interface'
+  dropin="/etc/systemd/system/wg-quick@$interface.service.d/gofro.conf"
+  configured=$(configured_mtu "$dropin" "$interface") || die 'cannot read managed WireGuard MTU'
+  previous_mtu=$(live_mtu "$interface") || previous_mtu=
+  next_mtu=$(updated_mtu "$configured" "$DEFAULT_MTU" "$WG_MTU") || die 'invalid managed WireGuard MTU'
+  cp -a "$dropin" "$backup/wg-mtu.conf"
+  if install_programs && verify_programs && activate_mtu "$dropin" "$interface" "$next_mtu" && \
     systemctl is-active --quiet gofro-relay.service && commit_release; then
     exit 0
   fi
@@ -69,14 +156,17 @@ if [[ $mode == update ]]; then
   fi
   install -m 644 "$backup/update-public.pem" /etc/gofro/update-public.pem
   install -m 644 "$backup/version" /etc/gofro/version
+  restore_mtu "$backup/wg-mtu.conf" "$dropin" "$interface" "$previous_mtu" || die 'update rollback could not restore WireGuard MTU'
   systemctl restart gofro-relay.service || true
   die 'update failed and was rolled back'
 fi
 
+WG_MTU=${WG_MTU:-$DEFAULT_MTU}
+
 [[ $WG_INTERFACE =~ ^[a-zA-Z0-9_.:-]+$ ]] || die 'invalid WG_INTERFACE'
 [[ $WG_ADDRESS =~ ^[0-9a-fA-F:./]+$ ]] || die 'invalid WG_ADDRESS'
 if ! [[ $WG_PORT =~ ^[0-9]+$ ]] || ! (( WG_PORT > 0 && WG_PORT < 65536 )); then die 'invalid WG_PORT'; fi
-if ! [[ $WG_MTU =~ ^[0-9]+$ ]] || ! (( WG_MTU >= 1280 && WG_MTU <= 65535 )); then die 'invalid WG_MTU'; fi
+valid_mtu "$WG_MTU" || die 'invalid WG_MTU'
 if ! [[ $RELAY_PORT =~ ^[0-9]+$ ]] || ! (( RELAY_PORT > 0 && RELAY_PORT < 65536 )); then die 'invalid RELAY_PORT'; fi
 (( WG_PORT != RELAY_PORT )) || die 'WG_PORT and RELAY_PORT must differ'
 if [[ -z ${WAN_INTERFACE:-} ]]; then
@@ -106,6 +196,7 @@ if [[ ! -e /etc/wireguard/$WG_INTERFACE.conf ]]; then
 [Interface]
 Address = $WG_ADDRESS
 ListenPort = $WG_PORT
+MTU = $WG_MTU
 PrivateKey = $(< /etc/gofro/server.key)
 SaveConfig = true
 EOF

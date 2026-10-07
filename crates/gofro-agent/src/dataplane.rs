@@ -508,6 +508,22 @@ fn render_with_exclusions(
     )
     .unwrap();
     if vpn_enabled {
+        // fw4's ingress rt-mtu clamp follows the LAN route rather than the
+        // tunnel. Bambu and other clients must not send oversized TCP segments.
+        writeln!(
+            script,
+            "add chain inet {TABLE} gofro_mss {{ type filter hook forward priority -149; policy accept; }}"
+        )
+        .unwrap();
+        for (incoming, outgoing) in [(lan.device.as_str(), "gt0"), ("gt0", lan.device.as_str())] {
+            writeln!(
+                script,
+                "add rule inet {TABLE} gofro_mss meta nfproto ipv4 iifname \"{incoming}\" oifname \"{outgoing}\" tcp flags & (syn | rst) == syn tcp option maxseg size > {} tcp option maxseg size set {}",
+                gofro_relay::TCP_MSS,
+                gofro_relay::TCP_MSS
+            )
+            .unwrap();
+        }
         writeln!(
             script,
             "add chain inet {TABLE} gofro_ipv6 {{ type filter hook forward priority filter; policy accept; }}"
@@ -515,7 +531,7 @@ fn render_with_exclusions(
         .unwrap();
         writeln!(
             script,
-            "add rule inet {TABLE} gofro_ipv6 iifname \"{}\" ether saddr != @device_exclusions meta nfproto ipv6 drop",
+            "add rule inet {TABLE} gofro_ipv6 iifname \"{}\" ether saddr != @device_exclusions meta nfproto ipv6 reject with icmpv6 type admin-prohibited",
             lan.device,
         )
         .unwrap();

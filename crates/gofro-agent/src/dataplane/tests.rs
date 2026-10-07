@@ -69,8 +69,23 @@ fn full_exclusions_precede_all_policy_and_dns_redirect_but_preserve_dnat_and_vip
                     < script.find("udp dport 53 redirect").unwrap()
             );
             assert_eq!(
-                script.contains("ether saddr != @device_exclusions meta nfproto ipv6 drop"),
+                script.contains("ether saddr != @device_exclusions meta nfproto ipv6 reject with icmpv6 type admin-prohibited"),
                 enabled
+            );
+            assert_eq!(
+                script.contains("add chain inet gofro_routing gofro_mss"),
+                enabled
+            );
+            if enabled {
+                for (incoming, outgoing) in [("br-home", "gt0"), ("gt0", "br-home")] {
+                    assert!(script.contains(&format!(
+                        "meta nfproto ipv4 iifname \"{incoming}\" oifname \"{outgoing}\" tcp flags & (syn | rst) == syn tcp option maxseg size > 1240 tcp option maxseg size set 1240"
+                    )));
+                }
+            }
+            assert!(
+                !script.contains("udp dport 443"),
+                "QUIC must stay permitted"
             );
             assert!(
                 script

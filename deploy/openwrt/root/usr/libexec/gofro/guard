@@ -72,7 +72,11 @@ read_exclusions() (
 		[ "$(stat -c '%u:%a:%h' "$config")" = 0:600:1 ] || exit 1
 	# One strict parse of one committed file. jsonfilter accepts trailing
 	# garbage/commas and scalar output truncates NUL; neither may grant access.
-	jq --stream -ers '
+	# OpenWrt's base jq is built without Oniguruma, so never use its regex
+	# builtins here. jq only narrows every member to fixed-length lowercase
+	# [0-9a-f:] text; the shell enforces MAC shape, the unicast bit and the
+	# all-zero reservation with POSIX patterns.
+	list="$(jq --stream -sr '
 		. as $events
 		| [.[] | select((length == 2 and (.[0] | length) == 1) or (length == 1 and (.[0] | length) == 2)) | .[0][0]]
 		| if (group_by(.) | any(.[]; length > 1)) then error("duplicate controller member") else [$events | fromstream(.[])] end
@@ -80,9 +84,24 @@ read_exclusions() (
 		| if has("device_exclusions") then .device_exclusions else [] end
 		| if type != "array" then error("device_exclusions must be an array") else . end
 		| if length > 256 then error("too many device exclusions") else . end
-		| if all(.[]; type == "string" and test("^[0-9a-f][02468ace](:[0-9a-f]{2}){5}\\z") and . != "00:00:00:00:00:00")
-		  then join(", ") else error("invalid device exclusion") end
-	' "$config"
+		| .[]
+		| if type == "string"
+			and (explode | length) == 17
+			and (explode | all(.[]; (. >= 48 and . <= 58) or (. >= 97 and . <= 102)))
+		  then . else error("invalid device exclusion") end
+	' "$config")" || exit 1
+	parsed=
+	# jq emitted only newline-separated [0-9a-f:] tokens of fixed length, so the
+	# unquoted expansion cannot split or glob any differently here.
+	for mac in $list; do
+		case "$mac" in
+		[0-9a-f][02468ace]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+		*) exit 1 ;;
+		esac
+		[ "$mac" != 00:00:00:00:00:00 ] || exit 1
+		parsed="${parsed}${parsed:+, }$mac"
+	done
+	printf '%s\n' "$parsed"
 )
 
 arm() {

@@ -15,7 +15,6 @@ const RELAY_SERVICE: &str = "gofro-relay";
 const RELAY_LOCAL_ENDPOINT: &str = "127.0.0.1:51822";
 const SERVICE_COMMAND: &str = "/usr/libexec/gofro/service";
 const TUNNEL_COMMAND: &str = "/usr/libexec/gofro/tunnel";
-const TUNNEL_MTU: &str = "1280";
 const LEGACY_TUNNEL_ADDRESS: &str = "10.202.0.2/32";
 const DEVICE_PRIVATE_KEY: &str = "/etc/wireguard/client.key";
 
@@ -257,6 +256,9 @@ pub(crate) fn service_active(interface: &str) -> Result<bool> {
 }
 
 pub(crate) fn start_and_select(state: &AppState, server: &ServerProfile) -> Result<()> {
+    // Native UCI is authoritative. Restart/reconcile must not overwrite a
+    // configured MTU with the old 1280-byte value after the guard is cleared.
+    let mtu = configured_tunnel_mtu(&state.interface)?;
     let previous_endpoint = read_optional(Path::new(RELAY_ENDPOINT_PATH))?;
     let tunnel_was_active = service_active(&state.interface)?;
     let result = (|| {
@@ -264,7 +266,14 @@ pub(crate) fn start_and_select(state: &AppState, server: &ServerProfile) -> Resu
         if !tunnel_was_active {
             set_tunnel(&state.interface, "start")?;
         }
-        run(Command::new("ip").args(["link", "set", "mtu", TUNNEL_MTU, "dev", &state.interface]))?;
+        run(Command::new("ip").args([
+            "link",
+            "set",
+            "mtu",
+            &mtu.to_string(),
+            "dev",
+            &state.interface,
+        ]))?;
         set_peer(&state.interface, server)
     })();
     if let Err(error) = result {
@@ -284,6 +293,25 @@ pub(crate) fn start_and_select(state: &AppState, server: &ServerProfile) -> Resu
         ));
     }
     Ok(())
+}
+
+fn configured_tunnel_mtu(interface: &str) -> Result<u16> {
+    let value = run(Command::new("uci").args(["-q", "get", &format!("network.{interface}.mtu")]))?;
+    parse_tunnel_mtu(value.trim())
+}
+
+fn parse_tunnel_mtu(value: &str) -> Result<u16> {
+    let mtu: u16 = value.parse().context("invalid native WireGuard MTU")?;
+    if mtu.to_string() != value
+        || !(gofro_relay::MIN_TUNNEL_MTU..=gofro_relay::TUNNEL_MTU).contains(&mtu)
+    {
+        bail!(
+            "native WireGuard MTU must be between {} and {}",
+            gofro_relay::MIN_TUNNEL_MTU,
+            gofro_relay::TUNNEL_MTU
+        );
+    }
+    Ok(mtu)
 }
 
 fn prepare_relay(server: &ServerProfile, force_restart: bool) -> Result<()> {
@@ -416,6 +444,25 @@ pub(crate) fn retire_legacy_routing(state: &AppState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_mtu_is_preserved_and_invalid_values_are_refused() {
+        for mtu in [1280, 1360, gofro_relay::TUNNEL_MTU] {
+            assert_eq!(parse_tunnel_mtu(&mtu.to_string()).unwrap(), mtu);
+        }
+        for value in [
+            "",
+            "1279",
+            "1380",
+            "1420",
+            "65536",
+            "01379",
+            "+1379",
+            "1379\n1280",
+        ] {
+            assert!(parse_tunnel_mtu(value).is_err(), "{value:?}");
+        }
+    }
 
     #[test]
     fn dns_flow_helper_receives_only_cleanup_lan_and_port_and_propagates_failure() {

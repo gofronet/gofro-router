@@ -4,10 +4,10 @@ Gofro installs on official OpenWrt 25.12 without replacing the firmware. It is
 not tied to a router vendor or model: the bootstrap selects a signed static
 bundle from OpenWrt's `DISTRIB_ARCH`.
 
-This describes the next VPN-only candidate, v0.5.18. The installed
-signed v0.5.16 candidate remains the immutable, pinned baseline; new changes
-require a new candidate artifact. Published Latest remains v0.5.15. The download
-links select that published release, not unshipped workspace changes.
+This describes the next candidate, v0.5.22. The published signed v0.5.21 release
+remains the immutable, pinned baseline; new changes require a new candidate
+artifact. Download links select the published Latest, not unshipped workspace
+changes.
 
 Release bundles cover these OpenWrt package ABIs:
 
@@ -69,6 +69,17 @@ never forces `10.203.1.1` or any other LAN address.
 
 WAN can be DHCP behind another router or PPPoE. Existing PPPoE credentials and
 MTU stay in OpenWrt and are preserved, as are LAN, DHCP, Wi-Fi and LuCI settings.
+The owned WireGuard interface defaults to MTU **1379** on both router and VPS.
+The shared relay budget includes 28 bytes of IPv4/UDP, 32 bytes of WireGuard and
+up to 41 bytes of relay overhead, fitting a 1480-byte uplink without fragments.
+QUIC datagrams of 1350 bytes therefore fit; no UDP/443 block or service-specific
+IP pinning is installed. The agent honors `network.gt0.mtu` during restart and
+server selection (1280–1379); set reduced values on both endpoints for smaller
+uplinks. Existing profiles with MTU 1280/1360 remain importable. VPN TCP SYN and
+SYN-ACK MSS is capped at 1240, and unsupported VPN IPv6 receives an explicit
+ICMPv6 rejection so applications can fall back to IPv4 promptly.
+Update the VPS along with the router: server update migrates its old managed
+1280-byte default and restores persistent/runtime MTU if activation fails.
 Gofro intercepts non-excluded LAN TCP/UDP DNS for both IPv4 and IPv6 from port 53 to 5353.
 Its dual-stack DNS sockets use `SO_BINDTODEVICE` on the validated LAN device;
 resolution delegates to native OpenWrt dnsmasq at the LAN IPv4 address on port
@@ -184,7 +195,9 @@ also requires coordinated maintenance before WAN forwarding resumes.
   reply-source port `DNS_PORT`. The mutable VPN mark alone is never ownership.
   Exit 1 succeeds only with the exact native single-line zero-deleted diagnostic;
   other errors propagate. Both fresh and update dependency installation add
-  `conntrack` and strict-parser `jq` before security calls. OpenWrt's
+  `conntrack` and strict-parser `jq` before security calls. OpenWrt's base `jq`
+  is built without Oniguruma, so guard matching runs on POSIX shell patterns
+  and never calls regex builtins; the base package is enough. OpenWrt's
   `conntrack -> libnetfilter-conntrack -> kmod-nf-conntrack-netlink` dependency
   pulls matching kernel netlink support through apk, without manual modules.
 

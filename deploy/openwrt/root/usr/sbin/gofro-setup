@@ -51,13 +51,15 @@ snapshot="$(/usr/libexec/gofro/guard prepare)"
 device="$(printf '%s' "$snapshot" | jsonfilter -e '@.device')"; subnet="$(printf '%s' "$snapshot" | jsonfilter -e '@.subnet')"
 /usr/libexec/gofro/mode check "$device" "$subnet"
 address="$(printf '%s' "$snapshot" | jsonfilter -e '@.address')"; zone="$(printf '%s' "$snapshot" | jsonfilter -e '@.zone')"
+mtu="$(/usr/bin/gofro-relay mtu)" || die 'cannot determine relay MTU'
+case "$mtu" in ''|*[!0-9]*) die 'invalid relay MTU' ;; esac
 if [ ! -s /etc/wireguard/client.key ]; then
 	wg genkey > /etc/wireguard/client.key.new; mv -f /etc/wireguard/client.key.new /etc/wireguard/client.key
 fi
 wg pubkey < /etc/wireguard/client.key > /etc/wireguard/client.pub.new; mv -f /etc/wireguard/client.pub.new /etc/wireguard/client.pub
 uci set "network.$interface=interface"; uci set "network.$interface.proto=wireguard"; uci set "network.$interface.private_key=$(cat /etc/wireguard/client.key)"
 if uci -q get "network.$interface.addresses" >/dev/null; then uci delete "network.$interface.addresses"; fi
-uci add_list "network.$interface.addresses=10.202.0.2/32"; uci set "network.$interface.listen_port=51821"; uci set "network.$interface.mtu=1280"; uci set "network.$interface.auto=0"; uci commit network
+uci add_list "network.$interface.addresses=10.202.0.2/32"; uci set "network.$interface.listen_port=51821"; uci set "network.$interface.mtu=$mtu"; uci set "network.$interface.auto=0"; uci commit network
 uci set firewall.gofro_vpn='zone'; uci set firewall.gofro_vpn.name='gofro_vpn'
 if uci -q get firewall.gofro_vpn.network >/dev/null; then uci delete firewall.gofro_vpn.network; fi
 uci add_list firewall.gofro_vpn.network="$interface"

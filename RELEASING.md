@@ -3,9 +3,9 @@
 The next release workflow cross-compiles static musl binaries for eight
 supported OpenWrt 25.12 ABIs and one x86_64 VPS target: nine signed bundles,
 nine manifests, nine signatures and two installers (29 release assets total).
-The next signed candidate workspace version is `0.5.21`. The installed signed
-v0.5.20 candidate is the immutable, pinned baseline; changes require a new
-candidate, not modification of its artifact. Published Latest remains v0.5.15.
+The next signed candidate workspace version is `0.5.22`. The published signed
+v0.5.21 release is the immutable, pinned baseline; changes require a new
+candidate, not modification of its artifact.
 
 ## Create a release
 
@@ -13,7 +13,7 @@ candidate, not modification of its artifact. Published Latest remains v0.5.15.
    `Cargo.toml` and the workspace package versions in `Cargo.lock`.
 2. Run the checks below and squash-merge the pull request into `main`.
 3. Open **Actions -> Release -> Run workflow**, select `main`, and enter the
-   version without the `v` prefix (`0.5.21`). Leave **publish** unchecked
+   version without the `v` prefix (`0.5.22`). Leave **publish** unchecked
    (the default) to build a candidate.
 
 The workflow requires the latest `main` commit and a matching Cargo workspace
@@ -46,7 +46,14 @@ are scoped to a workflow run; record the run ID and artifact IDs as well.
    and router-to-VPS tunnel. Record untested ABIs explicitly. CI/emulation alone
    is not hardware qualification.
 
-For v0.5.21, also record the upgrade from the pinned signed v0.5.20 baseline.
+For v0.5.22, also record the upgrade from the pinned signed v0.5.21 baseline.
+Verify router and VPS MTU 1379 after installation/update, native UCI MTU after
+agent restart/server selection, 1350/1351-byte QUIC datagrams and HTTP/3 responses,
+TCP MSS in both VPN directions and prompt IPv4 fallback for unsupported IPv6.
+The release must not introduce QUIC blocking or service-specific DNS IP pinning.
+Server update must migrate the managed MTU 1280 default, retain explicit custom
+MTUs and restore both the drop-in and live MTU if activation fails. Renew client
+PMTU caches when changing MTU; namespace tests do not qualify real PPPoE.
 Qualify bare `wifi.gofro.net` from LAN using the router's local LAN resolver:
 its DNS A answer is reserved VIP `198.18.0.0` (TTL 30 seconds), outside FakeDNS
 lease allocation. Renew stale cached DNS answers (wait out the previous TTL or
@@ -58,7 +65,7 @@ LAN IP, proxy or listener is introduced. The candidate requires native router
 `conntrack` and adds a Gofro-owned dnsmasq `hostrecord` for the panel alias.
 Check `https://<LAN-address>:8443` as the direct-IP fallback, especially after
 an initial reconcile failure when VIP rules may not yet be installed. Candidate
-qualification must not overwrite the v0.5.17 artifact or change published Latest.
+qualification must not overwrite the v0.5.21 artifact or change published Latest.
 
 Qualify **Rules -> Devices -> Direct**, manual MAC entry and removal with VPN
 on/off, rules/all modes, VPN failure, restart and guard retention. Verify full

@@ -11,6 +11,7 @@ axum.workspace = true
 axum-server.workspace = true
 clap.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+gofro-relay.workspace = true
 hickory-proto.workspace = true
 idna.workspace = true
 ipnet.workspace = true
