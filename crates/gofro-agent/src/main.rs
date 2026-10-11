@@ -12,6 +12,7 @@ mod managed;
 mod model;
 mod network;
 mod onboarding;
+mod resources;
 mod routing;
 mod stats;
 mod tls;
@@ -27,6 +28,7 @@ use clap::Parser;
 use fake_dns::FakeDns;
 use geodata::GeoData;
 use model::{ControllerConfig, LanContext};
+use resources::{MemoryProfile, ResourceLimits};
 use routing::RoutingPolicy;
 use stats::StatsTracker;
 use tracing::{error, info};
@@ -35,6 +37,9 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Parser)]
 #[command(about = "Local controller for Gofro Router", version)]
 struct Args {
+    #[arg(long, value_enum, default_value = "auto")]
+    memory_profile: MemoryProfile,
+
     #[arg(long, default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
 
@@ -113,8 +118,7 @@ pub(crate) struct AppState {
     pub(crate) managed_operations: Arc<Mutex<()>>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("gofro_agent=info".parse()?))
         .init();
@@ -124,6 +128,20 @@ async fn main() -> Result<()> {
         println!("{}", init_security(&args)?);
         return Ok(());
     }
+    let limits = args.memory_profile.resolve();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(
+            std::thread::available_parallelism()
+                .map_or(1, |count| count.get().min(limits.worker_threads)),
+        )
+        .max_blocking_threads(limits.blocking_threads)
+        .thread_stack_size(limits.stack_bytes)
+        .enable_all()
+        .build()?
+        .block_on(run(args, limits))
+}
+
+async fn run(args: Args, limits: ResourceLimits) -> Result<()> {
     if !args.listen.ip().is_loopback() {
         bail!("--listen must be loopback-only");
     }
@@ -172,9 +190,13 @@ async fn main() -> Result<()> {
     }
     dataplane::synchronize_startup(&lan, &config.device_exclusions)?;
     network::cleanup_dns_flows_on(&lan.device, dns_listen.port())?;
-    let geodata = Arc::new(GeoData::load(&args.geosite, &args.geoip)?);
+    let geodata = Arc::new(GeoData::load_with_limits(
+        &args.geosite,
+        &args.geoip,
+        limits,
+    )?);
     let routing = RoutingPolicy::compile(config.routing.clone(), Arc::clone(&geodata))?;
-    let fake_dns = Arc::new(FakeDns::open(&args.routing_state)?);
+    let fake_dns = Arc::new(FakeDns::open_with_limits(&args.routing_state, limits)?);
     fake_dns.set_vpn_enabled(config.vpn_enabled);
     let tls_fingerprint = tls::ensure(&args.tls_cert, &args.tls_key, lan_address)?;
     let auth = Arc::new(auth::Auth::open(args.admin_password, args.setup_code)?);
@@ -203,6 +225,7 @@ async fn main() -> Result<()> {
         Arc::clone(&state.fake_dns),
         Arc::clone(&state.routing),
         &state.lan,
+        limits,
     )
     .await?;
     let mut dns_task = tokio::spawn(dns.run());

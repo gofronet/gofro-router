@@ -1,3 +1,5 @@
 /target/
 /assets/
 .DS_Store
+/.direnv/
+/result

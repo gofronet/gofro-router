@@ -168,7 +168,9 @@ pub(crate) fn synchronize_startup(lan: &LanContext, exclusions: &[MacAddress]) -
             return run_nft(&render_startup(lan, exclusions, false, false)?);
         }
         let output = Command::new("nft")
-            .args(["-j", "list", "table", "inet", TABLE])
+            // Startup validates definitions/rules, never set elements. A full
+            // dump duplicates every GeoIP range and FakeDNS mapping as JSON.
+            .args(["-j", "--terse", "list", "table", "inet", TABLE])
             .output()?;
         anyhow::ensure!(output.status.success(), "failed to inspect routing table");
         let table: serde_json::Value = serde_json::from_slice(&output.stdout)?;
@@ -203,50 +205,83 @@ pub(crate) fn install_mappings(mappings: &[FakeMapping]) -> Result<()> {
 }
 
 fn render_mappings(mappings: &[FakeMapping]) -> String {
-    if mappings.is_empty() {
-        return String::new();
-    }
-    let real = mappings
-        .iter()
-        .map(|mapping| format!("{} : {}", mapping.fake, mapping.real))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut script = format!("add element inet {TABLE} fake_to_real {{ {real} }}\n");
-    script.push_str(&render_target_elements(mappings, "add"));
+    let mut script = String::new();
+    append_mappings(&mut script, mappings);
     script
 }
 
-fn render_target_elements(mappings: &[FakeMapping], operation: &str) -> String {
-    let mut script = String::new();
-    for (target, set) in FAKE_TARGET_SETS {
-        let keys = mappings
-            .iter()
-            .filter(|mapping| mapping.target == target)
-            .map(|mapping| mapping.fake.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        if !keys.is_empty() {
-            writeln!(
-                script,
-                "{operation} element inet {TABLE} {set} {{ {keys} }}"
-            )
-            .unwrap();
+fn append_list(script: &mut String, items: impl IntoIterator<Item = impl std::fmt::Display>) {
+    for (index, item) in items.into_iter().enumerate() {
+        if index != 0 {
+            script.push_str(", ");
+        }
+        write!(script, "{item}").unwrap();
+    }
+}
+
+fn append_networks(script: &mut String, networks: &[ipnet::Ipv4Net]) {
+    let mut networks = networks.iter().peekable();
+    let mut first = true;
+    while let Some(network) = networks.next() {
+        let start = network.network();
+        let mut end = network.broadcast();
+        while let Some(next) = networks.peek() {
+            if u32::from(next.network()) > u32::from(end).saturating_add(1) {
+                break;
+            }
+            end = end.max(next.broadcast());
+            networks.next();
+        }
+        if !first {
+            script.push_str(", ");
+        }
+        first = false;
+        if start == end {
+            write!(script, "{start}").unwrap();
+        } else {
+            write!(script, "{start}-{end}").unwrap();
         }
     }
-    script
+}
+
+fn append_mappings(script: &mut String, mappings: &[FakeMapping]) {
+    if mappings.is_empty() {
+        return;
+    }
+    write!(script, "add element inet {TABLE} fake_to_real {{ ").unwrap();
+    for (index, mapping) in mappings.iter().enumerate() {
+        if index != 0 {
+            script.push_str(", ");
+        }
+        write!(script, "{} : {}", mapping.fake, mapping.real).unwrap();
+    }
+    script.push_str(" }\n");
+    append_target_elements(script, mappings, "add");
+}
+
+fn append_target_elements(script: &mut String, mappings: &[FakeMapping], operation: &str) {
+    for (target, set) in FAKE_TARGET_SETS {
+        let mut keys = mappings
+            .iter()
+            .filter(|mapping| mapping.target == target)
+            .map(|mapping| mapping.fake)
+            .peekable();
+        if keys.peek().is_some() {
+            write!(script, "{operation} element inet {TABLE} {set} {{ ").unwrap();
+            append_list(script, keys);
+            script.push_str(" }\n");
+        }
+    }
 }
 
 pub(crate) fn remove_mappings(mappings: &[FakeMapping]) -> Result<()> {
     if mappings.is_empty() {
         return Ok(());
     }
-    let keys = mappings
-        .iter()
-        .map(|mapping| mapping.fake.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut script = format!("delete element inet {TABLE} fake_to_real {{ {keys} }}\n");
-    script.push_str(&render_target_elements(mappings, "delete"));
+    let mut script = format!("delete element inet {TABLE} fake_to_real {{ ");
+    append_list(&mut script, mappings.iter().map(|mapping| mapping.fake));
+    script.push_str(" }\n");
+    append_target_elements(&mut script, mappings, "delete");
     run_nft(&script)
 }
 
@@ -317,7 +352,7 @@ fn render_with_exclusions(
     for (_, set) in FAKE_TARGET_SETS {
         writeln!(script, "add set inet {TABLE} {set} {{ type ipv4_addr; }}").unwrap();
     }
-    script.push_str(&render_mappings(mappings));
+    append_mappings(&mut script, mappings);
 
     for index in policy.ip_rule_indices() {
         let rule = &policy.config().ip_rules[index];
@@ -332,16 +367,9 @@ fn render_with_exclusions(
             )
             .unwrap();
             if !networks.is_empty() {
-                let elements = networks
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                writeln!(
-                    script,
-                    "add element inet {TABLE} ip_rule_{index} {{ {elements} }}"
-                )
-                .unwrap();
+                write!(script, "add element inet {TABLE} ip_rule_{index} {{ ").unwrap();
+                append_networks(&mut script, networks);
+                script.push_str(" }\n");
             }
         }
     }
@@ -561,7 +589,7 @@ fn run_nft(script: &str) -> Result<()> {
     let mut child = Command::new("nft")
         .args(["-f", "-"])
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .context("failed to start nft")?;

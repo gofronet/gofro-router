@@ -13,10 +13,12 @@ use tokio::{
 use tracing::{error, info, warn};
 
 use super::resolver::{FakeDns, MAX_DNS_PACKET, failure_response};
-use crate::{model::LanContext, routing::RoutingPolicy};
+use crate::{model::LanContext, resources::ResourceLimits, routing::RoutingPolicy};
 
-const MAX_CONCURRENT_REQUESTS: usize = 16;
-const MAX_TCP_CONNECTIONS: usize = 32;
+#[cfg(test)]
+const MAX_CONCURRENT_REQUESTS: usize = ResourceLimits::STANDARD.dns_workers;
+#[cfg(test)]
+const MAX_TCP_CONNECTIONS: usize = ResourceLimits::STANDARD.dns_tcp_connections;
 const TCP_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
@@ -51,6 +53,7 @@ impl Server {
         dns: Arc<FakeDns>,
         policy: Arc<RwLock<RoutingPolicy>>,
         lan: &LanContext,
+        limits: ResourceLimits,
     ) -> Result<Self> {
         let (udp, tcp) = bind_lan_sockets(listen, lan).await?;
         Ok(Self {
@@ -60,8 +63,8 @@ impl Server {
             lan: lan.clone(),
             udp,
             tcp,
-            workers: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
-            tcp_connections: Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS)),
+            workers: Arc::new(Semaphore::new(limits.dns_workers)),
+            tcp_connections: Arc::new(Semaphore::new(limits.dns_tcp_connections)),
         })
     }
 

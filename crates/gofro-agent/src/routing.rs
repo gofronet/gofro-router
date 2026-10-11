@@ -33,13 +33,14 @@ pub(crate) fn is_lan_destination(ip: Ipv4Addr) -> bool {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RoutingPolicy {
-    config: RoutingConfig,
+    config: Arc<RoutingConfig>,
     geodata: Arc<GeoData>,
-    ip_rules: Vec<Option<Ipv4Net>>,
+    ip_rules: Arc<[Option<Ipv4Net>]>,
 }
 
 impl RoutingPolicy {
     pub(crate) fn compile(config: RoutingConfig, geodata: Arc<GeoData>) -> Result<Self> {
+        let geodata = geodata.select(&config)?;
         for rule in &config.domain_rules {
             if config.mode == RoutingMode::Rules
                 && rule.enabled
@@ -66,9 +67,9 @@ impl RoutingPolicy {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
-            config,
+            config: Arc::new(config),
             geodata,
-            ip_rules,
+            ip_rules: ip_rules.into(),
         })
     }
 

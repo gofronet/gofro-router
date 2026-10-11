@@ -1,15 +1,21 @@
-use std::{fs, path::Path, process::Command, sync::atomic::Ordering};
+use std::{
+    fs,
+    path::Path,
+    process::Command,
+    sync::{Arc, atomic::Ordering},
+};
 
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderMap, StatusCode, Uri, header},
-    middleware,
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
 use serde::Serialize;
+use tokio::sync::Semaphore;
 use tracing::error;
 use wireguard_status::wireguard_peers;
 
@@ -31,6 +37,7 @@ const UPDATE_LOCK: &str = "/tmp/gofro-update.lock";
 const UPDATE_RESULT: &str = "/tmp/gofro/update-result";
 const UPDATE_TRIGGER: &str = "/tmp/gofro/update-request";
 const UPDATE_COMMAND: &str = "/usr/libexec/gofro/update";
+const MAX_REQUEST_BODY: usize = 512 * 1024;
 
 #[derive(Debug, Serialize)]
 struct ErrorBody {
@@ -77,6 +84,7 @@ pub(crate) fn secure_router(state: AppState) -> Router {
             state.clone(),
             auth::require_auth,
         )))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
         .with_state(state)
 }
 
@@ -135,6 +143,26 @@ fn private_router() -> Router<AppState> {
         .route("/api/device-exclusions", post(update_device_exclusion))
         .route("/api/lan-devices", get(lan_devices))
         .route("/api/routing/test", post(test_routing))
+        .route_layer(middleware::from_fn_with_state(
+            Arc::new(Semaphore::new(4)),
+            limit_requests,
+        ))
+}
+
+async fn limit_requests(
+    State(limit): State<Arc<Semaphore>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Ok(_permit) = limit.try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+            Json(serde_json::json!({"error": "agent_busy"})),
+        )
+            .into_response();
+    };
+    next.run(request).await
 }
 
 pub(crate) fn redirect_router(state: AppState) -> Router {
@@ -532,5 +560,121 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[tokio::test]
+    async fn busy_management_rejects_excess_requests_and_leaves_health_serviceable() {
+        use tokio::sync::Notify;
+        use tower::ServiceExt;
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let handler = {
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move || {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    StatusCode::OK
+                }
+            }
+        };
+        let app = Router::new()
+            .merge(
+                Router::new()
+                    .route("/slow", get(handler))
+                    .route("/fast", get(|| async { StatusCode::OK }))
+                    .route_layer(middleware::from_fn_with_state(
+                        Arc::new(Semaphore::new(1)),
+                        limit_requests,
+                    )),
+            )
+            .route("/healthz", get(|| async { StatusCode::OK }));
+        let request = |path| {
+            Request::builder()
+                .uri(path)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let first = tokio::spawn(app.clone().oneshot(request("/slow")));
+        started.notified().await;
+        let busy = app.clone().oneshot(request("/fast")).await.unwrap();
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(busy.headers()[header::RETRY_AFTER], "1");
+        assert_eq!(
+            app.clone()
+                .oneshot(request("/healthz"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        release.notify_one();
+        assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            app.oneshot(request("/fast")).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn body_budget_accepts_maximum_unicode_routing_configuration() {
+        use crate::model::{DomainMatch, DomainRule, IpMatch, IpRule, RouteTarget};
+        use tower::ServiceExt;
+
+        let name = "😀".repeat(64);
+        let domain = [
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61),
+        ]
+        .join(".");
+        let config = RoutingConfig {
+            domain_rules: (0..128)
+                .map(|_| DomainRule {
+                    name: name.clone(),
+                    enabled: true,
+                    target: RouteTarget::Direct,
+                    matcher: DomainMatch::Exact {
+                        value: domain.clone(),
+                    },
+                })
+                .collect(),
+            ip_rules: (0..128)
+                .map(|_| IpRule {
+                    name: name.clone(),
+                    enabled: true,
+                    target: RouteTarget::Direct,
+                    matcher: IpMatch::Cidr {
+                        value: "192.0.2.1/32".into(),
+                    },
+                })
+                .collect(),
+            ..RoutingConfig::default()
+        };
+        let body = serde_json::to_string(&config)
+            .unwrap()
+            .replace("😀", r"\ud83d\ude00")
+            .into_bytes();
+        assert!(body.len() > 128 * 1024);
+        let app = Router::new()
+            .route(
+                "/routing",
+                post(|Json(config): Json<RoutingConfig>| async move {
+                    Json(config.domain_rules.len() + config.ip_rules.len())
+                }),
+            )
+            .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/routing")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
     }
 }
