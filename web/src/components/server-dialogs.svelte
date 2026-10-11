@@ -138,7 +138,10 @@
             !(await app.selectServer(server.public_key))
         )
             return;
-        if (app.actionWarning && !app.warningServerKey) { close(); return; }
+        if (app.actionWarning && !app.warningServerKey) {
+            close();
+            return;
+        }
         if (await app.setMode(true)) close();
     }
 

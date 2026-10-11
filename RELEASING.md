@@ -107,12 +107,18 @@ hits an existing artifact name, dispatch a new run rather than replacing it.
 
 ## Checks
 
+Build the web UI before any Cargo check, test or build: `gofro-agent` embeds
+`web/dist` at compile time. CI builds it from source and passes it to the Rust
+job as an artifact; release validation builds it before Rust checks and shares
+the same artifact with every cross-compilation job. Generated web files and
+Rust binaries are ignored by Git, not committed.
+
 ```sh
+(cd web && bun install --frozen-lockfile && bun run check && bun run build && bun test)
 cargo fmt --check
 cargo check --workspace
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
-(cd web && bun install --frozen-lockfile && bun run check && bun test && bun run build)
 sh deploy/openwrt/tests/guard.sh
 sh deploy/openwrt/tests/network.sh
 sh deploy/openwrt/tests/mode.sh

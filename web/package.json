@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "build": "vite build && bun finalize-assets.mjs"
+    "build": "vite build"
   },
   "dependencies": {
     "chart.js": "^4.5.0",
