@@ -4,16 +4,16 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 
-const UI: &str = include_str!("../../../../assets/index.html");
-const UI_JS: &[u8] = include_bytes!("../../../../assets/app.js");
-const UI_JS_GZIP: &[u8] = include_bytes!("../../../../assets/app.js.gz");
-const UI_JS_HASH: &str = include_str!("../../../../assets/app.js.sha256");
-const UI_CSS: &[u8] = include_bytes!("../../../../assets/app.css");
-const UI_CSS_GZIP: &[u8] = include_bytes!("../../../../assets/app.css.gz");
-const UI_CSS_HASH: &str = include_str!("../../../../assets/app.css.sha256");
-const UI_CHART: &[u8] = include_bytes!("../../../../assets/chart.js");
-const UI_CHART_GZIP: &[u8] = include_bytes!("../../../../assets/chart.js.gz");
-const UI_CHART_HASH: &str = include_str!("../../../../assets/chart.js.sha256");
+const UI: &str = include_str!("../../../../web/dist/index.html");
+const UI_JS: &[u8] = include_bytes!("../../../../web/dist/app.js");
+const UI_JS_GZIP: &[u8] = include_bytes!("../../../../web/dist/app.js.gz");
+const UI_JS_HASH: &str = include_str!("../../../../web/dist/app.js.sha256");
+const UI_CSS: &[u8] = include_bytes!("../../../../web/dist/app.css");
+const UI_CSS_GZIP: &[u8] = include_bytes!("../../../../web/dist/app.css.gz");
+const UI_CSS_HASH: &str = include_str!("../../../../web/dist/app.css.sha256");
+const UI_CHART: &[u8] = include_bytes!("../../../../web/dist/chart.js");
+const UI_CHART_GZIP: &[u8] = include_bytes!("../../../../web/dist/chart.js.gz");
+const UI_CHART_HASH: &str = include_str!("../../../../web/dist/chart.js.sha256");
 
 pub(super) async fn index() -> impl IntoResponse {
     ([(header::CACHE_CONTROL, "no-store")], Html(UI))
