@@ -44,8 +44,8 @@ for unsupported in arm_fa526 armeb_xscale loongarch64_generic mips_24kc \
 	platform_for "$unsupported" && exit 1
 done
 
-enough_memory 196608
-enough_memory 196607 && exit 1
+enough_memory 49152
+enough_memory 49151 && exit 1
 enough_memory unknown && exit 1
 
 write_public_key "$TMP/update-public.pem"

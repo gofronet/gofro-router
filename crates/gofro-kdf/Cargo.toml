@@ -1,0 +1,10 @@
+[package]
+name = "gofro-kdf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+openssl.workspace = true
+zeroize.workspace = true

@@ -37,6 +37,82 @@ fn accepts_dns_service_labels() {
 }
 
 #[test]
+fn small_udp_buffer_recovers_large_and_tc_responses_over_tcp() {
+    use hickory_proto::{op::Query, rr::rdata::TXT};
+    use std::{net::TcpListener, thread, time::Instant};
+
+    for truncated in [false, true] {
+        let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+        tcp.set_nonblocking(true).unwrap();
+        let address = tcp.local_addr().unwrap();
+        let udp = UdpSocket::bind(address).unwrap();
+        udp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut question = Message::new();
+        question.set_id(42).add_query(Query::query(
+            Name::from_ascii("large.example").unwrap(),
+            RecordType::TXT,
+        ));
+        let request = question.to_vec().unwrap();
+        let mut answer = question.clone();
+        answer.set_message_type(MessageType::Response);
+        for _ in 0..32 {
+            answer.add_answer(Record::from_rdata(
+                Name::from_ascii("large.example").unwrap(),
+                30,
+                RData::TXT(TXT::new(vec!["x".repeat(240)])),
+            ));
+        }
+        let response = answer.to_vec().unwrap();
+        assert!(response.len() > UDP_RESPONSE_BUFFER);
+        let expected = response.clone();
+        let expected_request = request.clone();
+        let server = thread::spawn(move || {
+            let mut buffer = [0; 2048];
+            let (length, peer) = udp.recv_from(&mut buffer).unwrap();
+            assert_eq!(&buffer[..length], expected_request.as_slice());
+            if truncated {
+                question
+                    .set_message_type(MessageType::Response)
+                    .set_truncated(true);
+                udp.send_to(&question.to_vec().unwrap(), peer).unwrap();
+            } else {
+                udp.send_to(&response, peer).unwrap();
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match tcp.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("TCP fallback was not attempted: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut length = [0; 2];
+            stream.read_exact(&mut length).unwrap();
+            let mut body = vec![0; usize::from(u16::from_be_bytes(length))];
+            stream.read_exact(&mut body).unwrap();
+            assert_eq!(body, expected_request);
+            stream
+                .write_all(&(response.len() as u16).to_be_bytes())
+                .unwrap();
+            stream.write_all(&response).unwrap();
+        });
+        assert_eq!(
+            query_upstream_with_mark(&request, address, 0).unwrap(),
+            expected
+        );
+        server.join().unwrap();
+    }
+}
+
+#[test]
 fn panel_hostname_never_needs_an_upstream() {
     let upstream = UdpSocket::bind("127.0.0.1:0").unwrap();
     upstream.set_nonblocking(true).unwrap();

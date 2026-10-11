@@ -16,6 +16,7 @@ PENDING=/etc/gofro/update-previous
 ROLLBACK=
 BACKUP=
 PLATFORM=
+CONSUME_ROOT=0
 RECOVER_INIT=${RECOVER_INIT:-/etc/init.d/gofro-recover}
 RC_D=${RC_D:-/etc/rc.d}
 
@@ -40,7 +41,15 @@ platform_for() {
 
 enough_memory() {
 	case "$1" in ''|*[!0-9]*) return 1 ;; esac
-	[ "$1" -ge 196608 ]
+	[ "$1" -ge 49152 ]
+}
+
+ensure_packages() {
+	# Routine updates already have these dependencies. Avoid loading repository
+	# indexes and the solver beside the running agent on a 64 MiB router.
+	apk info --from installed -e "$@" >/dev/null 2>&1 && return 0
+	apk update
+	apk add "$@"
 }
 
 # shellcheck disable=SC2317,SC2329
@@ -329,7 +338,8 @@ healthy() {
 }
 
 enough_space() {
-	required="$(du -sk "$ROOTFS" | awk 'NR == 1 { print $1 }')"
+	if [ "$CONSUME_ROOT" = 1 ]; then required=0
+	else required="$(du -sk "$ROOTFS" | awk 'NR == 1 { print $1 }')"; fi
 	available="$(df -Pk /usr/lib | awk 'END { print $4 }')"
 	case "$required:$available" in *[!0-9:]*) return 1 ;; esac
 	[ "$available" -ge "$((required + 512))" ]
@@ -354,7 +364,7 @@ prune_releases() {
 case "${DISTRIB_RELEASE:-}" in 25.12.*) ;; *) die 'OpenWrt 25.12 is required' ;; esac
 PLATFORM="$(platform_for "${DISTRIB_ARCH:-}")" || die "unsupported OpenWrt architecture: ${DISTRIB_ARCH:-unknown}"
 MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2; exit }' /proc/meminfo)" || die 'router memory is unavailable'
-enough_memory "$MEMORY_KIB" || die 'at least 192 MiB RAM must be visible to OpenWrt'
+enough_memory "$MEMORY_KIB" || die 'at least 48 MiB RAM must be visible to OpenWrt (64 MiB device)'
 
 case "$#:${1:-}" in
 	1:--update) mode=update ;;
@@ -428,13 +438,16 @@ fi
 # Install security-validation dependencies before activation OR pending recovery.
 # OpenWrt does not ship stat by default; guard/transaction/service require it.
 if [ "$mode" = install ]; then
-	apk update
-	apk add ca-bundle conntrack coreutils-stat dnsmasq firewall4 ip-full jq jsonfilter kmod-wireguard \
+	ensure_packages ca-bundle conntrack coreutils-stat dnsmasq firewall4 ip-full jq jsonfilter kmod-wireguard \
 		openssl-util openssh-client openssh-client-utils openssh-keygen sshpass uclient-fetch uhttpd wireguard-tools
 else
 	[ -n "$previous" ] || die 'Gofro is not installed'
-	apk update
-	apk add conntrack coreutils-stat ip-full jq jsonfilter openssh-client openssh-client-utils openssh-keygen sshpass
+	ensure_packages conntrack coreutils-stat ip-full jq jsonfilter openssh-client openssh-client-utils openssh-keygen sshpass
+fi
+
+if [ "${GOFRO_STAGED_BUNDLE:-}" = "$BUNDLE" ] &&
+	[ "$(stat -c '%d' "$ROOTFS")" = "$(stat -c '%d' /usr/lib)" ]; then
+	CONSUME_ROOT=1
 fi
 
 if [ -s "$PENDING" ]; then
@@ -491,8 +504,14 @@ mkdir -p "$RELEASES" /etc/gofro
 chmod 700 /etc/gofro
 STAGING=$RELEASES/.$VERSION.$$
 rm -rf "$STAGING"
-mkdir "$STAGING"
-cp -R "$ROOTFS/." "$STAGING/"
+if [ "$CONSUME_ROOT" = 1 ]; then
+	# The verified bootstrap already extracted on this filesystem: publish by
+	# rename without allocating a second persistent copy of the entire release.
+	mv "$ROOTFS" "$STAGING"
+else
+	mkdir "$STAGING"
+	cp -R "$ROOTFS/." "$STAGING/"
+fi
 chmod 755 "$STAGING/usr/bin/gofro-agent" "$STAGING/usr/bin/gofro-relay" \
 	"$STAGING/usr/sbin/gofro-setup" "$STAGING/usr/sbin/gofro-update" \
 	"$STAGING/usr/libexec/gofro/"* "$STAGING/etc/init.d/"* \
@@ -500,6 +519,7 @@ chmod 755 "$STAGING/usr/bin/gofro-agent" "$STAGING/usr/bin/gofro-relay" \
 rm -rf "$release"
 mv "$STAGING" "$release"
 STAGING=
+ROOTFS=$release
 
 copy_default etc/config/gofro /etc/config/gofro 600
 copy_default etc/gofro/controller.json /etc/gofro/controller.json 600

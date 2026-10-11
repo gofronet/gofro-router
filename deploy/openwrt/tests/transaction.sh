@@ -188,6 +188,38 @@ restored() {
 BASE_PATH=$PATH
 REAL_HASH="$(command -v sha256sum || command -v shasum)"; export REAL_HASH
 REAL_STAT="$(command -v stat)"; export REAL_STAT
+fresh low-memory-staging
+printf 'MemTotal: 49152 kB\n' > "$FS/proc/meminfo"
+GOFRO_STAGED_BUNDLE="$FS/bundle" sh "$FS/bundle/install.sh" > "$FS/output" 2>&1
+[ "$(cat "$FS/etc/gofro/version")" = 0.5.16 ]
+[ ! -d "$FS/bundle/root" ]
+grep -Fq "mv:$FS/bundle/root $FS/usr/lib/gofro/releases/.0.5.16." "$FS/commands"
+printf 'PASS 64 MiB staging publishes the verified root by rename without a duplicate copy\n'
+fresh cross-filesystem-staging
+: > "$FS/staging-other-device"
+GOFRO_STAGED_BUNDLE="$FS/bundle" sh "$FS/bundle/install.sh" > "$FS/output" 2>&1
+[ -d "$FS/bundle/root" ]
+[ "$(cat "$FS/etc/gofro/version")" = 0.5.16 ]
+printf 'PASS cross-filesystem/manual bundle retains the copy-based installation path\n'
+fresh low-memory-bootstrap
+printf 'MemTotal: 49152 kB\n' > "$FS/proc/meminfo"
+GOFRO_RELEASE_URL=https://fixture.invalid sh "$FS/bundle/root/usr/sbin/gofro-update" --install > "$FS/output" 2>&1
+[ "$(cat "$FS/etc/gofro/version")" = 0.5.16 ]
+grep -F 'tar:' "$FS/commands" | grep -Fq "$FS/usr/lib/gofro/.download."
+for workspace in "$FS/usr/lib/gofro"/.download.*; do [ ! -e "$workspace" ]; done
+printf 'PASS verified bootstrap downloads/extracts on persistent storage and cleans its workspace\n'
+fresh insufficient-memory
+printf 'MemTotal: 49151 kB\n' > "$FS/proc/meminfo"
+fails sh "$FS/bundle/install.sh"
+[ ! -e "$FS/stat-installed" ]
+printf 'PASS below-budget installation refuses before dependency or network changes\n'
+upgrade installed-dependencies-64
+printf 'MemTotal: 49152 kB\n' > "$FS/proc/meminfo"
+: > "$FS/stat-installed"
+sh "$FS/bundle/install.sh" --update > "$FS/output" 2>&1
+[ "$(cat "$FS/etc/gofro/version")" = 0.5.16 ]
+if grep -Eq '^apk:(update|add)' "$FS/commands"; then exit 1; fi
+printf 'PASS installed update dependencies skip repository loading on the 64 MiB path\n'
 for install_mode in install update; do
 	if [ "$install_mode" = install ]; then fresh nonexecutable-preflight-install; else upgrade nonexecutable-preflight-update; fi
 	helper=$FS/bundle/root/usr/libexec/gofro/transaction

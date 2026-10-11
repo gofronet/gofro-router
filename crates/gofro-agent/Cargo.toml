@@ -12,10 +12,10 @@ axum-server.workspace = true
 clap.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 gofro-relay.workspace = true
+gofro-kdf.workspace = true
 hickory-proto.workspace = true
 idna.workspace = true
 ipnet.workspace = true
-prost.workspace = true
 regex.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
@@ -28,6 +28,7 @@ tracing-subscriber.workspace = true
 wireguard-status.workspace = true
 
 [dev-dependencies]
+prost.workspace = true
 tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

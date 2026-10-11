@@ -444,13 +444,14 @@ dependencies = [
 
 [[package]]
 name = "gofro-agent"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "anyhow",
  "axum",
  "axum-server",
  "clap",
  "futures-util",
+ "gofro-kdf",
  "gofro-relay",
  "hickory-proto",
  "idna",
@@ -471,8 +472,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gofro-kdf"
+version = "0.5.23"
+dependencies = [
+ "openssl",
+ "zeroize",
+]
+
+[[package]]
 name = "gofro-relay"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "anyhow",
  "clap",
@@ -481,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "gofro-server"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "anyhow",
  "clap",
@@ -1646,7 +1655,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "wireguard-status"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "anyhow",
  "serde",
@@ -1727,6 +1736,12 @@ dependencies = [
  "syn 3.0.7",
  "synstructure",
 ]
+
+[[package]]
+name = "zeroize"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 
 [[package]]
 name = "zerotrie"

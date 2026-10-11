@@ -43,7 +43,7 @@ gofro_apply_lock() {
 }
 
 start_service() {
-	local interface snapshot lan_interface lan_subnet lan_address helpers
+	local interface snapshot lan_interface lan_subnet lan_address helpers memory_profile
 
 	# Isolate procd's JSON query; return would submit an empty instance set.
 	# Only explicit start is a no-op: restart/reload must launch after stop.
@@ -59,10 +59,13 @@ start_service() {
 	config_load gofro || gofro_fail 'configuration failed'
 	config_get interface main interface 'gt0'
 	[ "$interface" = gt0 ] || gofro_fail 'unsupported tunnel interface'
+	config_get memory_profile main memory_profile 'auto'
+	case "$memory_profile" in auto|compact|standard) ;; *) gofro_fail 'unsupported memory profile' ;; esac
 
 	mkdir -p /tmp/gofro || gofro_fail 'cannot create runtime directory'
 	procd_open_instance
 	procd_set_param command /usr/bin/gofro-agent
+	procd_append_param command --memory-profile "$memory_profile"
 	procd_append_param command --listen 127.0.0.1:8080
 	procd_append_param command --http-listen "$lan_address:8081"
 	procd_append_param command --https-listen "$lan_address:8443"

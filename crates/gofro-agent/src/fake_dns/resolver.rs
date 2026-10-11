@@ -22,6 +22,7 @@ use crate::{
     config::normalize_domain,
     dataplane::{self, FakeMapping},
     model::{AP_DOMAIN, LanContext, PANEL_VIRTUAL_IP, RouteTarget},
+    resources::ResourceLimits,
     routing::{RoutingPolicy, is_lan_destination},
 };
 
@@ -29,6 +30,7 @@ use super::store::Store;
 
 const DNS_TIMEOUT: Duration = Duration::from_secs(4);
 pub(super) const MAX_DNS_PACKET: usize = u16::MAX as usize;
+const UDP_RESPONSE_BUFFER: usize = 4096;
 
 pub(crate) struct FakeDns {
     store: Mutex<Store>,
@@ -38,13 +40,18 @@ pub(crate) struct FakeDns {
 }
 
 impl FakeDns {
+    #[cfg(test)]
     pub(crate) fn open(path: &Path) -> Result<Self> {
+        Self::open_with_limits(path, ResourceLimits::STANDARD)
+    }
+
+    pub(crate) fn open_with_limits(path: &Path, limits: ResourceLimits) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         Ok(Self {
-            store: Mutex::new(Store::open(path)?),
+            store: Mutex::new(Store::open_with_limits(path, limits)?),
             updates: RwLock::new(()),
             active: AtomicBool::new(false),
             vpn_enabled: AtomicBool::new(false),
@@ -268,17 +275,27 @@ fn relevant_names(records: &[Record], domain: &str) -> HashSet<String> {
 }
 
 fn query_upstream(packet: &[u8], upstream: SocketAddr) -> Result<Vec<u8>> {
-    let mark = dataplane::target_mark(RouteTarget::Direct);
+    query_upstream_with_mark(
+        packet,
+        upstream,
+        dataplane::target_mark(RouteTarget::Direct),
+    )
+}
+
+fn query_upstream_with_mark(packet: &[u8], upstream: SocketAddr, mark: u32) -> Result<Vec<u8>> {
     let socket = marked_socket(Type::DGRAM, Protocol::UDP, mark)?;
     socket.set_read_timeout(Some(DNS_TIMEOUT))?;
     socket.set_write_timeout(Some(DNS_TIMEOUT))?;
     let socket: UdpSocket = socket.into();
     socket.connect(upstream)?;
     socket.send(packet)?;
-    let mut response = vec![0; MAX_DNS_PACKET];
+    let mut response = vec![0; UDP_RESPONSE_BUFFER];
     let length = socket.recv(&mut response)?;
     response.truncate(length);
-    if Message::from_vec(&response).is_ok_and(|message| message.truncated()) {
+    // A full receive buffer may indicate kernel-level UDP truncation even when
+    // the upstream did not set TC. Recover the complete message over TCP.
+    // Inspecting TC in the header avoids decoding every response twice.
+    if length == UDP_RESPONSE_BUFFER || (response.len() >= 12 && response[2] & 0x02 != 0) {
         return query_upstream_tcp(packet, mark, upstream);
     }
     Ok(response)
@@ -343,9 +360,11 @@ fn query_upstream_tcp(packet: &[u8], mark: u32, upstream: SocketAddr) -> Result<
 fn marked_socket(kind: Type, protocol: Protocol, mark: u32) -> Result<Socket> {
     let socket = Socket::new(Domain::IPV4, kind, Some(protocol))?;
     #[cfg(target_os = "linux")]
-    socket
-        .set_mark(mark)
-        .context("failed to set DNS egress mark")?;
+    if mark != 0 {
+        socket
+            .set_mark(mark)
+            .context("failed to set DNS egress mark")?;
+    }
     #[cfg(not(target_os = "linux"))]
     let _ = mark;
     Ok(socket)

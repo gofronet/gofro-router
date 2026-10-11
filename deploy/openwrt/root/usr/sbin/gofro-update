@@ -12,6 +12,7 @@ LOCK=/tmp/gofro-update.lock
 LOCKED=
 TMP=
 ASSET_ROUTE=
+STAGING_BASE=/usr/lib/gofro
 
 die() {
 	echo "error: $*" >&2
@@ -24,6 +25,7 @@ cleanup() {
 	[ -z "$LOCKED" ] || rmdir "$LOCK" 2>/dev/null || true
 }
 trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 valid_version() {
 	case "$1" in ''|*[!0-9.]*) return 1 ;; esac
@@ -91,7 +93,13 @@ platform_for() {
 
 enough_memory() {
 	case "$1" in ''|*[!0-9]*) return 1 ;; esac
-	[ "$1" -ge 196608 ]
+	[ "$1" -ge 49152 ]
+}
+
+ensure_packages() {
+	apk info --from installed -e "$@" >/dev/null 2>&1 && return 0
+	apk update
+	apk add "$@"
 }
 
 detect_platform() {
@@ -127,7 +135,7 @@ fi
 
 detect_platform
 MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2; exit }' /proc/meminfo)" || die 'router memory is unavailable'
-enough_memory "$MEMORY_KIB" || die 'at least 192 MiB RAM must be visible to OpenWrt'
+enough_memory "$MEMORY_KIB" || die 'at least 48 MiB RAM must be visible to OpenWrt (64 MiB device)'
 
 if [ "$mode" = install ]; then
 	[ ! -e /etc/gofro/version ] || [ -s /etc/gofro/install-pending ] || die 'Gofro is already installed'
@@ -137,12 +145,19 @@ fi
 
 mkdir "$LOCK" 2>/dev/null || die 'another update is running'
 LOCKED=1
-TMP="$(mktemp -d)"
+# Downloads and extraction use persistent storage, not RAM-backed /tmp. Only
+# remove marked, abandoned workspaces while holding the updater's global lock.
+mkdir -p "$STAGING_BASE"
+for old in "$STAGING_BASE"/.download.*; do
+	if [ ! -d "$old" ] || [ -L "$old" ] || [ ! -f "$old/.gofro-download" ]; then continue; fi
+	rm -rf "$old"
+done
+TMP="$(mktemp -d "$STAGING_BASE/.download.XXXXXX")"
+: > "$TMP/.gofro-download"
 BASE_URL=${BASE_URL%/}
 
 if [ "$mode" = install ]; then
-	apk update
-	apk add ca-bundle jsonfilter openssl-util uclient-fetch
+	ensure_packages ca-bundle jsonfilter openssl-util uclient-fetch
 	KEY=$TMP/update-public.pem
 	write_public_key "$KEY"
 fi
@@ -183,10 +198,11 @@ printf '%s  %s\n' "$sha256" "$TMP/$ARCHIVE" | sha256sum -c - >/dev/null \
 
 mkdir "$TMP/bundle"
 tar -xzf "$TMP/$ARCHIVE" -C "$TMP/bundle"
+rm -f "$TMP/$ARCHIVE"
 [ -x "$TMP/bundle/install.sh" ] || die 'release installer is missing'
 [ "$(cat "$TMP/bundle/VERSION")" = "$version" ] || die 'release version mismatch'
 if [ "$mode" = install ]; then
-	"$TMP/bundle/install.sh" ${country:+"$country"}
+	GOFRO_STAGED_BUNDLE="$TMP/bundle" "$TMP/bundle/install.sh" ${country:+"$country"}
 else
-	"$TMP/bundle/install.sh" --update
+	GOFRO_STAGED_BUNDLE="$TMP/bundle" "$TMP/bundle/install.sh" --update
 fi

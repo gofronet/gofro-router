@@ -5,7 +5,7 @@ use std::{
 
 use crate::codec::BUFFER_SIZE;
 
-pub(crate) const BATCH_SIZE: usize = 16;
+pub(crate) const BATCH_SIZE: usize = 4;
 pub(crate) type PacketBatch = [[u8; BUFFER_SIZE]; BATCH_SIZE];
 pub(crate) type PacketLengths = [usize; BATCH_SIZE];
 pub(crate) type PacketSources = [Option<SocketAddr>; BATCH_SIZE];

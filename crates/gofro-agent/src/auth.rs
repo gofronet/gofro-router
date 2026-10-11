@@ -15,7 +15,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use openssl::{memcmp, pkcs5, rand::rand_bytes};
+use openssl::{memcmp, rand::rand_bytes};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
@@ -570,30 +570,14 @@ fn read_record(path: &PathBuf) -> Result<(Vec<u8>, Vec<u8>)> {
 }
 fn verify(record: &(Vec<u8>, Vec<u8>), password: &str) -> Result<bool> {
     let mut actual = [0; 32];
-    pkcs5::scrypt(
-        password.as_bytes(),
-        &record.0,
-        16384,
-        8,
-        1,
-        64 * 1024 * 1024,
-        &mut actual,
-    )?;
+    gofro_kdf::scrypt(password.as_bytes(), &record.0, &mut actual)?;
     Ok(memcmp::eq(&actual, &record.1))
 }
 fn write_record(path: &PathBuf, password: &str) -> Result<()> {
     let mut salt = [0; 32];
     let mut hash = [0; 32];
     rand_bytes(&mut salt)?;
-    pkcs5::scrypt(
-        password.as_bytes(),
-        &salt,
-        16384,
-        8,
-        1,
-        64 * 1024 * 1024,
-        &mut hash,
-    )?;
+    gofro_kdf::scrypt(password.as_bytes(), &salt, &mut hash)?;
     let temporary = path.with_extension("new");
     let record = [
         "gofro-scrypt-v1".to_owned(),

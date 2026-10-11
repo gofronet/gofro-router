@@ -26,8 +26,13 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-The bundled `geoip.dat` is an unmodified build from V2Fly geoip, version
+The bundled `geoip.dat` is derived from V2Fly geoip, version
 `202608050239`: https://github.com/v2fly/geoip
+
+Gofro's `deploy/prepare-geodata.py` removes unused IPv6 CIDRs and merges adjacent
+or overlapping IPv4 CIDRs within each tag. IPv4 coverage and the complete tag
+catalog are preserved. The upstream archive is checksum-verified before this
+conversion; the prepared database is covered by the signed release manifest.
 
 It is licensed under Creative Commons Attribution-ShareAlike 4.0 International:
 https://creativecommons.org/licenses/by-sa/4.0/

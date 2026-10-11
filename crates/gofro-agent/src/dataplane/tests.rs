@@ -12,6 +12,26 @@ const PANEL_PORTS: PanelPorts = PanelPorts {
 };
 
 #[test]
+fn geoip_intervals_preserve_gaps_and_merge_adjacent_cidrs_without_overflow() {
+    let networks = [
+        "10.0.0.0/24",
+        "10.0.1.0/25",
+        "10.0.2.1/32",
+        "255.255.255.254/31",
+    ]
+    .map(|value| value.parse::<ipnet::Ipv4Net>().unwrap());
+    let mut elements = String::new();
+    append_networks(&mut elements, &networks);
+    assert_eq!(
+        elements,
+        "10.0.0.0-10.0.1.127, 10.0.2.1, 255.255.255.254-255.255.255.255"
+    );
+    let mut all = String::new();
+    append_networks(&mut all, &["0.0.0.0/0".parse().unwrap()]);
+    assert_eq!(all, "0.0.0.0-255.255.255.255");
+}
+
+#[test]
 fn full_exclusions_precede_all_policy_and_dns_redirect_but_preserve_dnat_and_vip_safety() {
     let lan = LanContext {
         device: "br-home".into(),
@@ -435,8 +455,10 @@ fn incremental_install_and_expiry_use_the_same_intent_sets() {
         "fake_to_real { 198.18.0.1 : 1.1.1.1, 198.18.0.2 : 8.8.8.8, 198.18.0.3 : 9.9.9.9 }"
     ));
     assert!(added.ends_with("add element inet gofro_routing fake_direct { 198.18.0.1 }\nadd element inet gofro_routing fake_vpn { 198.18.0.2 }\nadd element inet gofro_routing fake_block { 198.18.0.3 }\n"));
+    let mut deleted = String::new();
+    append_target_elements(&mut deleted, &mappings, "delete");
     assert_eq!(
-        render_target_elements(&mappings, "delete"),
+        deleted,
         "delete element inet gofro_routing fake_direct { 198.18.0.1 }\ndelete element inet gofro_routing fake_vpn { 198.18.0.2 }\ndelete element inet gofro_routing fake_block { 198.18.0.3 }\n"
     );
     assert!(render_mappings(&[]).is_empty());

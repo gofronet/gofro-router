@@ -149,7 +149,13 @@ reject env TEST_ARM_FAIL=1 "$TMP/bin/guard" prepare
 action=start
 service_running() { procd_json=clobbered; [ "${TEST_RUNNING:-0}" = 1 ]; }
 config_load() { printf 'config\n' >> "$TMP/log"; [ "${TEST_CONFIG_FAIL:-0}" = 0 ]; }
-config_get() { interface=${TEST_INTERFACE:-gt0}; }
+config_get() {
+	case "$1" in
+	interface) interface=${TEST_INTERFACE:-gt0} ;;
+	memory_profile) memory_profile=${TEST_MEMORY_PROFILE:-auto} ;;
+	*) exit 1 ;;
+	esac
+}
 mkdir() {
 	case "$*" in
 	'-p /tmp/gofro') : ;;
@@ -225,6 +231,9 @@ rc_start
 [ "$procd_json" = instances ]
 [ "$(cat "$GOFRO_GUARD_DIR/guard-device")" = br-home ]
 awk '/^network:/ {network=NR} /^nft:-f -/ {arm=NR} /^mode:/ {mode=NR} /^launch$/ {exit !(network<arm && arm<mode && mode<NR)}' "$TMP/log"
+grep -Fq 'procd:command --memory-profile auto' "$TMP/log"
+TEST_MEMORY_PROFILE=compact rc_start
+grep -Fq 'procd:command --memory-profile compact' "$TMP/log"
 
 for failure in TEST_CONFIG_FAIL TEST_MODE_FAIL TEST_NETWORK_FAIL; do
 	: > "$TMP/log"
@@ -242,6 +251,9 @@ unset TEST_LAUNCH_FAIL
 TEST_INTERFACE=foreign; export TEST_INTERFACE
 reject rc_start
 unset TEST_INTERFACE
+TEST_MEMORY_PROFILE=invalid; export TEST_MEMORY_PROFILE
+reject rc_start
+unset TEST_MEMORY_PROFILE
 reject env TEST_DEVICE=br-new "$TMP/bin/guard" prepare
 grep -q 'requires coordinated maintenance' "$TMP/error"
 [ "$(cat "$GOFRO_GUARD_DIR/guard-device")" = br-home ]

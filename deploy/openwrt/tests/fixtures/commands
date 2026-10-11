@@ -87,6 +87,7 @@ uci)
 	;;
 id) printf '0\n' ;;
 apk)
+	if [ "${1:-}" = info ]; then [ -e "$FS/stat-installed" ]; exit; fi
 	case " $* " in *' coreutils-stat '*) [ "$1" = add ]; : > "$FS/stat-installed" ;; esac
 	;;
 sync|sleep|logger) : ;;
@@ -94,6 +95,10 @@ chown) case "$*" in "0:0 $FS/etc/gofro"|"0:0 $FS/etc/gofro/guard-device."*) : ;;
 stat)
 	[ -e "$FS/stat-installed" ] || { : > "$FS/early-stat"; echo 'stat: not installed' >&2; exit 127; }
 	case "$2" in
+	'%d')
+		if [ -e "$FS/staging-other-device" ] && [ "$3" = "$FS/bundle/root" ]; then printf '2\n'
+		else printf '1\n'; fi
+		exit ;;
 	'%u:%a:%h') printf '0:600:1\n'; exit ;;
 	'%d:%i')
 		if [ "$1" = -Lc ]; then

@@ -4,7 +4,7 @@ Gofro installs on official OpenWrt 25.12 without replacing the firmware. It is
 not tied to a router vendor or model: the bootstrap selects a signed static
 bundle from OpenWrt's `DISTRIB_ARCH`.
 
-This describes the next candidate, v0.5.22. The published signed v0.5.21 release
+This describes the next candidate, v0.5.23. The published signed v0.5.22 release
 remains the immutable, pinned baseline; new changes require a new candidate
 artifact. Download links select the published Latest, not unshipped workspace
 changes.
@@ -17,18 +17,76 @@ Release bundles cover these OpenWrt package ABIs:
 - `i386_pentium-mmx`, `i386_pentium4`, `riscv64_generic`, and `x86_64`.
 
 MIPS, big-endian ARM, LoongArch, and PowerPC builds are not published because
-their OpenWrt ABI is not covered by a qualified Rust 1.98 target. The installer
+their OpenWrt ABI is not covered by a qualified Rust 1.99 target. The installer
 rejects an unsupported ABI before changing the router.
 
-The router must have at least 256 MiB RAM (192 MiB reported as `MemTotal`) and
+The compact profile targets routers with at least 64 MiB RAM (48 MiB reported
+as `MemTotal`) and
 a validated OpenWrt logical `lan`, with a primary IPv4 address and a device
 separate from WAN/WAN6 (including bridge members). Its firewall zone must belong
 exclusively to logical `lan`, without extra device/subnet membership. A custom
 unique zone name is allowed; the literal zone name `lan` is not required, and
 `wan`/`wan6` are not allowed. LAN must not overlap reserved `10.202.0.0/24` or
-`198.18.0.0/15`. Installation needs about 48 MiB free
-in `/tmp` and 35 MiB free on the filesystem containing `/usr/lib`; an update
-needs the same persistent space in addition to the installed release.
+`198.18.0.0/15`. Allow about 32 MiB free on the filesystem containing `/usr/lib`
+for the compact release, downloaded archive and extraction; an update needs
+this free space in addition to the installed release. The verified bootstrap
+downloads and extracts on persistent storage, then publishes the extracted root
+by rename on the same filesystem. It does not keep the release archive or bundle
+in RAM-backed `/tmp`. Manually supplied bundles on another filesystem use the
+copy-based installation path and its measured free-space check.
+
+### Memory budget
+
+The agent indexes the complete GeoSite/GeoIP tag catalog by file offset and
+decodes only enabled tags in **Rules** mode. **All internet** needs no decoded
+geodata. Rule changes reuse active tags and release unused data. Original V2Ray
+databases remain readable; releases contain a prepared IPv4-only GeoIP database
+with identical IPv4 coverage. Domain roots use indexed suffix lookup, and IPv4
+ranges use binary search. Contiguous GeoIP CIDRs become compact nft intervals.
+
+FakeDNS keeps one domain string per lease, a 256 KiB SQLite page-cache target,
+and a WAL checkpoint target of 64 pages (normally about 256 KiB). New allocation
+is limited to 32,768 mappings; existing mappings continue to renew at that limit
+and larger pre-upgrade stores drain normally. Live addresses are never recycled
+to admit another mapping. The 24-hour connection grace remains in effect.
+
+Runtime uses at most two async workers, a 24-thread blocking pool and 512 KiB
+worker stacks. Four concurrent management requests are admitted; excess requests
+receive HTTP 503 with `Retry-After: 1`, while DNS and loopback health remain
+independent.
+
+Devices reporting less than 96 MiB `MemTotal` automatically use **compact**:
+one async worker, up to 16 blocking threads, 256 KiB worker stacks, eight DNS
+workers and eight DNS TCP connections. FakeDNS admits up to 8192 mappings,
+targets a 128 KiB SQLite cache and checkpoints WAL at 32 pages (about 128 KiB).
+The UDP upstream buffer is 4 KiB in both profiles; full or TC-marked replies
+fall back to TCP, which retains complete DNS message support.
+
+Compact policy admission limits selected GeoSite wire data to 512 KiB, eight
+regexes (128 KiB compilation limit and 16 KiB DFA cache per regex), and a total
+of 16,384 GeoIP intervals across enabled IP rules. An oversized policy is
+rejected before publication rather than partially applied. Standard retains
+the larger budgets. The complete catalog remains available for rule selection.
+
+`gofro-kdf` preserves the existing `gofro-scrypt-v1` format and N=16384/r=8/p=1
+parameters. It stores every eighth ROMix checkpoint and reconstructs the other
+blocks, reducing checkpoint memory from 16 MiB to **2 MiB**. Derived keys match
+RFC 7914 and OpenSSL, including existing credentials and rollback. This trades
+approximately 2.75x as many BlockMix operations for lower memory; intermediate
+buffers are zeroized and hashing remains serialized.
+
+Profile selection is `gofro.main.memory_profile` in `/etc/config/gofro`:
+`auto` (default), `compact`, or `standard`. The equivalent agent option is
+`--memory-profile`. Normal updates inspect only the installed package database
+and skip apk repository/solver work when dependencies are already present.
+
+The resource smoke test with real release databases, HTTPS/scrypt login,
+5001 FakeDNS mappings, eight concurrent DNS clients, rules/all transitions and
+restart passed under a **64 MiB cgroup limit without swap**. Agent RSS was about
+14–17 MiB, with a 17.3 MiB observed peak. This is a Linux x86_64 resource test;
+model-specific OpenWrt/driver, installation and VPN throughput qualification
+remain part of hardware release qualification. Supported ABI and persistent
+space requirements also apply to 64 MiB devices.
 
 ## Install
 
@@ -110,7 +168,7 @@ unsafe config migration is refused rather than guessed.
 
 The legacy country argument is accepted and ignored for compatibility; it is not
 needed in installation commands. The bundle contains the complete GeoSite and
-GeoIP databases.
+IPv4 GeoIP tag catalogs.
 
 ## VPN setup
 

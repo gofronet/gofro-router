@@ -3,8 +3,8 @@
 The next release workflow cross-compiles static musl binaries for eight
 supported OpenWrt 25.12 ABIs and one x86_64 VPS target: nine signed bundles,
 nine manifests, nine signatures and two installers (29 release assets total).
-The next signed candidate workspace version is `0.5.22`. The published signed
-v0.5.21 release is the immutable, pinned baseline; changes require a new
+The next signed candidate workspace version is `0.5.23`. The published signed
+v0.5.22 release is the immutable, pinned baseline; changes require a new
 candidate, not modification of its artifact.
 
 ## Create a release
@@ -13,7 +13,7 @@ candidate, not modification of its artifact.
    `Cargo.toml` and the workspace package versions in `Cargo.lock`.
 2. Run the checks below and squash-merge the pull request into `main`.
 3. Open **Actions -> Release -> Run workflow**, select `main`, and enter the
-   version without the `v` prefix (`0.5.22`). Leave **publish** unchecked
+   version without the `v` prefix (`0.5.23`). Leave **publish** unchecked
    (the default) to build a candidate.
 
 The workflow requires the latest `main` commit and a matching Cargo workspace
@@ -46,7 +46,7 @@ are scoped to a workflow run; record the run ID and artifact IDs as well.
    and router-to-VPS tunnel. Record untested ABIs explicitly. CI/emulation alone
    is not hardware qualification.
 
-For v0.5.22, also record the upgrade from the pinned signed v0.5.21 baseline.
+For v0.5.23, also record the upgrade from the pinned signed v0.5.22 baseline.
 Verify router and VPS MTU 1379 after installation/update, native UCI MTU after
 agent restart/server selection, 1350/1351-byte QUIC datagrams and HTTP/3 responses,
 TCP MSS in both VPN directions and prompt IPv4 fallback for unsupported IPv6.
@@ -65,7 +65,7 @@ LAN IP, proxy or listener is introduced. The candidate requires native router
 `conntrack` and adds a Gofro-owned dnsmasq `hostrecord` for the panel alias.
 Check `https://<LAN-address>:8443` as the direct-IP fallback, especially after
 an initial reconcile failure when VIP rules may not yet be installed. Candidate
-qualification must not overwrite the v0.5.21 artifact or change published Latest.
+qualification must not overwrite the v0.5.22 artifact or change published Latest.
 
 Qualify **Rules -> Devices -> Direct**, manual MAC entry and removal with VPN
 on/off, rules/all modes, VPN failure, restart and guard retention. Verify full
@@ -126,6 +126,7 @@ sh deploy/openwrt/tests/transaction.sh
 sh deploy/openwrt/tests/tunnel.sh
 sh deploy/openwrt/tests/update.sh
 sh deploy/openwrt/tests/version.sh
+python3 deploy/openwrt/tests/geodata.py
 bash deploy/server/tests/version.sh
 ```
 
@@ -136,6 +137,21 @@ regressions too. Both workflows build `deploy/openwrt/tests/Dockerfile` with
 UCI/jsonfilter built from pinned OpenWrt library/tool revisions. A workflow-only
 image layer adds `procps`. No host UCI/jsonfilter or implicit mock installation
 is required; test-local mocks remain inside disposable test state.
+
+Packaging verifies the pinned upstream GeoIP checksum, then runs
+`deploy/prepare-geodata.py` to retain all tags with equivalent merged IPv4
+coverage and remove unused IPv6 payload. The prepared database is included in
+the signed archive. Memory qualification should include a 64 MiB OpenWrt device
+using the automatic compact profile and a standard-profile device:
+record agent/child RSS peaks at startup and policy changes, scrypt login, a
+populated FakeDNS store, and persistent-space peaks during install/update.
+
+Compare the compact resource budgets, full/TC UDP -> TCP DNS fallback and
+policy-admission failure without publication. Password records remain the
+existing scrypt format: the checkpointed implementation must match the RFC
+vector and OpenSSL reference before hardware testing. Record hash latency on
+the device as well as its peak memory. A constrained Linux resource test does
+not replace firmware/driver/ABI qualification of the exact signed artifact.
 `bash deploy/openwrt/tests/dataplane-netns.sh --emit-only` emits Rust fixtures;
 `sh deploy/openwrt/tests/dataplane-netns.sh --run` executes in an isolated Docker
 container. A container-local sysctl wrapper mounts proc only when invoked inside
