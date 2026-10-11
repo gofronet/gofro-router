@@ -149,7 +149,7 @@ LOCKED=1
 # remove marked, abandoned workspaces while holding the updater's global lock.
 mkdir -p "$STAGING_BASE"
 for old in "$STAGING_BASE"/.download.*; do
-	[ -d "$old" ] && [ ! -L "$old" ] && [ -f "$old/.gofro-download" ] || continue
+	if [ ! -d "$old" ] || [ -L "$old" ] || [ ! -f "$old/.gofro-download" ]; then continue; fi
 	rm -rf "$old"
 done
 TMP="$(mktemp -d "$STAGING_BASE/.download.XXXXXX")"
