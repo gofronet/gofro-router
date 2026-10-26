@@ -32,6 +32,8 @@ key='Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa='
 for command in \
   'managed-status' \
   'capabilities' \
+  'enable-warp' \
+  'disable-warp' \
   'create-friend 198.51.100.1:8443' \
   "rename-friend $key" \
   "revoke-friend $key" \
@@ -46,6 +48,8 @@ for command in \
 done
 grep -Fx 'managed-status' "$TMP/argv"
 grep -Fx 'capabilities' "$TMP/argv"
+grep -Fx 'enable-warp --accept-terms' "$TMP/argv"
+grep -Fx 'disable-warp' "$TMP/argv"
 grep -Fx 'create-friend 198.51.100.1:8443' "$TMP/argv"
 grep -Fx "rename-friend $key" "$TMP/argv"
 grep -Fx "revoke-friend $key" "$TMP/argv"
@@ -73,6 +77,8 @@ for command in \
   'create-router-profile 198.51.100.1:51820' \
   'create-router-profile vpn.test:8443' \
   'capabilities extra' \
+  'enable-warp --accept-terms' \
+  'disable-warp; id' \
   "remove-router-peer $key extra" \
   "friend-profile $key 198.51.100.1:8443; id"; do
   if SSH_ORIGINAL_COMMAND=$command bash "$TMP/gofro-managed" >/dev/null 2>&1; then

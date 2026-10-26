@@ -95,6 +95,31 @@ pub(crate) fn restart(state: &AppState, public_key: &str) -> Result<ManagedServe
     status_unlocked(state, public_key).context(CommittedRefreshFailed)
 }
 
+pub(crate) fn set_warp(
+    state: &AppState,
+    public_key: &str,
+    enabled: bool,
+    accept_terms: bool,
+) -> Result<ManagedServerStatus> {
+    if enabled && !accept_terms {
+        bail!("Для установки WARP необходимо принять условия Cloudflare.");
+    }
+    let _operation = managed_lock(state)?;
+    if status_unlocked(state, public_key)?.warp.is_none() {
+        bail!("Обновите серверный пакет Gofro: эта версия VPS не поддерживает WARP.");
+    }
+    managed_ssh_unlocked(
+        state,
+        public_key,
+        if enabled {
+            "enable-warp"
+        } else {
+            "disable-warp"
+        },
+    )?;
+    status_unlocked(state, public_key).context(CommittedRefreshFailed)
+}
+
 pub(crate) fn create_friend(
     state: &AppState,
     public_key: &str,
@@ -218,6 +243,13 @@ fn status_unlocked(state: &AppState, public_key: &str) -> Result<ManagedServerSt
 
 fn validate_managed_status(status: &ManagedServerStatus) -> Result<()> {
     semver(&status.version)?;
+    if status
+        .warp
+        .as_ref()
+        .is_some_and(|warp| warp.connected && (!warp.installed || !warp.enabled))
+    {
+        bail!("managed server returned inconsistent WARP health");
+    }
     let mut peers = HashSet::new();
     for peer in &status.peers {
         validate_peer_key(&peer.public_key)?;

@@ -37,6 +37,9 @@
   let editFlow = $state<ServerDialogFlow>(null);
   let loadedKey = $state("");
   let selectionRevision = 0;
+  let warpDialog = $state(false);
+  let warpEnable = $state(true);
+  let warpTerms = $state(false);
 
   const peers = $derived(details?.peers.filter(peer => !peer.revoked) ?? []);
   const activePeers = $derived(details ? peers.length : null);
@@ -50,6 +53,7 @@
     details = null;
     peerFlow = null;
     maintenance = null;
+    warpDialog = false;
     return true;
   }
   function openPeer(flow: PeerFlow): void { app.clearActionError(); dialogError = ""; profile = null; shareMessage = ""; peerFlow = flow; }
@@ -93,6 +97,8 @@
     dialogError = "";
     maintenance = null;
     editFlow = null;
+    warpDialog = false;
+    warpTerms = false;
     if (key && server?.managed) void inspect(key, "Первичная проверка");
   });
   onDestroy(() => { selectionRevision++; });
@@ -171,6 +177,18 @@
     maintenance = null;
     await inspect(pending.key, action === "update" ? "Обновление завершено" : "VPN перезапущен");
   }
+
+  async function saveWarp(): Promise<void> {
+    if (!server || busy || (warpEnable && !warpTerms)) return;
+    const pending = request(server.public_key);
+    const result = await app.setWarp(pending.key, warpEnable, warpTerms);
+    if (!current(pending)) return;
+    if (!result && committed()) return;
+    if (!result) { details = null; return error(); }
+    details = result;
+    warpDialog = false;
+    inspectedAt = new Date();
+  }
 </script>
 
 <svelte:head><title>Управление сервером · Gofro Router</title></svelte:head>
@@ -185,6 +203,7 @@
   <div class="management"><a class="text-link management-back" href={p("/servers")}>Все серверы</a><div class="section-caption management-heading"><div><h2>{server.name}</h2><p>{server.managed ? "Свой VPS" : "Импортированный профиль"} · <span class="mono">{server.endpoint}</span></p></div><button class="btn" type="button" disabled={busy} onclick={() => editFlow = { kind: "edit", publicKey: server.public_key }}>Настройки</button></div>
     <section class="panel"><div class="panel-head"><h2>Доступность</h2><button class="btn" type="button" disabled={busy || !server.managed} onclick={() => inspect(server.public_key)}>Проверить</button></div><div class="panel-body">{#if inspectedAt}<p class="small muted">Последняя попытка: {inspectedAt.toLocaleString("ru-RU")}</p>{/if}<p class="management-result" role="status">{server.managed ? inspection || (loadingDetails ? "Проверяем сервер…" : "Ещё не проверено") : importedAvailability}</p></div></section>
     {#if server.managed}
+      <section class="panel"><div class="panel-head"><h2>Cloudflare WARP</h2><div class="row-actions">{#if details?.warp}<button class="btn" type="button" disabled={busy} onclick={() => { app.clearActionError(); dialogError = ""; warpEnable = true; warpTerms = false; warpDialog = true; }}>{details.warp.enabled ? "Переподключить" : "Включить"}</button>{#if details.warp.enabled}<button class="btn" type="button" disabled={busy} onclick={() => { app.clearActionError(); dialogError = ""; warpEnable = false; warpDialog = true; }}>Отключить</button>{/if}{/if}</div></div><div class="panel-body"><p class="management-result" role="status">{!details ? "Проверьте сервер, чтобы получить состояние WARP." : !details.warp ? "Для WARP требуется обновление серверного пакета Gofro." : details.warp.connected ? "WARP подключён." : details.warp.enabled ? "WARP включён, но подключение не подтверждено. WARP-трафик не выходит напрямую." : details.warp.installed ? "WARP установлен, но отключён." : "WARP не установлен."}</p><p class="small">Только правила «VPN → WARP» используют этот выход. Остальной VPN-трафик и SSH остаются на обычном IP VPS. WARP не гарантирует доступ к конкретным сайтам и не позволяет выбрать страну.</p></div></section>
       <section class="panel"><div class="panel-head"><h2>Доступы друзей {#if activePeers !== null}<span class="count">{activePeers}</span>{/if}</h2><button class="btn primary" type="button" disabled={busy || !details} onclick={() => { peerName = ""; openPeer({ kind: "create" }); }}>Создать доступ</button></div>
         {#if details}{#each peers as peer (peer.public_key)}<article class="full-row peer-row"><div class="row-main"><h3>{peer.name}</h3><p>Доступ активен</p></div><div class="row-actions">{#if peer.can_share}<button class="btn" type="button" disabled={busy} onclick={() => openShare(peer)}>Поделиться</button>{:else}<span class="small muted">Профиль для этого старого доступа не хранится, поэтому поделиться им нельзя.</span>{/if}<button class="icon-btn" type="button" disabled={busy} aria-label={`Изменить доступ ${peer.name}`} onclick={() => { peerName = peer.name; openPeer({ kind: "edit", peer }); }}><MoreHorizontal size={19} /></button></div></article>{:else}<div class="empty"><h3>Пока нет доступов</h3><p>Для каждого друга создайте отдельный доступ.</p></div>{/each}{:else}<div class="empty"><h3>{loadingDetails ? "Получаем доступы" : "Доступы недоступны"}</h3><p>{loadingDetails ? "Запрашиваем данные сервера." : "Повторите проверку сервера, чтобы загрузить доступы."}</p>{#if !loadingDetails}<button class="btn" type="button" disabled={busy} onclick={() => inspect(server.public_key)}>Повторить</button>{/if}</div>{/if}
       </section>
@@ -207,3 +226,13 @@
 {/if}
 {#if maintenance}<Dialog title={maintenance === "update" ? "Обновить VPN на сервере?" : "Перезапустить VPN на сервере?"} onclose={() => { if (!busy) maintenance = null; }} {busy}><p class="dialog-intro">Подключение прервётся у вас и у всех друзей.</p>{#if dialogError || app.actionError}<p class="error" role="alert">{dialogError || app.actionError}</p>{/if}<div class="form-actions"><button class="btn ghost" type="button" disabled={busy} onclick={() => maintenance = null}>Отмена</button><button class="btn primary" type="button" disabled={busy} onclick={maintain}>{maintenance === "update" ? "Обновить" : "Перезапустить"}</button></div></Dialog>{/if}
 <ServerDialogs bind:flow={editFlow} />
+{#if warpDialog}
+  <Dialog title={warpEnable ? "Включить WARP на VPS?" : "Отключить WARP на VPS?"} onclose={() => { if (!busy) warpDialog = false; }} {busy}>
+    <p class="dialog-intro">{warpEnable ? "Gofro установит официальный клиент Cloudflare в отдельном сетевом пространстве VPS. Настройка может занять несколько минут. Существующая сторонняя установка WARP не будет перезаписана." : "WARP отключится для всех роутеров этого VPS. Сайты с правилом «VPN → WARP» станут недоступны, без перехода на обычный IP. Обычный VPN продолжит работать."}</p>
+    {#if warpEnable}
+      <label class="checkbox-field"><input type="checkbox" bind:checked={warpTerms} disabled={busy} /><span>Я принимаю <a href="https://www.cloudflare.com/application/terms/" target="_blank" rel="noreferrer">условия Cloudflare WARP</a> и разрешаю установку клиента на VPS.</span></label>
+    {/if}
+    {#if dialogError || app.actionError}<p class="error" role="alert">{dialogError || app.actionError}</p>{/if}
+    <div class="form-actions"><button class="btn ghost" type="button" disabled={busy} onclick={() => warpDialog = false}>Отмена</button><button class="btn primary" type="button" disabled={busy || (warpEnable && !warpTerms)} onclick={saveWarp}>{busy ? "Настраиваем…" : warpEnable ? "Установить и включить" : "Отключить"}</button></div>
+  </Dialog>
+{/if}

@@ -15,6 +15,8 @@ pub struct FriendPeer {
 pub struct ManagedServerStatus {
     pub version: String,
     pub peers: Vec<FriendPeer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warp: Option<crate::warp::WarpStatus>,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]

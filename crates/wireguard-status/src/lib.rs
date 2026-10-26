@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 pub mod managed;
+pub mod warp;
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct PeerStatus {

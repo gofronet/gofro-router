@@ -250,6 +250,7 @@ fn target_code(target: RouteTarget) -> i64 {
         RouteTarget::Direct => 1,
         RouteTarget::Vpn => 2,
         RouteTarget::Block => 3,
+        RouteTarget::Warp => 4,
     }
 }
 
@@ -258,6 +259,7 @@ fn target_from_code(code: i64) -> Result<RouteTarget> {
         1 => Ok(RouteTarget::Direct),
         2 => Ok(RouteTarget::Vpn),
         3 => Ok(RouteTarget::Block),
+        4 => Ok(RouteTarget::Warp),
         _ => bail!("invalid persisted route target {code}"),
     }
 }
@@ -271,6 +273,33 @@ fn ipv4_from_sql(value: i64) -> rusqlite::Result<Ipv4Addr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warp_leases_persist_without_merging_shared_destination_ips() {
+        let mut store = Store::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let real = "1.1.1.1".parse().unwrap();
+        let (warp, _) = store
+            .allocate("warp.example", real, RouteTarget::Warp, 60)
+            .unwrap();
+        let (vpn, _) = store
+            .allocate("vpn.example", real, RouteTarget::Vpn, 60)
+            .unwrap();
+        assert_ne!(warp.fake, vpn.fake);
+        let reopened = Store::from_connection(store.connection).unwrap();
+        assert_eq!(
+            reopened.leases[&("warp.example".into(), real)].mapping,
+            warp
+        );
+        assert_eq!(reopened.leases[&("vpn.example".into(), real)].mapping, vpn);
+        for target in [
+            RouteTarget::Direct,
+            RouteTarget::Vpn,
+            RouteTarget::Warp,
+            RouteTarget::Block,
+        ] {
+            assert_eq!(target_from_code(target_code(target)).unwrap(), target);
+        }
+    }
 
     #[test]
     fn pool_wrap_and_reopen_never_allocate_panel_or_broadcast() {

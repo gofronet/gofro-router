@@ -160,7 +160,8 @@ impl FakeDns {
             .then(|| self.rewrite_records(message, domain, policy, lan))
             .transpose()?
             .unwrap_or(false);
-        let filtered = (vpn_enabled || domain_target == Some(RouteTarget::Block))
+        let filtered = (vpn_enabled
+            || matches!(domain_target, Some(RouteTarget::Block | RouteTarget::Warp)))
             && (retain_ipv4_records(message.answers_mut())
                 | retain_ipv4_records(message.additionals_mut()));
         if rewritten || filtered {

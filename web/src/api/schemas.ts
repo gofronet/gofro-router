@@ -21,6 +21,8 @@ export const friendPeerSchema = z.object({
 export const managedServerStatusSchema = z.object({
   version: z.string(),
   peers: z.array(friendPeerSchema),
+  warp: z.object({ installed: z.boolean(), enabled: z.boolean(), connected: z.boolean() })
+    .refine(warp => !warp.connected || (warp.installed && warp.enabled)).optional(),
 }).refine(status => new Set(status.peers.map(peer => peer.public_key)).size === status.peers.length);
 
 export const serverProbeSchema = z.object({
@@ -113,7 +115,7 @@ export const deviceSchema = z.object({
   inactive_ms: z.number(),
 });
 
-export const routeTargetSchema = z.enum(["direct", "vpn", "block"]);
+export const routeTargetSchema = z.enum(["direct", "vpn", "warp", "block"]);
 export const macSchema = z.string().trim().toLowerCase()
   .regex(/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/, "Введите MAC в формате 02:ab:cd:ef:01:23.")
   .refine(value => value !== "00:00:00:00:00:00" && (Number.parseInt(value.slice(0, 2), 16) & 1) === 0,

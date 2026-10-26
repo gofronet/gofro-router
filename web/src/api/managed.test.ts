@@ -1,4 +1,4 @@
-import { friendNameSchema, managedServerStatusSchema, serverInputSchema, serverSchema } from "./schemas";
+import { friendNameSchema, managedServerStatusSchema, routeTargetSchema, serverInputSchema, serverSchema } from "./schemas";
 
 declare function test(name: string, run: () => void): void;
 
@@ -15,4 +15,12 @@ test("managed peer contracts reject inconsistent state and retain server icons",
   const server = { name: "Server", endpoint: "203.0.113.1:8443", public_key, managed: true };
   if (!serverSchema.safeParse(server).success
     || serverInputSchema.parse({ ...server, emoji: "" }).emoji !== "") throw new Error("server icon update was discarded");
+});
+
+test("WARP contracts preserve old server compatibility and reject false health", () => {
+  const base = { version: "0.5.23", peers: [] };
+  if (!routeTargetSchema.safeParse("warp").success
+    || !managedServerStatusSchema.safeParse(base).success
+    || !managedServerStatusSchema.safeParse({ ...base, warp: { installed: true, enabled: true, connected: true } }).success
+    || managedServerStatusSchema.safeParse({ ...base, warp: { installed: false, enabled: false, connected: true } }).success) throw new Error("invalid WARP contract");
 });

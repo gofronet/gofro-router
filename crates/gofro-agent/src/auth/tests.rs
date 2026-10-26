@@ -629,6 +629,7 @@ async fn managed_routes_reject_missing_sessions_and_bad_csrf_before_ssh() {
         (Method::POST, "/api/servers/create-profile"),
         (Method::POST, "/api/servers/management"),
         (Method::POST, "/api/servers/restart"),
+        (Method::POST, "/api/servers/warp"),
         (Method::POST, "/api/servers/friends"),
         (Method::PUT, "/api/servers/friends"),
         (Method::DELETE, "/api/servers/friends"),

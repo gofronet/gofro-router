@@ -137,6 +137,7 @@ fn private_router() -> Router<AppState> {
             post(managed::friend_profile),
         )
         .route("/api/servers/select", post(select_server))
+        .route("/api/servers/warp", post(managed::set_warp))
         .route("/api/ap", post(network_managed_by_openwrt))
         .route("/api/onboarding/wifi", post(network_managed_by_openwrt))
         .route("/api/routing", post(update_routing))
