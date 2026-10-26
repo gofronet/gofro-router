@@ -55,7 +55,10 @@ jobs:
               chmod +x /usr/local/bin/sysctl
               sh deploy/openwrt/tests/dataplane-netns.sh --run
               bash deploy/server/tests/warp-netns.sh
-              exec bash deploy/server/tests/warp-network.sh
+              bash deploy/server/tests/warp-network.sh
+              ip netns add gofro-kernel-test
+              ip netns exec gofro-kernel-test bash deploy/server/tests/warp-wireguard.sh
+              ip netns delete gofro-kernel-test
             '
           sudo -n docker run --rm --network none --cap-add NET_ADMIN --user 0:0 \
             -v "$GITHUB_WORKSPACE:/src:ro" -w /src gofro-mode-test \

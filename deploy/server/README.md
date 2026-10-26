@@ -18,11 +18,25 @@ Disable with `enabled:false`. Restricted SSH accepts only the literal commands
 `enable-warp` and `disable-warp`, not arbitrary options or shell expressions.
 The corresponding root CLI is `gofro-router-server enable-warp --accept-terms`.
 
-The official `cloudflare-warp` package is installed from Cloudflare's signed APT
-repository (Debian bookworm/trixie; Ubuntu jammy/noble/resolute). Existing unmanaged
-WARP installations and customized Gofro server firewalls are refused, not adopted
-or overwritten. Failed installation can leave a prepared, disconnected exit;
-inspect its state before retrying. No user payload is sent through a fallback exit.
+The signed server bundle contains a checksum-pinned **wgcf v2.3.1**, an unofficial
+registration-only utility. It obtains a WireGuard profile after explicit terms
+acceptance; **payload uses the Linux kernel WireGuard driver**, not `warp-svc`,
+MASQUE, `wireguard-go` or a userspace proxy. The VPS downloads no executable for
+registration. See [dependency provenance](WGCF.md). Supported hosts are Debian
+bookworm/trixie and Ubuntu jammy/noble/resolute with kernel WireGuard support.
+
+The Cloudflare device API is not an officially supported WireGuard provisioning
+API. Registration and endpoint availability require real VPS qualification.
+Existing unmanaged WARP installations, old MASQUE candidate state, and customized
+Gofro server firewalls are refused, not adopted or overwritten. Failed setup may
+leave a prepared, disconnected exit; inspect it before retrying. There is no
+automatic MASQUE or ordinary-exit fallback.
+
+Registration/account tokens and profiles remain root-only (`0700` directory,
+`0600` files). Diagnostics from wgcf are private, never API response bodies.
+Profiles are parsed as data: hooks/extra peers/duplicate settings are refused,
+and profile text is never sourced or executed by `wg-quick`. DNS/MTU/IPv6 fields
+from its generic profile do not change host settings.
 
 ## Data plane
 
@@ -54,21 +68,28 @@ The VPS uses `gofro-warp-network.service`, namespace `gofro-warp`, host veth
 table/priority `10900` (routes protocol 186). Foreign policy rules, table routes,
 source return routes and existing namespace/interface names are refused.
 
-`warp-svc.service` runs inside that namespace using a systemd drop-in. Its resolver
-file is bind-mounted only into the service's mount namespace. It uses the official
-MASQUE tunnel in traffic-only (`warp`) mode. `gofro-warp-connect.service` connects
-on startup and verifies `warp=on` or `warp=plus` through the WARP interface.
-WireGuard restarts propagate to the isolated network, daemon and connection units.
+`gofro-warp.service` is a oneshot setup/teardown service, not a payload daemon.
+It creates kernel `CloudflareWARP` in the host namespace and then moves the
+plaintext interface into `gofro-warp`. As documented by
+[WireGuard](https://www.wireguard.com/netns/), the encrypted UDP socket stays in
+its birthplace, so transport leaves directly via the normal VPS WAN without
+an extra userspace hop or namespace-to-host NAT. Only that namespace gets a
+default route to WARP. Setup verifies `warp=on` or `warp=plus` through the actual
+interface; live status requires a fresh kernel handshake, not just an active
+unit/link. WireGuard restarts propagate to the network and egress units.
 
-The host default route and resolver are never changed. Namespace-local native
-traffic (registration and encrypted Cloudflare transport) can use the VPS WAN.
-Forwarded user traffic cannot: the namespace's forward policy is DROP and permits
+The host default route and resolver are never changed. Registration is control
+plane only, over the host's ordinary connection. The namespace has no default
+route via its host veth, even before WARP connects or after it is disabled.
+Its forward policy is DROP and permits user payload
 it only towards `CloudflareWARP`, with reverse established/related traffic allowed.
 The host independently drops WARP-source traffic going anywhere except its veth.
 The WARP policy rule and unreachable default survive shutdown. Stopping WARP does
 not restart WireGuard or relay, nor change ordinary VPN traffic.
 
-TCP MSS is capped at 1240 for WARP's 1280-byte minimum MTU; UDP/QUIC is not blocked.
+The native WARP interface uses MTU 1420 and caps TCP MSS at 1380. The router's
+existing conservative MSS cap is preserved. UDP/QUIC is not blocked, and a
+1351-byte UDP payload fits both managed tunnels without fragmentation.
 Path MTU discovery/ICMP remains necessary for larger datagrams. The main Gofro
 tunnel's configured MTU is not reduced. IPv6 remains unsupported by the managed
 data plane; explicit Direct device exclusions retain native OpenWrt IPv6.
@@ -94,15 +115,21 @@ dropped until the application reconnects, including unreplied UDP/SYN flows.
   controller state before development deployment; do not downgrade with WARP rules
   or leases still present. Published update signing remains unchanged.
 
-Diagnostics on the VPS (never share `reg.json`, WireGuard or management keys):
+Kernel WireGuard removes a userspace data path, but no transport is guaranteed
+fastest for every endpoint or route. For hardware qualification, record WARP
+egress/colo, handshake/RTT, repeated throughput samples and VPS CPU under the same
+load; compare direct VPS and router-to-VPS-to-WARP paths. Do not describe local
+namespace tests or one HTTP download as proof of maximum Internet performance.
+
+Diagnostics on the VPS (never share `account.toml`, `profile.conf`, WireGuard or management keys):
 
 ```sh
 gofro-router-server managed-status
-systemctl status gofro-warp-network warp-svc gofro-warp-connect
-journalctl -u gofro-warp-network -u warp-svc -u gofro-warp-connect
+systemctl status gofro-warp-network gofro-warp
+journalctl -u gofro-warp-network -u gofro-warp
 ip -4 rule show
 ip -4 route show table 10900
-ip netns exec gofro-warp warp-cli status
+ip netns exec gofro-warp wg show CloudflareWARP
 ip netns exec gofro-warp nft list table inet gofro_warp
 ```
 
@@ -110,7 +137,12 @@ ip netns exec gofro-warp nft list table inet gofro_warp
 
 `cargo test --workspace --locked` covers policy precedence, source mapping, lease
 persistence, server owner/friend isolation and rollback. `bash deploy/server/tests/warp.sh`
-checks production firewall templates and foreign-route refusal without privileges.
+checks production firewalls, strict profile validation, private reusable
+registration, handshake freshness and foreign-route refusal without privileges.
 The kernel regression `warp-netns.sh` uses only disposable namespaces and a fake
-WARP interface, not a real Cloudflare account. It does not prove that the official
-client or any particular target site is reachable from your VPS.
+WARP interface, not a real Cloudflare account. `warp-wireguard.sh` exercises the
+production setup/teardown through **real kernel WireGuard encryption** between
+disposable local namespaces, including TCP, 1351-byte UDP, birth-socket isolation,
+foreign interface refusal, restart and fail-closed teardown. CI runs both.
+Neither test proves that Cloudflare registration or a target site is reachable
+from your actual VPS.
