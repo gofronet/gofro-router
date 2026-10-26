@@ -103,7 +103,7 @@ owned_wireguard -n gofro-warp
 [[ $(ip -n gofro-warp route show default) == 'default dev CloudflareWARP scope link'* ]]
 touch "$STATE/enabled"
 # Invoked by the sourced status function before the publication-test stub below.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 systemctl() { [[ $* == 'is-active --quiet gofro-warp.service' ]]; }
 [[ $(status) == *'"connected":true'* ]]
 

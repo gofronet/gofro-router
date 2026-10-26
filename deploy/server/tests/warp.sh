@@ -31,7 +31,7 @@ die() { exit 1; }
 # shellcheck disable=SC2034
 SOURCES=10.202.1.0/24 TABLE=10900 PEER=169.254.203.2 VETH=gofro-warp0 WG_INTERFACE=gt0 NS=gofro-warp WIREGUARD=CloudflareWARP
 # Invoked by the sourced production functions, then replaced for status tests.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 ip() {
   case "$*" in
     '-4 -N rule show') printf '%s\n' "${RULES:-}" ;;

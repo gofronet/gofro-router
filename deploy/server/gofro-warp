@@ -40,7 +40,7 @@ read_profile() {
   local profile=$1 line section='' key value address endpoint
   local interfaces=0 peers=0
   local -A fields=()
-  protected_file "$profile" && [[ $(stat -c '%a' "$profile") == 600 ]] || die 'unsafe or missing WARP WireGuard profile'
+  if ! protected_file "$profile" || [[ $(stat -c '%a' "$profile") != 600 ]]; then die 'unsafe or missing WARP WireGuard profile'; fi
   (( $(stat -c '%s' "$profile") <= 8192 )) || die 'oversized WireGuard profile'
   while IFS= read -r line || [[ -n $line ]]; do
     line=${line%$'\r'}
@@ -369,7 +369,7 @@ register_profile() {
   fi
   temporary=$(mktemp -d "$STATE/.registration.XXXXXX")
   if [[ -e $STATE/account.toml || -L $STATE/account.toml ]]; then
-    protected_file "$STATE/account.toml" && [[ $(stat -c '%a' "$STATE/account.toml") == 600 ]] || die 'unsafe WARP registration file'
+    if ! protected_file "$STATE/account.toml" || [[ $(stat -c '%a' "$STATE/account.toml") != 600 ]]; then die 'unsafe WARP registration file'; fi
   elif ! timeout 120 "$WGCF" --config "$STATE/account.toml" register --accept-tos > "$temporary/register.log" 2>&1; then
     die "WARP WireGuard registration failed; private diagnostics: $temporary/register.log"
   fi
@@ -389,7 +389,7 @@ enable() {
     fi
   else
     read_network
-    protected_file "$STATE/backend" && [[ $(< "$STATE/backend") == kernel-wireguard-v1 ]] || die 'existing non-native WARP setup; refusing an automatic takeover'
+    if ! protected_file "$STATE/backend" || [[ $(< "$STATE/backend") != kernel-wireguard-v1 ]]; then die 'existing non-native WARP setup; refusing an automatic takeover'; fi
   fi
   # shellcheck disable=SC1091
   source /etc/os-release
