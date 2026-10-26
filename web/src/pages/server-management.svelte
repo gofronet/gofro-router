@@ -228,9 +228,9 @@
 <ServerDialogs bind:flow={editFlow} />
 {#if warpDialog}
   <Dialog title={warpEnable ? "Включить WARP на VPS?" : "Отключить WARP на VPS?"} onclose={() => { if (!busy) warpDialog = false; }} {busy}>
-    <p class="dialog-intro">{warpEnable ? "Gofro установит официальный клиент Cloudflare в отдельном сетевом пространстве VPS. Настройка может занять несколько минут. Существующая сторонняя установка WARP не будет перезаписана." : "WARP отключится для всех роутеров этого VPS. Сайты с правилом «VPN → WARP» станут недоступны, без перехода на обычный IP. Обычный VPN продолжит работать."}</p>
+    <p class="dialog-intro">{warpEnable ? "Gofro получит WARP-профиль через wgcf (неофициальную утилиту регистрации из подписанного пакета). Трафик пойдёт через WireGuard в ядре Linux, без WARP/MASQUE-клиента или userspace-прокси. Существующая сторонняя установка WARP не будет перезаписана." : "WARP отключится для всех роутеров этого VPS. Сайты с правилом «VPN → WARP» станут недоступны, без перехода на обычный IP. Обычный VPN продолжит работать."}</p>
     {#if warpEnable}
-      <label class="checkbox-field"><input type="checkbox" bind:checked={warpTerms} disabled={busy} /><span>Я принимаю <a href="https://www.cloudflare.com/application/terms/" target="_blank" rel="noreferrer">условия Cloudflare WARP</a> и разрешаю установку клиента на VPS.</span></label>
+      <label class="checkbox-field"><input type="checkbox" bind:checked={warpTerms} disabled={busy} /><span>Я принимаю <a href="https://www.cloudflare.com/application/terms/" target="_blank" rel="noreferrer">условия Cloudflare WARP</a> и разрешаю регистрацию и настройку WireGuard-выхода на VPS.</span></label>
     {/if}
     {#if dialogError || app.actionError}<p class="error" role="alert">{dialogError || app.actionError}</p>{/if}
     <div class="form-actions"><button class="btn ghost" type="button" disabled={busy} onclick={() => warpDialog = false}>Отмена</button><button class="btn primary" type="button" disabled={busy || (warpEnable && !warpTerms)} onclick={saveWarp}>{busy ? "Настраиваем…" : warpEnable ? "Установить и включить" : "Отключить"}</button></div>

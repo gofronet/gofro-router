@@ -153,10 +153,13 @@ check("blocked")
 run(s,"ip","rule","add","pref","10900","from","10.202.1.0/24","iif","gt0","lookup","10900")
 check("203.0.113.5")
 
-# Simulate disconnected WARP with a fully working native namespace/VPS uplink.
+# Adversarial maintenance misroute: inject both a native default and native NAT
+# that production kernel-WG setup deliberately never creates. Even a working
+# plaintext uplink must not let forwarded WARP-selected traffic fall through.
 run(w,"ip","link","set","CloudflareWARP","down")
 run(w,"ip","route","replace","default","via","169.254.203.1","dev","gofro-warp1")
-assert probe(w,"198.51.100.10") == "203.0.113.1", "native registration uplink is broken; failure test would be meaningless"
+run(s,"nft","add","rule","inet","gofro_server","postrouting","iifname","gofro-warp0","ip","saddr","169.254.203.2","oifname","wan0","masquerade")
+assert probe(w,"198.51.100.10") == "203.0.113.1", "injected plaintext uplink is broken; failure test would be meaningless"
 check("blocked")
 run(r,"nft","-f",str(pathlib.Path(fixtures)/"warp-off.nft"))
 check("blocked",vpn="192.0.2.1")

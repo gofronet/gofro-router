@@ -89,6 +89,8 @@
           linuxTools = with pkgs; [
             iproute2
             nftables
+            wireguard-tools
+            util-linux
             conntrack-tools
             dnsmasq
           ];

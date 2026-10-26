@@ -85,8 +85,10 @@ package are unsupported. Native `dns-flows` cleanup removes owned DNS flows
 and recognized legacy Gofro DNS DNAT only; verify unrelated flows survive.
 
 Qualify selective **VPN → WARP** on both signed router and VPS artifacts. Verify
-explicit Cloudflare terms acceptance, official-client installation in the owned
-network namespace, live egress IP and unchanged VPS default route/resolver/SSH.
+explicit Cloudflare terms acceptance, checksum-pinned registration utility,
+kernel WireGuard in the owned namespace, live egress IP and unchanged VPS default
+route/resolver/SSH. Check native MTU 1420, 1351-byte UDP/QUIC, fresh handshakes and
+repeated RTT/throughput/CPU measurements; no userspace WARP/MASQUE data path.
 Check exact/suffix/GeoSite rule order, shared CDN IPs with different egress,
 TCP and UDP/QUIC, reboot and WireGuard restart. Disconnect WARP, stop its service,
 and remove its test policy route: only WARP-selected traffic must fail closed;
@@ -94,7 +96,8 @@ ordinary VPN and Direct traffic must continue. Test existing confirmed and
 unreplied NAT flows when changing a rule to/from WARP, VPN-off IPv6 protection,
 source alias allocation/revocation, unaffected friend peers, and refusal to adopt
 an unmanaged WARP installation or foreign/custom routing/firewall state. A fake
-WARP link in namespace tests is not qualification of the official client or
+WARP link or locally paired kernel WireGuard namespaces are not qualification of
+Cloudflare registration/egress or
 proof of access to ElevenLabs. Details: [server WARP](deploy/server/README.md).
 
 ### Publish after qualification
@@ -146,7 +149,8 @@ bash deploy/server/tests/version.sh
 CI and release validation syntax-check each shell file individually and
 ShellCheck the OpenWrt fixtures as POSIX shell. Both run the remaining shell
 regressions too. Both workflows build `deploy/openwrt/tests/Dockerfile` with
-`iproute2`, `nftables`, `python3`, `conntrack`, `dnsmasq-base` and `jq`, plus native
+`iproute2`, `nftables`, `wireguard-tools`, `curl`, `python3`, `conntrack`,
+`dnsmasq-base` and `jq`, plus native
 UCI/jsonfilter built from pinned OpenWrt library/tool revisions. A workflow-only
 image layer adds `procps`. No host UCI/jsonfilter or implicit mock installation
 is required; test-local mocks remain inside disposable test state.

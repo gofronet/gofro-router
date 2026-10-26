@@ -1,5 +1,5 @@
 FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends iproute2 nftables python3 conntrack dnsmasq-base jq git cmake gcc make libc6-dev libjson-c-dev pkg-config ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 nftables wireguard-tools curl python3 conntrack dnsmasq-base jq git cmake gcc make libc6-dev libjson-c-dev pkg-config ca-certificates
 # Native library/tool revisions from OpenWrt's openwrt-25.12 package definitions.
 RUN git clone https://github.com/openwrt/libubox.git /build/libubox \
     && git -C /build/libubox checkout 7dd127841e82eb1cfb61185da37dde7b9bd9ba6d \

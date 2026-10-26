@@ -133,7 +133,10 @@ jobs:
               chmod +x /usr/local/bin/sysctl
               sh deploy/openwrt/tests/dataplane-netns.sh --run
               bash deploy/server/tests/warp-netns.sh
-              exec bash deploy/server/tests/warp-network.sh
+              bash deploy/server/tests/warp-network.sh
+              ip netns add gofro-kernel-test
+              ip netns exec gofro-kernel-test bash deploy/server/tests/warp-wireguard.sh
+              ip netns delete gofro-kernel-test
             '
           sudo -n docker run --rm --network none --cap-add NET_ADMIN --user 0:0 \
             -v "$GITHUB_WORKSPACE:/src:ro" -w /src gofro-mode-test \
@@ -204,7 +207,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabi qemu-user
-          curl --fail --location --retry 3 \
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 \
             "https://ziglang.org/download/0.15.2/$ZIG_FILE" -o "$RUNNER_TEMP/$ZIG_FILE"
           printf '%s  %s\n' "$ZIG_SHA256" "$RUNNER_TEMP/$ZIG_FILE" | sha256sum -c -
           tar -xJf "$RUNNER_TEMP/$ZIG_FILE" -C "$RUNNER_TEMP"
@@ -329,12 +332,19 @@ jobs:
           GEOSITE_SHA256: f6ed069213b5cb087ebb2d60d0b086b5eb0de42b4de0eba90cbacc4790d6a78e
           GEOIP_VERSION: '202608050239'
           GEOIP_SHA256: c67bd077eb102cec74fab759b73d17f99275f56af10a87c14d9fd983508f5ce1
+          WGCF_VERSION: '2.3.1'
+          WGCF_SHA256: 4fb7a136aa470ece11d17949c7db07b040ec9c604742dc8680bcf1889f85d0c8
         run: |
           set -euo pipefail
           DIST=$RUNNER_TEMP/dist
           GEODATA=$RUNNER_TEMP/geodata
           BINARIES=$RUNNER_TEMP/binaries
           mkdir -p "$DIST" "$GEODATA"
+          # Registration control-plane only; payload uses kernel WireGuard.
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+            "https://github.com/ViRb3/wgcf/releases/download/v$WGCF_VERSION/wgcf_${WGCF_VERSION}_linux_amd64" \
+            -o "$RUNNER_TEMP/wgcf"
+          printf '%s  %s\n' "$WGCF_SHA256" "$RUNNER_TEMP/wgcf" | sha256sum -c -
           curl --fail --location --retry 3 \
             "https://github.com/v2fly/domain-list-community/releases/download/$GEOSITE_VERSION/dlc.dat" \
             -o "$GEODATA/geosite.dat"
@@ -357,6 +367,9 @@ jobs:
               install -D -m 755 deploy/server/gofro-server-install "$bundle/root/usr/local/sbin/gofro-server-install"
               install -D -m 755 deploy/server/gofro-managed "$bundle/root/usr/local/sbin/gofro-managed"
               install -D -m 755 deploy/server/gofro-warp "$bundle/root/usr/local/sbin/gofro-warp"
+              install -D -m 755 "$RUNNER_TEMP/wgcf" "$bundle/root/usr/local/libexec/gofro-wgcf"
+              install -D -m 644 deploy/server/WGCF-LICENSE "$bundle/root/usr/local/share/gofro/WGCF-LICENSE"
+              install -D -m 644 deploy/server/WGCF.md "$bundle/root/usr/local/share/gofro/WGCF.md"
               install -D -m 755 "$BINARIES/release-server-$rust_target/gofro-server" "$bundle/root/usr/local/bin/gofro-router-server"
               install -D -m 755 "$BINARIES/release-binaries-$rust_target/gofro-relay" "$bundle/root/usr/local/bin/gofro-relay"
             else
@@ -468,6 +481,8 @@ jobs:
               grep -qx root/usr/local/sbin/gofro-server-install <<< "$members"
               grep -qx root/usr/local/sbin/gofro-managed <<< "$members"
               grep -qx root/usr/local/sbin/gofro-warp <<< "$members"
+              grep -qx root/usr/local/libexec/gofro-wgcf <<< "$members"
+              grep -qx root/usr/local/share/gofro/WGCF-LICENSE <<< "$members"
             else
               grep -qx root/usr/sbin/gofro-update <<< "$members"
             fi

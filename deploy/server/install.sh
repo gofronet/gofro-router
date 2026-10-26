@@ -93,12 +93,15 @@ install_atomic() {
   mv -f "$temporary" "$destination" || return 1
 }
 install_programs() {
-  install -d -m 755 /usr/local/bin /usr/local/sbin /etc/gofro || return 1
+  install -d -m 755 /usr/local/bin /usr/local/sbin /usr/local/libexec /usr/local/share/gofro /etc/gofro || return 1
   install_atomic "$SCRIPT_DIR/root/usr/local/bin/gofro-router-server" /usr/local/bin/gofro-router-server || return 1
   install_atomic "$SCRIPT_DIR/root/usr/local/bin/gofro-relay" /usr/local/bin/gofro-relay || return 1
   install_atomic "$SCRIPT_DIR/root/usr/local/sbin/gofro-server-install" /usr/local/sbin/gofro-server-install || return 1
   install_atomic "$SCRIPT_DIR/root/usr/local/sbin/gofro-managed" /usr/local/sbin/gofro-managed || return 1
   install_atomic "$SCRIPT_DIR/root/usr/local/sbin/gofro-warp" /usr/local/sbin/gofro-warp || return 1
+  install_atomic "$SCRIPT_DIR/root/usr/local/libexec/gofro-wgcf" /usr/local/libexec/gofro-wgcf || return 1
+  install -m 644 "$SCRIPT_DIR/root/usr/local/share/gofro/WGCF-LICENSE" /usr/local/share/gofro/WGCF-LICENSE || return 1
+  install -m 644 "$SCRIPT_DIR/root/usr/local/share/gofro/WGCF.md" /usr/local/share/gofro/WGCF.md || return 1
 }
 verify_programs() {
   local version
@@ -126,6 +129,9 @@ esac
 [[ -x $SCRIPT_DIR/root/usr/local/sbin/gofro-server-install ]] || die 'updater is missing'
 [[ -x $SCRIPT_DIR/root/usr/local/sbin/gofro-managed ]] || die 'management command is missing'
 [[ -x $SCRIPT_DIR/root/usr/local/sbin/gofro-warp ]] || die 'WARP helper is missing'
+[[ -x $SCRIPT_DIR/root/usr/local/libexec/gofro-wgcf ]] || die 'WARP registration utility is missing'
+[[ -s $SCRIPT_DIR/root/usr/local/share/gofro/WGCF-LICENSE && -s $SCRIPT_DIR/root/usr/local/share/gofro/WGCF.md ]] || die 'WARP dependency notices are missing'
+[[ $(sha256sum "$SCRIPT_DIR/root/usr/local/libexec/gofro-wgcf" | cut -d ' ' -f1) == 4fb7a136aa470ece11d17949c7db07b040ec9c604742dc8680bcf1889f85d0c8 ]] || die 'WARP registration utility checksum differs'
 DEFAULT_MTU=$("$SCRIPT_DIR/root/usr/local/bin/gofro-relay" mtu) || die 'relay MTU is unavailable'
 valid_mtu "$DEFAULT_MTU" || die 'invalid relay MTU'
 [[ -z $WG_MTU ]] || valid_mtu "$WG_MTU" || die 'invalid WG_MTU'
@@ -138,6 +144,9 @@ if [[ $mode == update ]]; then
     /usr/local/sbin/gofro-server-install "$backup/"
   [[ ! -e /usr/local/sbin/gofro-managed ]] || cp -a /usr/local/sbin/gofro-managed "$backup/"
   [[ ! -e /usr/local/sbin/gofro-warp ]] || cp -a /usr/local/sbin/gofro-warp "$backup/"
+  for dependency in /usr/local/libexec/gofro-wgcf /usr/local/share/gofro/WGCF-LICENSE /usr/local/share/gofro/WGCF.md; do
+    [[ ! -e $dependency ]] || cp -a "$dependency" "$backup/"
+  done
   cp -a /etc/gofro/update-public.pem /etc/gofro/version "$backup/"
   interface=$(server_interface /etc/systemd/system/gofro-relay.service) || die 'cannot identify managed WireGuard interface'
   dropin="/etc/systemd/system/wg-quick@$interface.service.d/gofro.conf"
@@ -162,6 +171,13 @@ if [[ $mode == update ]]; then
   else
     rm -f /usr/local/sbin/gofro-warp
   fi
+  for dependency in /usr/local/libexec/gofro-wgcf /usr/local/share/gofro/WGCF-LICENSE /usr/local/share/gofro/WGCF.md; do
+    if [[ -e $backup/${dependency##*/} ]]; then
+      cp -a "$backup/${dependency##*/}" "$dependency"
+    else
+      rm -f "$dependency"
+    fi
+  done
   install -m 644 "$backup/update-public.pem" /etc/gofro/update-public.pem
   install -m 644 "$backup/version" /etc/gofro/version
   restore_mtu "$backup/wg-mtu.conf" "$dropin" "$interface" "$previous_mtu" || die 'update rollback could not restore WireGuard MTU'
