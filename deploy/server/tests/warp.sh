@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(CDPATH='' cd "$(dirname "$0")/../../.." && pwd)"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-HELPER=$ROOT/deploy/server/gofro-warp
+HELPER=${GOFRO_WARP_TEST_HELPER:-$ROOT/deploy/server/gofro-warp}
 bash "$HELPER" render-firewall gt0 eth0 > "$TMP/server.nft"
 bash "$HELPER" render-namespace-firewall > "$TMP/namespace.nft"
 bash "$HELPER" render-legacy-firewall gt0 eth0 > "$TMP/legacy.nft"
@@ -22,7 +22,7 @@ if bash "$HELPER" render-firewall gt0 'eth0" accept' >/dev/null 2>&1; then exit 
 if bash "$HELPER" render-firewall gt0 >/dev/null 2>&1; then exit 1; fi
 
 # Functions execute against stubs; no root, Cloudflare registration or networking.
-for function in valid_interface check_routes; do
+for function in valid_interface check_routes status; do
   sed -n "/^$function() {/,/^}/p" "$HELPER" >> "$TMP/functions"
 done
 # shellcheck disable=SC1091
@@ -48,4 +48,27 @@ for foreign in '10900: from all lookup 10900' '10900: from 10.202.1.0/24 iif gt0
   RULES=$foreign
   if (check_routes); then exit 1; fi
 done
-printf 'PASS: WARP firewall rendering, source isolation, validation and foreign route refusal\n'
+
+# A quiet grep can kill a still-writing producer with SIGPIPE under pipefail.
+# Drain the whole status stream, even after its first matching line.
+STATE=$TMP/status
+mkdir -p "$STATE" "$TMP/bin"
+touch "$STATE/network" "$STATE/enabled"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/bin/warp-cli"
+chmod 700 "$TMP/bin/warp-cli"
+export PATH="$TMP/bin:$PATH"
+read_network() { :; }
+systemctl() { [[ $* == 'is-active --quiet warp-svc.service' ]]; }
+cli() {
+  awk -v status="$STATUS_TEST_REPLY" 'BEGIN {
+    print "Status update: " status;
+    for (i=0; i<20000; i++) print "additional daemon diagnostic output " i;
+  }'
+}
+STATUS_TEST_REPLY=Connected
+reply=$(status)
+[[ $reply == *'"connected":true'* ]]
+STATUS_TEST_REPLY=Disconnected
+reply=$(status)
+[[ $reply == *'"connected":false'* ]]
+printf 'PASS: WARP firewall rendering, validation, foreign route refusal and SIGPIPE-safe status streams\n'

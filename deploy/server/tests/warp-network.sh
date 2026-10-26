@@ -20,7 +20,7 @@ ip link set eth0 up
 network_up
 check_routes
 ip -n gofro-warp link show dev gofro-warp1 >/dev/null
-ip netns exec gofro-warp nft list table inet gofro_warp | grep -Fq 'policy drop'
+ip netns exec gofro-warp nft list table inet gofro_warp | grep -F 'policy drop' >/dev/null
 [[ $(ip -4 -N rule show | grep '^10900:') == *'from 10.202.1.0/24 iif gt0 lookup 10900' ]]
 # A failed start must not overwrite existing interfaces.
 if (network_up >/dev/null 2>&1); then exit 1; fi
@@ -38,8 +38,8 @@ ip rule add pref 10900 from 10.202.1.0/24 iif gt0 lookup 10900
 network_down
 check_routes
 if ip link show dev gofro-warp0 >/dev/null 2>&1; then exit 1; fi
-ip -4 -N rule show | grep -q '^10900:'
-ip -4 -o route show table 10900 | grep -Fq 'unreachable default'
+ip -4 -N rule show | grep '^10900:' >/dev/null
+ip -4 -o route show table 10900 | grep -F 'unreachable default' >/dev/null
 network_up
 check_routes
 network_down

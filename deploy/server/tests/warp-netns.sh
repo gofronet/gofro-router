@@ -71,7 +71,10 @@ def udp():
         if data != b"no-reply": s.sendto(json.dumps(peer[0]).encode(), peer)
 def handle(s, peer):
     with s:
-        while s.recv(1024): s.sendall(json.dumps(peer[0]).encode())
+        try:
+            while s.recv(1024): s.sendall(json.dumps(peer[0]).encode())
+        except (ConnectionResetError, BrokenPipeError):
+            pass  # Policy-transition probes deliberately reset old connections.
 threading.Thread(target=udp, daemon=True).start()
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

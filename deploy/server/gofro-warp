@@ -15,6 +15,7 @@ WAN_INTERFACE=
 
 die() { printf 'gofro WARP: %s\n' "$*" >&2; exit 1; }
 valid_interface() { [[ $1 =~ ^[a-zA-Z0-9_.:-]{1,15}$ ]]; }
+# Drain command-output filters: grep -q can make a match fail via SIGPIPE/pipefail.
 protected_file() {
   [[ -f $1 && ! -L $1 && $(stat -c '%u:%h' "$1") == 0:1 ]] &&
     (( (8#$(stat -c '%a' "$1") & 8#022) == 0 ))
@@ -131,7 +132,7 @@ Dump terminated' ]] || die 'cannot inspect WARP routing table'
   existing=$(ip -4 -N -o route show exact "$SOURCES" | awk '{$1=$1; if (NF) print}')
   [[ -z $existing || $existing == "$SOURCES dev $WG_INTERFACE proto 186 scope 253" ]] || die 'foreign WARP source return route'
   [[ -n $(ip -4 -o route show exact 169.254.203.0/30) ]] && {
-    ip -d link show dev "$VETH" | grep -Fq 'alias gofro-warp-v1' || die 'WARP link network is already in use'
+    ip -d link show dev "$VETH" | grep -F 'alias gofro-warp-v1' >/dev/null || die 'WARP link network is already in use'
   }
   return 0
 }
@@ -140,12 +141,12 @@ network_up() {
   read_network
   check_routes
   if ip link show dev "$VETH" >/dev/null 2>&1; then
-    ip -d link show dev "$VETH" | grep -Fq 'alias gofro-warp-v1' || die 'foreign WARP veth interface'
+    ip -d link show dev "$VETH" | grep -F 'alias gofro-warp-v1' >/dev/null || die 'foreign WARP veth interface'
     die 'WARP namespace still exists; stop its services before repair'
   fi
-  if ip netns list | grep -Eq '^gofro-warp( |$)'; then die 'foreign or stale WARP namespace; manual inspection required'; fi
+  if ip netns list | grep -E '^gofro-warp( |$)' >/dev/null; then die 'foreign or stale WARP namespace; manual inspection required'; fi
   ip route replace unreachable default table "$TABLE" metric 32767 proto 186
-  if ! ip -4 -N rule show | grep -q '^10900:'; then ip rule add pref "$TABLE" from "$SOURCES" iif "$WG_INTERFACE" lookup "$TABLE"; fi
+  if ! ip -4 -N rule show | grep '^10900:' >/dev/null; then ip rule add pref "$TABLE" from "$SOURCES" iif "$WG_INTERFACE" lookup "$TABLE"; fi
   ip netns add "$NS"
   # Install the namespace kill switch BEFORE links, forwarding or WARP start.
   render_namespace_firewall | ip netns exec "$NS" nft -f -
@@ -171,11 +172,11 @@ network_down() {
   # The policy rule and unreachable default intentionally survive shutdown.
   ip route replace unreachable default table "$TABLE" metric 32767 proto 186
   if ip link show dev "$VETH" >/dev/null 2>&1; then
-    ip -d link show dev "$VETH" | grep -Fq 'alias gofro-warp-v1' || die 'refusing to delete a foreign veth'
+    ip -d link show dev "$VETH" | grep -F 'alias gofro-warp-v1' >/dev/null || die 'refusing to delete a foreign veth'
     ip route del default via "$PEER" dev "$VETH" table "$TABLE" metric 10 proto 186 2>/dev/null || true
     ip link delete "$VETH"
     ip netns delete "$NS"
-  elif ip netns list | grep -Eq '^gofro-warp( |$)'; then
+  elif ip netns list | grep -E '^gofro-warp( |$)' >/dev/null; then
     die 'namespace without its owned veth requires manual inspection'
   fi
 }
@@ -305,7 +306,7 @@ status() {
     command -v warp-cli >/dev/null 2>&1 && installed=true
     [[ ! -f $STATE/enabled ]] || enabled=true
     if [[ $installed == true && $enabled == true ]] && systemctl is-active --quiet warp-svc.service &&
-      cli status 2>/dev/null | grep -Eq '^Status update: Connected[[:space:]]*$'; then connected=true; fi
+      cli status 2>/dev/null | grep -E '^Status update: Connected[[:space:]]*$' >/dev/null; then connected=true; fi
   fi
   printf '{"installed":%s,"enabled":%s,"connected":%s}\n' "$installed" "$enabled" "$connected"
 }
