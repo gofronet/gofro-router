@@ -294,6 +294,7 @@ pub(crate) enum IpMatch {
 pub(crate) enum RouteTarget {
     Direct,
     Vpn,
+    Warp,
     Block,
 }
 

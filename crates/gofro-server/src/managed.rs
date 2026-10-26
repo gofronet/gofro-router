@@ -189,6 +189,7 @@ pub fn status(interface: &str) -> Result<ManagedServerStatus> {
     Ok(ManagedServerStatus {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         peers,
+        warp: Some(crate::warp::status(interface)?),
     })
 }
 
@@ -396,7 +397,18 @@ pub fn create_router_profile(interface: &str, endpoint: &str) -> Result<String> 
 pub fn add_router_peer(interface: &str, public_key: &str, tunnel_ip: &str) -> Result<()> {
     validate_peer_key(public_key)?;
     let tunnel_ip = super::validate_tunnel_ip(tunnel_ip)?;
-    super::ensure_routes_available(interface, public_key, &[tunnel_ip])?;
+    let mut routes = vec![tunnel_ip];
+    if crate::warp::prepared(interface)? {
+        let alias = wireguard_status::warp::source_address(tunnel_ip.addr())
+            .context("invalid WARP source")?;
+        routes.push(ipnet::Ipv4Net::new(alias, 32)?);
+    }
+    super::ensure_routes_available(interface, public_key, &routes)?;
+    let routes = routes
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     let mut store = load_store(interface)?;
     let existing_owner = store.owners.iter().any(|key| key == public_key);
     if store
@@ -420,7 +432,7 @@ pub fn add_router_peer(interface: &str, public_key: &str, tunnel_ip: &str) -> Re
             "peer",
             public_key,
             "allowed-ips",
-            &tunnel_ip.to_string(),
+            &routes,
         ]))?;
         super::save(interface)
     })();
@@ -441,6 +453,85 @@ pub fn add_router_peer(interface: &str, public_key: &str, tunnel_ip: &str) -> Re
             store.owners.pop();
             write_store(interface, &store)?;
         }
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Preserve legacy owner routes, but never broaden a friend's source identity.
+pub(crate) fn warp_routes(interface: &str) -> Result<Vec<(String, String)>> {
+    let store = load_store(interface)?;
+    let assigned = super::run(Command::new("wg").args(["show", interface, "allowed-ips"]))?;
+    let mut result = Vec::new();
+    for line in assigned.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(key) = fields.next() else { continue };
+        if !store.owners.iter().any(|owner| owner == key) {
+            continue;
+        }
+        let mut routes = fields
+            .flat_map(|field| field.split(','))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let primary = routes
+            .iter()
+            .filter_map(|route| super::validate_tunnel_ip(route).ok())
+            .collect::<Vec<_>>();
+        let [primary] = primary.as_slice() else {
+            bail!("router owner must have exactly one Gofro tunnel address");
+        };
+        let alias = ipnet::Ipv4Net::new(
+            wireguard_status::warp::source_address(primary.addr())
+                .context("invalid WARP source")?,
+            32,
+        )?;
+        let alias_text = alias.to_string();
+        if routes.iter().any(|route| {
+            route != &primary.to_string() && route != &alias_text && route != super::CLIENT_SUBNET
+        }) {
+            bail!("unrecognized router owner routes; refusing WARP authorization");
+        }
+        super::ensure_routes_available(interface, key, &[alias])?;
+        if !routes.contains(&alias_text) {
+            routes.push(alias_text);
+        }
+        result.push((key.to_owned(), routes.join(",")));
+    }
+    if result.is_empty() {
+        bail!("no active router owners are available for WARP");
+    }
+    Ok(result)
+}
+
+pub(crate) fn authorize_warp(interface: &str) -> Result<()> {
+    anyhow::ensure!(
+        crate::warp::prepared(interface)?,
+        "WARP firewall must be prepared before authorizing sources"
+    );
+    let routes = warp_routes(interface)?;
+    let previous = super::run(Command::new("wg").args(["showconf", interface]))?;
+    let result = (|| {
+        for (key, routes) in routes {
+            super::run(Command::new("wg").args([
+                "set",
+                interface,
+                "peer",
+                &key,
+                "allowed-ips",
+                &routes,
+            ]))?;
+        }
+        super::save(interface)
+    })();
+    if let Err(error) = result {
+        super::run_with_input(
+            Command::new("wg").args(["setconf", interface, "/dev/stdin"]),
+            &previous,
+        )
+        .and_then(|_| super::save(interface))
+        .context(format!(
+            "WARP authorization failed: {error:#}; rollback failed"
+        ))?;
         return Err(error);
     }
     Ok(())

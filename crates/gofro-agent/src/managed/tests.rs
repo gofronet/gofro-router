@@ -207,6 +207,7 @@ fn validates_typed_managed_status_and_upgrade_guidance() {
     let key = "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=";
     let status = ManagedServerStatus {
         version: "0.5.14".into(),
+        warp: None,
         peers: vec![wireguard_status::managed::FriendPeer {
             public_key: key.into(),
             name: "Friend".into(),

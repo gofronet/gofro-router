@@ -17,6 +17,7 @@ use wireguard_status::{
 };
 
 mod managed;
+mod warp;
 
 const CLIENT_SUBNET: &str = "10.203.1.0/24";
 const TUNNEL_LOCK: &str = "/run/lock/gofro-server.lock";
@@ -79,6 +80,11 @@ enum ServerCommand {
         endpoint: String,
     },
     RestartVpn,
+    EnableWarp {
+        #[arg(long)]
+        accept_terms: bool,
+    },
+    DisableWarp,
 }
 
 fn run(command: &mut Command) -> Result<String> {
@@ -207,7 +213,7 @@ fn main() -> Result<()> {
             let _lock = mutating_lock()?;
             managed::remove_router_peer(&args.interface, &public_key)?;
         }
-        ServerCommand::Capabilities => println!("{{\"owner_protocol\":2}}"),
+        ServerCommand::Capabilities => println!("{{\"owner_protocol\":2,\"warp_protocol\":1}}"),
         ServerCommand::Status => {
             println!(
                 "{}",
@@ -256,6 +262,21 @@ fn main() -> Result<()> {
             require_root()?;
             let _lock = mutating_lock()?;
             managed::restart(&args.interface)?;
+        }
+        ServerCommand::EnableWarp { accept_terms } => {
+            require_root()?;
+            if !accept_terms {
+                bail!("Cloudflare WARP terms must be explicitly accepted with --accept-terms");
+            }
+            let _lock = mutating_lock()?;
+            managed::warp_routes(&args.interface)?;
+            warp::command("enable", &args.interface)?;
+            managed::authorize_warp(&args.interface)?;
+        }
+        ServerCommand::DisableWarp => {
+            require_root()?;
+            let _lock = mutating_lock()?;
+            warp::command("disable", &args.interface)?;
         }
     }
 

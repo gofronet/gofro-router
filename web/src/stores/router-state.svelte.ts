@@ -47,7 +47,7 @@ export class RouterState {
   inventoryError = $state("");
 
   get warningServerKey(): string | null {
-    return /^(?:update|restart|friend-create|friend-rename|friend-revoke):(.+)$/.exec(this.warningKind)?.[1] ?? null;
+    return /^(?:update|restart|warp|friend-create|friend-rename|friend-revoke):(.+)$/.exec(this.warningKind)?.[1] ?? null;
   }
 
   get status(): Status {
@@ -484,6 +484,9 @@ export class RouterState {
 
   restartServer = (publicKey: string): Promise<ManagedServerStatus | null> =>
     this.mutateResult(`restart:${publicKey}`, () => api.servers.restart(publicKey));
+
+  setWarp = (publicKey: string, enabled: boolean, acceptTerms = false): Promise<ManagedServerStatus | null> =>
+    this.mutateResult(`warp:${publicKey}`, () => api.servers.setWarp(publicKey, enabled, acceptTerms));
 
   createFriend = (publicKey: string, name: string): Promise<ManagedServerStatus | null> =>
     this.mutateResult(`friend-create:${publicKey}`, () => api.servers.createFriend(publicKey, name));

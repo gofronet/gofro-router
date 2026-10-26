@@ -69,6 +69,29 @@ pub(super) struct FriendProfileInput {
     peer_key: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WarpInput {
+    public_key: String,
+    enabled: bool,
+    #[serde(default)]
+    accept_terms: bool,
+}
+
+pub(super) async fn set_warp(
+    State(state): State<AppState>,
+    Json(input): Json<WarpInput>,
+) -> Result<Json<wireguard_status::managed::ManagedServerStatus>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed::set_warp(&state, &input.public_key, input.enabled, input.accept_terms)
+    })
+    .await
+    .context("WARP task failed")
+    .map_err(ApiError)?
+    .map(Json)
+    .map_err(ApiError)
+}
+
 pub(super) async fn probe_server(
     Json(input): Json<ProbeInput>,
 ) -> Result<Json<ProbeResult>, ApiError> {

@@ -259,6 +259,8 @@
   .switch[aria-checked="true"] .switch-track::after { transform: translateX(14px); }
   .switch:hover .switch-track { outline: 2px solid var(--border); outline-offset: 2px; }
   label.field, .file-field { display: block; margin-bottom: 18px; font-size: 12px; font-weight: 550; }
+  .checkbox-field { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 18px; font-size: 12px; line-height: 1.6; }
+  .checkbox-field input { flex: 0 0 18px; width: 18px; height: 18px; min-height: 18px; margin-top: 1px; padding: 0; accent-color: var(--accent); }
   label.field > input, label.field > select, label.field > textarea, label.field > .password-wrap { margin-top: 7px; }
   .file-upload { display: flex; min-width: 0; min-height: 46px; align-items: center; gap: 11px; margin-top: 7px; }
   .file-upload input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

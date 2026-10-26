@@ -15,7 +15,7 @@
   const app = getAppContext();
   const status = $derived(app.status);
   const routing = $derived(status.routing.config);
-  const targets: { value: RouteTarget; label: string }[] = [{ value: "vpn", label: "Через VPN" }, { value: "direct", label: "Без VPN" }, { value: "block", label: "Блокировать" }];
+  const targets: { value: RouteTarget; label: string }[] = [{ value: "vpn", label: "Через VPN" }, { value: "warp", label: "VPN → WARP" }, { value: "direct", label: "Без VPN" }, { value: "block", label: "Блокировать" }];
   const matcherOptions = {
     domain: [{ value: "suffix", label: "Сайт целиком", field: "Адрес сайта", example: "example.com", help: "Без https:// и /страницы. Например, example.com включает mail.example.com." }, { value: "exact", label: "Только этот адрес", field: "Адрес сайта", example: "mail.example.com", help: "Без https:// и /страницы. Только указанный адрес." }, { value: "geo_site", label: "Список сайтов", field: "Название списка", example: "category-ru", help: "Например, category-ru для российских сайтов." }],
     ip: [{ value: "cidr", label: "IP-адрес или сеть", field: "IP-адрес или сеть", example: "192.0.2.1", help: "Один адрес: 192.0.2.1. Диапазон адресов: 192.0.2.0/24." }, { value: "geo_ip", label: "Страна или список адресов", field: "Код страны или название списка", example: "ru", help: "Например, ru для России, de для Германии." }],
@@ -66,7 +66,7 @@
     if (!(await persist())) mode = previous;
   }
   async function setDefaultTarget(next: string) {
-    if (next !== "vpn" && next !== "direct" && next !== "block") return;
+    if (next !== "vpn" && next !== "warp" && next !== "direct" && next !== "block") return;
     if (next === defaultTarget || saving || app.busy) return;
     const previous = defaultTarget; defaultTarget = next;
     if (!(await persist())) defaultTarget = previous;
@@ -153,8 +153,9 @@
       <button type="button" aria-pressed={mode === "rules"} disabled={saving || app.busy} onclick={() => setMode("rules")}>По правилам</button>
       <button type="button" aria-pressed={mode === "all"} disabled={saving || app.busy} onclick={() => setMode("all")}>Весь интернет</button>
     </div>
-    <p>{mode === "all" ? "Правила сохранены, но сейчас не применяются." : defaultTarget === "block" ? "Остальные сайты блокируются." : defaultTarget === "vpn" ? "Остальные сайты открываются через VPN." : "Остальные сайты открываются без VPN."}</p>
+    <p>{mode === "all" ? "Правила сохранены, но сейчас не применяются." : defaultTarget === "block" ? "Остальные сайты блокируются." : defaultTarget === "warp" ? "Остальные сайты открываются через VPN → WARP." : defaultTarget === "vpn" ? "Остальные сайты открываются через VPN." : "Остальные сайты открываются без VPN."}</p>
     {#if !status.vpn_enabled}<p>VPN отключён. Правила блокировки могут оставаться активными.</p>{/if}
+    {#if defaultTarget === "warp" || draft.some(rule => rule.enabled && rule.target === "warp")}<p class="notice">VPN → WARP требует включённого VPN и WARP на выбранном управляемом VPS. Настройте WARP в управлении сервером. При его недоступности эти сайты блокируются, без запасного прямого выхода. Режим «Весь интернет» не применяет правила WARP.</p>{/if}
   </section>
 
   <DeviceExclusions />

@@ -98,6 +98,7 @@ install_programs() {
   install_atomic "$SCRIPT_DIR/root/usr/local/bin/gofro-relay" /usr/local/bin/gofro-relay || return 1
   install_atomic "$SCRIPT_DIR/root/usr/local/sbin/gofro-server-install" /usr/local/sbin/gofro-server-install || return 1
   install_atomic "$SCRIPT_DIR/root/usr/local/sbin/gofro-managed" /usr/local/sbin/gofro-managed || return 1
+  install_atomic "$SCRIPT_DIR/root/usr/local/sbin/gofro-warp" /usr/local/sbin/gofro-warp || return 1
 }
 verify_programs() {
   local version
@@ -124,6 +125,7 @@ esac
 [[ -x $SCRIPT_DIR/root/usr/local/bin/gofro-relay ]] || die 'relay binary is missing'
 [[ -x $SCRIPT_DIR/root/usr/local/sbin/gofro-server-install ]] || die 'updater is missing'
 [[ -x $SCRIPT_DIR/root/usr/local/sbin/gofro-managed ]] || die 'management command is missing'
+[[ -x $SCRIPT_DIR/root/usr/local/sbin/gofro-warp ]] || die 'WARP helper is missing'
 DEFAULT_MTU=$("$SCRIPT_DIR/root/usr/local/bin/gofro-relay" mtu) || die 'relay MTU is unavailable'
 valid_mtu "$DEFAULT_MTU" || die 'invalid relay MTU'
 [[ -z $WG_MTU ]] || valid_mtu "$WG_MTU" || die 'invalid WG_MTU'
@@ -135,6 +137,7 @@ if [[ $mode == update ]]; then
   cp -a /usr/local/bin/gofro-router-server /usr/local/bin/gofro-relay \
     /usr/local/sbin/gofro-server-install "$backup/"
   [[ ! -e /usr/local/sbin/gofro-managed ]] || cp -a /usr/local/sbin/gofro-managed "$backup/"
+  [[ ! -e /usr/local/sbin/gofro-warp ]] || cp -a /usr/local/sbin/gofro-warp "$backup/"
   cp -a /etc/gofro/update-public.pem /etc/gofro/version "$backup/"
   interface=$(server_interface /etc/systemd/system/gofro-relay.service) || die 'cannot identify managed WireGuard interface'
   dropin="/etc/systemd/system/wg-quick@$interface.service.d/gofro.conf"
@@ -153,6 +156,11 @@ if [[ $mode == update ]]; then
     install -m 755 "$backup/gofro-managed" /usr/local/sbin/gofro-managed
   else
     rm -f /usr/local/sbin/gofro-managed
+  fi
+  if [[ -e $backup/gofro-warp ]]; then
+    install -m 755 "$backup/gofro-warp" /usr/local/sbin/gofro-warp
+  else
+    rm -f /usr/local/sbin/gofro-warp
   fi
   install -m 644 "$backup/update-public.pem" /etc/gofro/update-public.pem
   install -m 644 "$backup/version" /etc/gofro/version

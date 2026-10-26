@@ -368,7 +368,7 @@ pub(super) fn key_ssh(
         remote,
         input,
         executable: Path::new("ssh"),
-        timeout: if remote == "update" {
+        timeout: if matches!(remote, "update" | "enable-warp") {
             SSH_UPDATE_TIMEOUT
         } else {
             SSH_COMMAND_TIMEOUT
@@ -564,6 +564,16 @@ pub(super) fn ssh_command_error(status: ExitStatus, stderr: &str, remote: &str) 
         "VPS has no free tunnel addresses. Re-add creates a new router access and retains old access; remove obsolete access through a trusted console."
     } else if stderr.contains("already assigned to another peer") {
         "VPS tunnel address or legacy LAN subnet belongs to another peer. Upgrade to owner protocol 2; existing access was not replaced."
+    } else if stderr.contains("existing unmanaged WARP") {
+        "На VPS уже есть сторонняя установка WARP. Gofro не стал её перезаписывать; требуется согласованная ручная миграция."
+    } else if stderr.contains("custom changes")
+        || stderr.contains("foreign WARP")
+        || stderr.contains("foreign policy rule")
+        || stderr.contains("foreign routes in WARP")
+    {
+        "Настройки сети VPS конфликтуют с WARP. Чужие правила не заменены; проверьте сервер через доверенную консоль."
+    } else if matches!(remote, "enable-warp" | "disable-warp") {
+        "Не удалось завершить настройку WARP. Изменение могло примениться частично: проверьте состояние сервера перед повтором. Обычный VPN не переключался на WARP."
     } else if stderr.contains("Cannot find device") || stderr.contains("No such device") {
         "VPS WireGuard interface is unavailable. Check the VPN services on the server."
     } else if stderr.contains("wg-quick") {
@@ -593,6 +603,8 @@ pub(super) fn ssh_command_error(status: ExitStatus, stderr: &str, remote: &str) 
                     | "rename-friend"
                     | "revoke-friend"
                     | "friend-profile"
+                    | "enable-warp"
+                    | "disable-warp"
             )
         })
         .unwrap_or("management");

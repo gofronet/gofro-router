@@ -146,6 +146,21 @@ impl RoutingPolicy {
         }
     }
 
+    pub(crate) fn uses_warp(&self) -> bool {
+        self.config.mode == RoutingMode::Rules
+            && (self.config.default_target == RouteTarget::Warp
+                || self
+                    .config
+                    .domain_rules
+                    .iter()
+                    .any(|rule| rule.enabled && rule.target == RouteTarget::Warp)
+                || self
+                    .config
+                    .ip_rules
+                    .iter()
+                    .any(|rule| rule.enabled && rule.target == RouteTarget::Warp))
+    }
+
     pub(crate) fn ip_rule_indices(&self) -> Box<dyn Iterator<Item = usize> + '_> {
         if self.config.mode == RoutingMode::All {
             return Box::new(std::iter::empty());
@@ -220,6 +235,51 @@ impl RoutingPolicy {
 mod tests {
     use super::*;
     use crate::model::{DomainRule, IpRule};
+
+    #[test]
+    fn warp_is_domain_scoped_even_when_sites_share_an_ip() {
+        let config = RoutingConfig {
+            domain_rules: vec![DomainRule {
+                name: "WARP".into(),
+                enabled: true,
+                matcher: DomainMatch::Suffix {
+                    value: "elevenlabs.io".into(),
+                },
+                target: RouteTarget::Warp,
+            }],
+            ip_rules: vec![],
+            default_target: RouteTarget::Vpn,
+            mode: RoutingMode::Rules,
+            rule_order: None,
+        };
+        let ip = "1.1.1.1".parse().unwrap();
+        let policy = RoutingPolicy::compile(config.clone(), Arc::new(GeoData::default())).unwrap();
+        assert!(policy.uses_warp());
+        for name in ["elevenlabs.io", "api.elevenlabs.io"] {
+            assert_eq!(policy.target(name, ip), RouteTarget::Warp);
+        }
+        for name in [
+            "other.example",
+            "notelevenlabs.io",
+            "elevenlabs.io.evil.example",
+        ] {
+            assert_eq!(policy.target(name, ip), RouteTarget::Vpn);
+        }
+        assert_eq!(
+            policy.target("elevenlabs.io", "10.0.0.1".parse().unwrap()),
+            RouteTarget::Direct
+        );
+        let all = RoutingPolicy::compile(
+            RoutingConfig {
+                mode: RoutingMode::All,
+                ..config
+            },
+            Arc::new(GeoData::default()),
+        )
+        .unwrap();
+        assert!(!all.uses_warp());
+        assert_eq!(all.target("elevenlabs.io", ip), RouteTarget::Vpn);
+    }
 
     #[test]
     fn explicit_rules_override_russia_preset() {

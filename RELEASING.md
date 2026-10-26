@@ -84,6 +84,19 @@ exclusively for Gofro LAN DNS ownership: deployments sharing it with another
 package are unsupported. Native `dns-flows` cleanup removes owned DNS flows
 and recognized legacy Gofro DNS DNAT only; verify unrelated flows survive.
 
+Qualify selective **VPN → WARP** on both signed router and VPS artifacts. Verify
+explicit Cloudflare terms acceptance, official-client installation in the owned
+network namespace, live egress IP and unchanged VPS default route/resolver/SSH.
+Check exact/suffix/GeoSite rule order, shared CDN IPs with different egress,
+TCP and UDP/QUIC, reboot and WireGuard restart. Disconnect WARP, stop its service,
+and remove its test policy route: only WARP-selected traffic must fail closed;
+ordinary VPN and Direct traffic must continue. Test existing confirmed and
+unreplied NAT flows when changing a rule to/from WARP, VPN-off IPv6 protection,
+source alias allocation/revocation, unaffected friend peers, and refusal to adopt
+an unmanaged WARP installation or foreign/custom routing/firewall state. A fake
+WARP link in namespace tests is not qualification of the official client or
+proof of access to ElevenLabs. Details: [server WARP](deploy/server/README.md).
+
 ### Publish after qualification
 
 Dispatch the same version from the same latest `main` commit with **publish**

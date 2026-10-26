@@ -12,6 +12,128 @@ const PANEL_PORTS: PanelPorts = PanelPorts {
 };
 
 #[test]
+fn warp_uses_the_existing_vpn_table_but_never_a_direct_or_stale_nat_exit() {
+    assert_eq!(WARP_MARK & 0x30000, VPN_MARK);
+    let lan = LanContext {
+        device: "lan0".into(),
+        address: "192.168.50.1".parse().unwrap(),
+        subnet: "192.168.50.0/24".parse().unwrap(),
+    };
+    let policy = RoutingPolicy::compile(
+        RoutingConfig {
+            domain_rules: vec![],
+            ip_rules: vec![],
+            default_target: RouteTarget::Warp,
+            ..RoutingConfig::default()
+        },
+        Arc::new(GeoData::default()),
+    )
+    .unwrap();
+    for enabled in [false, true] {
+        for source in [None, Some("10.202.1.2".parse().unwrap())] {
+            let script = render_with_exclusions(
+                &lan,
+                5353,
+                VpnEgress {
+                    enabled,
+                    warp_source: source,
+                },
+                &policy,
+                &[],
+                PANEL_PORTS,
+                &[],
+            );
+            let ready = enabled && source.is_some();
+            assert_eq!(script.contains("snat ip to 10.202.1.2"), ready);
+            assert_eq!(
+                script.contains("ct status confirmed ct reply ip daddr != 10.202.1.2 drop"),
+                ready
+            );
+            assert!(
+                script
+                    .contains("ct reply ip daddr 10.202.1.0/24 meta mark & 0x70000 != 393216 drop")
+            );
+            assert!(
+                script.contains("gofro_ipv6"),
+                "WARP intent must not leak over IPv6 with VPN off"
+            );
+            let expected = if ready { WARP_MARK } else { BLOCK_MARK };
+            assert!(script.contains(&format!(
+                "meta mark & 0x70000 == 0 meta mark set (meta mark & 0xfff8ffff) | {expected}"
+            )));
+            if ready {
+                assert!(script.contains("postrouting priority 99"));
+                assert!(script.contains("393216 oifname != \"gt0\" drop"));
+            }
+        }
+    }
+    assert_eq!(
+        effective_target(RouteTarget::Warp, false),
+        RouteTarget::Block
+    );
+}
+
+#[test]
+#[ignore = "emits WARP fixtures for the isolated Linux kernel regression"]
+fn emit_warp_fixtures() {
+    let directory = env::var("GOFRO_NFT_FIXTURE_DIR").unwrap();
+    let lan = LanContext {
+        device: "lan0".into(),
+        address: "192.168.50.1".parse().unwrap(),
+        subnet: "192.168.50.0/24".parse().unwrap(),
+    };
+    let policy = RoutingPolicy::compile(
+        RoutingConfig {
+            domain_rules: vec![],
+            ip_rules: vec![],
+            default_target: RouteTarget::Vpn,
+            ..RoutingConfig::default()
+        },
+        Arc::new(GeoData::default()),
+    )
+    .unwrap();
+    for (name, enabled, first_target) in [
+        ("warp", true, RouteTarget::Warp),
+        ("warp-off", false, RouteTarget::Warp),
+        ("warp-before", true, RouteTarget::Vpn),
+    ] {
+        let mappings = [
+            FakeMapping {
+                fake: "198.18.0.2".parse().unwrap(),
+                real: "198.51.100.10".parse().unwrap(),
+                target: first_target,
+            },
+            FakeMapping {
+                fake: "198.18.0.3".parse().unwrap(),
+                real: "198.51.100.10".parse().unwrap(),
+                target: RouteTarget::Vpn,
+            },
+            FakeMapping {
+                fake: "198.18.0.4".parse().unwrap(),
+                real: "198.51.100.10".parse().unwrap(),
+                target: RouteTarget::Direct,
+            },
+        ];
+        fs::write(
+            format!("{directory}/{name}.nft"),
+            render_with_exclusions(
+                &lan,
+                5353,
+                VpnEgress {
+                    enabled,
+                    warp_source: Some("10.202.1.2".parse().unwrap()),
+                },
+                &policy,
+                &mappings,
+                PANEL_PORTS,
+                &[],
+            ),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
 fn geoip_intervals_preserve_gaps_and_merge_adjacent_cidrs_without_overflow() {
     let networks = [
         "10.0.0.0/24",
@@ -60,7 +182,10 @@ fn full_exclusions_precede_all_policy_and_dns_redirect_but_preserve_dnat_and_vip
             let script = render_with_exclusions(
                 &lan,
                 5353,
-                enabled,
+                VpnEgress {
+                    enabled,
+                    warp_source: None,
+                },
                 &policy,
                 &[mapping],
                 PANEL_PORTS,
@@ -78,7 +203,7 @@ fn full_exclusions_precede_all_policy_and_dns_redirect_but_preserve_dnat_and_vip
             for protocol in ["udp", "tcp"] {
                 assert!(script.find(&format!("ct direction original {protocol} dport 53 ct mark set ct mark | 0x40000000")).unwrap() < bypass);
             }
-            assert!(script.contains("ether saddr @device_exclusions meta mark set (meta mark & 0xfffcffff) | 65536 ct mark set (ct mark & 0xfffcffff) | 65536 return"));
+            assert!(script.contains("ether saddr @device_exclusions meta mark set (meta mark & 0xfff8ffff) | 65536 ct mark set (ct mark & 0xfff8ffff) | 65536 return"));
             assert!(bypass < script.find("ip daddr @fake_block").unwrap());
             assert!(script.contains("fake_to_real { 198.18.0.1 : 1.1.1.1 }"));
             assert!(script.contains("dnat ip to ip daddr map @fake_to_real"));
@@ -219,14 +344,14 @@ fn panel_vip_is_direct_and_dnat_is_lan_only_with_unsupported_traffic_dropped() {
                     ),
                 ] {
                     let script = render(&lan, 5353, enabled, &policy, &[], ports);
-                    let clear = script.find("meta mark set meta mark & 0xfffcffff").unwrap();
+                    let clear = script.find("meta mark set meta mark & 0xfff8ffff").unwrap();
                     let direct = script
-                        .find("ip daddr 198.18.0.0 meta mark set (meta mark & 0xfffcffff) | 65536")
+                        .find("ip daddr 198.18.0.0 meta mark set (meta mark & 0xfff8ffff) | 65536")
                         .unwrap();
                     let fake = script.find("ip daddr @fake_direct").unwrap();
                     assert!(clear < direct && direct < fake);
                     assert!(script.contains(
-                        "meta mark & 0x30000 == 65536 ct mark set (ct mark & 0xfffcffff) | 65536"
+                        "meta mark & 0x70000 == 65536 ct mark set (ct mark & 0xfff8ffff) | 65536"
                     ));
                     let dns = script
                         .find("add chain inet gofro_routing gofro_dns")
@@ -309,14 +434,14 @@ fn renders_kernel_only_split_routing() {
     assert!(script.starts_with("destroy table inet gofro_routing\nadd table"));
     assert!(script.contains("iifname \"br-home\" ip daddr 192.168.0.0/24"));
     assert!(
-        script.contains("meta mark & 0x30000 == 0 meta mark set (meta mark & 0xfffcffff) | 131072")
+        script.contains("meta mark & 0x70000 == 0 meta mark set (meta mark & 0xfff8ffff) | 131072")
     );
-    assert!(script.contains("meta mark & 0x30000 == 196608 drop"));
+    assert!(script.contains("meta mark & 0x70000 == 196608 drop"));
     assert!(script.contains("224.0.0.0/4"));
     assert!(script.contains("255.255.255.255/32"));
     let local = script.find("127.0.0.0/8").unwrap();
     let custom = script
-        .find("ip daddr 10.0.0.0/8 meta mark set (meta mark & 0xfffcffff) | 196608")
+        .find("ip daddr 10.0.0.0/8 meta mark set (meta mark & 0xfff8ffff) | 196608")
         .unwrap();
     assert!(local < custom);
     assert!(script.contains("add chain inet gofro_routing gofro_mark"));
@@ -324,7 +449,7 @@ fn renders_kernel_only_split_routing() {
     assert!(script.contains("add chain inet gofro_routing gofro_dns"));
     assert!(script.contains("udp dport 53 redirect to :5353"));
     assert!(script.contains("ct direction reply"));
-    assert!(script.contains("meta mark & 0xfffcffff"));
+    assert!(script.contains("meta mark & 0xfff8ffff"));
     assert!(script.contains("gofro_ipv6"));
     assert!(!script.contains("gofro_routing mark"));
     assert!(script.contains("dnat ip to ip daddr map @fake_to_real"));
@@ -409,7 +534,7 @@ fn cached_vpn_fake_ips_become_direct_after_mode_flip() {
     );
 
     assert!(script.contains("add element inet gofro_routing fake_vpn { 198.18.0.1 }"));
-    assert!(script.contains("ip daddr @fake_vpn meta mark set (meta mark & 0xfffcffff) | 65536"));
+    assert!(script.contains("ip daddr @fake_vpn meta mark set (meta mark & 0xfff8ffff) | 65536"));
     assert!(script.contains(&render_mappings(&[FakeMapping {
         fake: "198.18.0.1".parse().unwrap(),
         real: "1.1.1.1".parse().unwrap(),
@@ -428,7 +553,7 @@ fn cached_vpn_fake_ips_become_direct_after_mode_flip() {
         PANEL_PORTS,
     );
     assert!(on.contains("add element inet gofro_routing fake_vpn { 198.18.0.1 }"));
-    assert!(on.contains("ip daddr @fake_vpn meta mark set (meta mark & 0xfffcffff) | 131072"));
+    assert!(on.contains("ip daddr @fake_vpn meta mark set (meta mark & 0xfff8ffff) | 131072"));
 }
 
 #[test]
@@ -482,7 +607,7 @@ fn reclassifies_original_packets_without_clobbering_foreign_marks() {
     };
     let script = render(&lan, 5353, true, &policy, &[], PANEL_PORTS);
     let reply = script.find("ct direction reply return").unwrap();
-    let clear = script.find("meta mark set meta mark & 0xfffcffff").unwrap();
+    let clear = script.find("meta mark set meta mark & 0xfff8ffff").unwrap();
     let local = script.find("fib daddr type local").unwrap();
     let fake = script.find("ip daddr @fake_direct").unwrap();
     assert!(reply < clear && clear < local && local < fake);
@@ -505,8 +630,8 @@ fn reclassifies_original_packets_without_clobbering_foreign_marks() {
             (RouteTarget::Block, false, BLOCK_MARK),
         ] {
             let mark = target_mark(effective_target(target, enabled));
-            assert_eq!(((old | 4) & 0xfffcffff) | mark, expected | 4);
-            assert_eq!(((old | 8) & 0xfffcffff) | mark, expected | 8);
+            assert_eq!(((old | 4) & 0xfff8ffff) | mark, expected | 4);
+            assert_eq!(((old | 8) & 0xfff8ffff) | mark, expected | 8);
         }
     }
 }
@@ -568,7 +693,10 @@ fn emit_netns_fixtures() {
             render_with_exclusions(
                 &lan,
                 5353,
-                true,
+                VpnEgress {
+                    enabled: true,
+                    warp_source: None,
+                },
                 &policy,
                 &mappings,
                 PANEL_PORTS,

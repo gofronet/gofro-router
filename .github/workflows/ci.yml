@@ -39,6 +39,7 @@ jobs:
           export FIXTURES
           trap 'rm -rf "$FIXTURES"' EXIT
           bash deploy/openwrt/tests/dataplane-netns.sh --emit-only
+          GOFRO_NFT_FIXTURE_DIR="$FIXTURES" cargo test --locked -p gofro-agent dataplane::tests::emit_warp_fixtures -- --exact --ignored
           sudo -n docker build -t gofro-native-test -f deploy/openwrt/tests/Dockerfile deploy/openwrt/tests
           sudo -n docker build -t gofro-mode-test - <<'EOF'
           FROM gofro-native-test
@@ -52,7 +53,9 @@ jobs:
             -e FIXTURES=/fixtures -w /src gofro-mode-test sh -eu -c '
               printf "#!/bin/sh\nset -eu\nmount -t proc -o nosuid,nodev,noexec proc /proc\nexec /sbin/sysctl \"\$@\"\n" > /usr/local/bin/sysctl
               chmod +x /usr/local/bin/sysctl
-              exec sh deploy/openwrt/tests/dataplane-netns.sh --run
+              sh deploy/openwrt/tests/dataplane-netns.sh --run
+              bash deploy/server/tests/warp-netns.sh
+              exec bash deploy/server/tests/warp-network.sh
             '
           sudo -n docker run --rm --network none --cap-add NET_ADMIN --user 0:0 \
             -v "$GITHUB_WORKSPACE:/src:ro" -w /src gofro-mode-test \
@@ -106,12 +109,13 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: |
-          for file in deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install deploy/server/tests/*.sh; do
+          for file in deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-warp deploy/server/gofro-server-install deploy/server/tests/*.sh; do
             bash -n "$file"
           done
-          shellcheck -s bash deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-server-install deploy/server/tests/*.sh
+          shellcheck -s bash deploy/server/*.sh deploy/server/gofro-managed deploy/server/gofro-warp deploy/server/gofro-server-install deploy/server/tests/*.sh
           bash deploy/server/tests/version.sh
           bash deploy/server/tests/managed.sh
+          bash deploy/server/tests/warp.sh
           for file in deploy/openwrt/install.sh \
             deploy/openwrt/root/etc/init.d/* \
             deploy/openwrt/root/etc/hotplug.d/iface/* \

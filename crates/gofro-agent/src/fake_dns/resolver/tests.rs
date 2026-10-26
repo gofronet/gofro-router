@@ -264,72 +264,69 @@ fn discovered_subnet_answers_are_not_fake_or_ttl_clamped() {
 }
 
 #[test]
-fn vpn_off_still_rewrites_block_domains_and_invalidates_dnssec() {
-    let policy = RoutingPolicy::compile(
-        RoutingConfig {
-            domain_rules: vec![DomainRule {
-                name: "Block".into(),
-                enabled: true,
-                matcher: DomainMatch::Exact {
-                    value: "example.com".into(),
-                },
-                target: RouteTarget::Block,
-            }],
-            ip_rules: vec![],
-            ..RoutingConfig::default()
-        },
-        Arc::new(GeoData::default()),
-    )
-    .unwrap();
-    let mut store =
-        Store::from_connection(rusqlite::Connection::open_in_memory().unwrap()).unwrap();
-    // An installed lease avoids any external nft invocation in this test.
-    let (mapping, _) = store
-        .allocate(
-            "example.com",
-            "8.8.8.8".parse().unwrap(),
-            RouteTarget::Block,
-            60,
+fn vpn_off_still_rewrites_block_and_warp_domains_and_invalidates_dnssec() {
+    for target in [RouteTarget::Block, RouteTarget::Warp] {
+        let policy = RoutingPolicy::compile(
+            RoutingConfig {
+                domain_rules: vec![DomainRule {
+                    name: "Block".into(),
+                    enabled: true,
+                    matcher: DomainMatch::Exact {
+                        value: "example.com".into(),
+                    },
+                    target,
+                }],
+                ip_rules: vec![],
+                ..RoutingConfig::default()
+            },
+            Arc::new(GeoData::default()),
         )
         .unwrap();
-    let dns = FakeDns {
-        store: Mutex::new(store),
-        updates: RwLock::new(()),
-        active: AtomicBool::new(false),
-        vpn_enabled: AtomicBool::new(false),
-    };
-    let name = Name::from_ascii("example.com.").unwrap();
-    let mut message = Message::new();
-    message
-        .set_authentic_data(true)
-        .add_answer(Record::from_rdata(
-            name.clone(),
-            1,
-            RData::A(A(mapping.real)),
-        ))
-        .add_answer(Record::from_rdata(
-            name.clone(),
-            60,
-            RData::AAAA(hickory_proto::rr::rdata::AAAA(
-                "2001:db8::1".parse().unwrap(),
-            )),
-        ))
-        .add_answer(Record::from_rdata(
-            name,
-            7,
-            RData::AAAA(hickory_proto::rr::rdata::AAAA("fd12::1".parse().unwrap())),
-        ));
-    dns.rewrite_response(&mut message, "example.com", &policy, &test_lan())
-        .unwrap();
-    assert_eq!(message.answers().len(), 2);
-    assert_eq!(message.answers()[0].data(), &RData::A(A(mapping.fake)));
-    assert_eq!(message.answers()[0].ttl(), 30);
-    assert_eq!(message.answers()[1].ttl(), 7);
-    assert!(!message.authentic_data());
-    assert_eq!(
-        dataplane::effective_target(mapping.target, false),
-        RouteTarget::Block
-    );
+        let mut store =
+            Store::from_connection(rusqlite::Connection::open_in_memory().unwrap()).unwrap();
+        // An installed lease avoids any external nft invocation in this test.
+        let (mapping, _) = store
+            .allocate("example.com", "8.8.8.8".parse().unwrap(), target, 60)
+            .unwrap();
+        let dns = FakeDns {
+            store: Mutex::new(store),
+            updates: RwLock::new(()),
+            active: AtomicBool::new(false),
+            vpn_enabled: AtomicBool::new(false),
+        };
+        let name = Name::from_ascii("example.com.").unwrap();
+        let mut message = Message::new();
+        message
+            .set_authentic_data(true)
+            .add_answer(Record::from_rdata(
+                name.clone(),
+                1,
+                RData::A(A(mapping.real)),
+            ))
+            .add_answer(Record::from_rdata(
+                name.clone(),
+                60,
+                RData::AAAA(hickory_proto::rr::rdata::AAAA(
+                    "2001:db8::1".parse().unwrap(),
+                )),
+            ))
+            .add_answer(Record::from_rdata(
+                name,
+                7,
+                RData::AAAA(hickory_proto::rr::rdata::AAAA("fd12::1".parse().unwrap())),
+            ));
+        dns.rewrite_response(&mut message, "example.com", &policy, &test_lan())
+            .unwrap();
+        assert_eq!(message.answers().len(), 2);
+        assert_eq!(message.answers()[0].data(), &RData::A(A(mapping.fake)));
+        assert_eq!(message.answers()[0].ttl(), 30);
+        assert_eq!(message.answers()[1].ttl(), 7);
+        assert!(!message.authentic_data());
+        assert_eq!(
+            dataplane::effective_target(mapping.target, false),
+            RouteTarget::Block
+        );
+    }
 }
 
 #[test]

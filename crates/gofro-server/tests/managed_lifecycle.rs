@@ -15,6 +15,92 @@ const LEGACY: &str = "Lllllllllllllllllllllllllllllllllllllllllll=";
 static FIXTURES: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn warp_requires_terms_and_authorizes_only_owners_after_firewall_preparation() {
+    let fixture = Fixture::new();
+    let before = fixture.state();
+    assert!(!fixture.run("enable-warp", [], None).status.success());
+    assert_eq!(fixture.state(), before);
+    assert!(!fixture.path("warp/network").exists());
+    assert!(
+        fixture
+            .run(
+                "create-friend",
+                ["198.51.100.1:8443"],
+                Some(r#"{"name":"Friend"}"#)
+            )
+            .status
+            .success()
+    );
+    let enabled = fixture.run("enable-warp", ["--accept-terms"], None);
+    assert!(
+        enabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enabled.stderr)
+    );
+    assert!(fixture.state().contains(&format!(
+        "{OWNER}\t10.202.0.2/32,10.203.1.0/24,10.202.1.2/32"
+    )));
+    assert!(
+        fixture
+            .state()
+            .contains(&format!("{FIRST}\t10.202.0.3/32\n"))
+    );
+    assert!(!fixture.state().contains("10.202.1.3"));
+    assert!(
+        fixture
+            .run("create-router-profile", ["198.51.100.1:8443"], None)
+            .status
+            .success()
+    );
+    assert!(
+        fixture
+            .state()
+            .contains(&format!("{SECOND}\t10.202.0.4/32,10.202.1.4/32"))
+    );
+    let status = fixture.run("managed-status", [], None);
+    assert!(status.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["peers"].as_array().unwrap().len(), 1);
+    assert_eq!(status["warp"]["enabled"], true);
+    assert!(fixture.run("disable-warp", [], None).status.success());
+    assert!(
+        fixture.state().contains("10.202.1.2/32"),
+        "disabling WARP must not withdraw or reuse the protected source identities"
+    );
+    assert!(!fixture.path("warp/enabled").exists());
+    assert!(
+        fixture
+            .run("enable-warp", ["--accept-terms"], None)
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn warp_alias_collisions_precede_install_and_save_errors_restore_exact_peers() {
+    let collision = Fixture::new();
+    collision.append_state(&format!("{FIRST}\t10.202.1.2/32\n"));
+    assert!(
+        !collision
+            .run("enable-warp", ["--accept-terms"], None)
+            .status
+            .success()
+    );
+    assert!(!collision.path("warp/network").exists());
+    let fixture = Fixture::new();
+    let before = fixture.state();
+    fs::write(fixture.path("fail-save"), "once").unwrap();
+    assert!(
+        !fixture
+            .run("enable-warp", ["--accept-terms"], None)
+            .status
+            .success()
+    );
+    assert_eq!(fixture.state(), before);
+    assert!(fixture.path("warp/network").exists());
+}
+
+#[test]
 fn legacy_profile_creation_still_accepts_hostname_endpoints() {
     let fixture = Fixture::new();
     let result = fixture.run("create-profile", ["--endpoint", "vpn.test:51820"], None);
@@ -760,6 +846,7 @@ impl Fixture {
             ("wg", WG),
             ("systemctl", "#!/bin/sh\nexit 0\n"),
             ("ip", "#!/bin/sh\ntouch \"$GOFRO_FAKE_FORBIDDEN\"\nexit 1\n"),
+            ("gofro-warp", WARP_HELPER),
         ] {
             let path = bin.join(name);
             fs::write(&path, source).unwrap();
@@ -782,6 +869,8 @@ impl Fixture {
             )
             .env("GOFRO_TEST_FRIENDS_DIR", self.path("friends"))
             .env("GOFRO_TEST_LOCK", self.path("lock"))
+            .env("GOFRO_TEST_WARP_DIR", self.path("warp"))
+            .env("GOFRO_TEST_WARP_HELPER", self.bin.join("gofro-warp"))
             .env("GOFRO_FAKE_WG_STATE", self.path("state"))
             .env("GOFRO_FAKE_SAVE", self.path("saved"))
             .env("GOFRO_FAKE_COUNTER", self.path("counter"))
@@ -854,6 +943,24 @@ if [ -e "$GOFRO_FAKE_FAIL_SAVE" ]; then
   exit 1
 fi
 cp "$GOFRO_FAKE_WG_STATE" "$GOFRO_FAKE_SAVE"
+"#;
+const WARP_HELPER: &str = r#"#!/bin/sh
+set -eu
+state=$GOFRO_TEST_WARP_DIR
+case "$1" in
+  enable)
+    mkdir -p "$state"
+    chmod 700 "$state"
+    printf 'WG_INTERFACE=gt0\nWAN_INTERFACE=eth0\n' > "$state/network"
+    chmod 600 "$state/network"
+    touch "$state/enabled" ;;
+  disable) rm -f "$state/enabled" ;;
+  status)
+    enabled=false
+    [ ! -f "$state/enabled" ] || enabled=true
+    printf '{"installed":true,"enabled":%s,"connected":false}\n' "$enabled" ;;
+  *) exit 1 ;;
+esac
 "#;
 const WG: &str = r#"#!/bin/sh
 state=$GOFRO_FAKE_WG_STATE

@@ -96,7 +96,7 @@ fn update_config(
         if matches!(change, Change::Network) {
             external("network", || mode::apply_network(state, &next))?;
         }
-        apply_policy(state, next.vpn_enabled, &policy, &config.device_exclusions)?;
+        apply_policy(state, &next, &policy, &config.device_exclusions)?;
         save(&state.config_path, &next)
     })();
     if let Err(error) = result {
@@ -116,12 +116,7 @@ fn update_config(
                 }
                 Ok::<_, anyhow::Error>(())
             })();
-            let policy = apply_policy(
-                state,
-                config.vpn_enabled,
-                &active,
-                &config.device_exclusions,
-            );
+            let policy = apply_policy(state, &config, &active, &config.device_exclusions);
             network.and(policy)
         };
         if let Err(rollback) = rollback {
@@ -195,7 +190,7 @@ fn publish_exclusions(state: &AppState, exclusions: &[crate::model::MacAddress])
 
 fn apply_policy(
     state: &AppState,
-    vpn_enabled: bool,
+    config: &ControllerConfig,
     policy: &RoutingPolicy,
     exclusions: &[crate::model::MacAddress],
 ) -> Result<()> {
@@ -206,7 +201,7 @@ fn apply_policy(
         dataplane::apply(
             &state.lan,
             state.dns_listen.port(),
-            vpn_enabled,
+            dataplane::VpnEgress::from_config(config),
             policy,
             &mappings,
             crate::model::PanelPorts {

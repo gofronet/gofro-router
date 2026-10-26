@@ -47,12 +47,7 @@ pub(crate) fn reconcile_locked(state: &AppState, _apply: &std::fs::File) -> Resu
         .map_err(|_| anyhow!("routing lock poisoned"))?;
     install_guard(state, &config.device_exclusions)?;
     // Only a full reconcile may take ownership of a guard left by a failed update.
-    apply_policy(
-        state,
-        config.vpn_enabled,
-        &policy,
-        &config.device_exclusions,
-    )?;
+    apply_policy(state, &config, &policy, &config.device_exclusions)?;
     *active = policy;
     state.fake_dns.set_vpn_enabled(config.vpn_enabled);
     external("dns-cleanup", || crate::network::cleanup_dns_flows(state))?;

@@ -9,22 +9,60 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    model::{IpMatch, LanContext, MacAddress, PANEL_VIRTUAL_IP, PanelPorts, RouteTarget},
+    model::{
+        ControllerConfig, IpMatch, LanContext, MacAddress, PANEL_VIRTUAL_IP, PanelPorts,
+        RouteTarget,
+    },
     routing::{LAN_RANGES, RoutingPolicy},
 };
 
 pub(crate) const DIRECT_MARK: u32 = 0x10000;
 pub(crate) const VPN_MARK: u32 = 0x20000;
 pub(crate) const BLOCK_MARK: u32 = 0x30000;
-const GOFRO_MARK_MASK: &str = "0x30000";
-const KEEP_FOREIGN_MARKS: &str = "0xfffcffff";
+// Keep the VPN bits unchanged: the existing 0x20000/0x30000 policy rule also
+// sends 0x60000 to the fail-closed VPN table. The extra bit selects VPS egress.
+pub(crate) const WARP_MARK: u32 = 0x60000;
+const GOFRO_MARK_MASK: &str = "0x70000";
+const KEEP_FOREIGN_MARKS: &str = "0xfff8ffff";
 const TABLE: &str = "gofro_routing";
 const GUARD_TABLE: &str = "gofro_guard";
-const FAKE_TARGET_SETS: [(RouteTarget, &str); 3] = [
+const FAKE_TARGET_SETS: [(RouteTarget, &str); 4] = [
     (RouteTarget::Direct, "fake_direct"),
     (RouteTarget::Vpn, "fake_vpn"),
+    (RouteTarget::Warp, "fake_warp"),
     (RouteTarget::Block, "fake_block"),
 ];
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct VpnEgress {
+    pub(crate) enabled: bool,
+    pub(crate) warp_source: Option<Ipv4Addr>,
+}
+
+impl VpnEgress {
+    pub(crate) fn from_config(config: &ControllerConfig) -> Self {
+        let warp_source = config
+            .servers
+            .iter()
+            .find(|server| Some(&server.public_key) == config.active_server_key.as_ref())
+            .filter(|server| server.management.is_some())
+            .and_then(|server| server.client_tunnel_address.as_deref())
+            .and_then(|address| address.parse::<ipnet::Ipv4Net>().ok())
+            .and_then(|network| wireguard_status::warp::source_address(network.addr()));
+        Self {
+            enabled: config.vpn_enabled,
+            warp_source,
+        }
+    }
+
+    fn target(self, target: RouteTarget) -> RouteTarget {
+        if target == RouteTarget::Warp && self.warp_source.is_none() {
+            RouteTarget::Block
+        } else {
+            effective_target(target, self.enabled)
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FakeMapping {
@@ -36,7 +74,7 @@ pub(crate) struct FakeMapping {
 pub(crate) fn apply(
     lan: &LanContext,
     dns_port: u16,
-    vpn_enabled: bool,
+    egress: VpnEgress,
     policy: &RoutingPolicy,
     mappings: &[FakeMapping],
     panel_ports: PanelPorts,
@@ -45,7 +83,7 @@ pub(crate) fn apply(
     run_nft(&render_with_exclusions(
         lan,
         dns_port,
-        vpn_enabled,
+        egress,
         policy,
         mappings,
         panel_ports,
@@ -310,7 +348,10 @@ fn render(
     render_with_exclusions(
         lan,
         dns_port,
-        vpn_enabled,
+        VpnEgress {
+            enabled: vpn_enabled,
+            warp_source: None,
+        },
         policy,
         mappings,
         panel_ports,
@@ -321,7 +362,7 @@ fn render(
 fn render_with_exclusions(
     lan: &LanContext,
     dns_port: u16,
-    vpn_enabled: bool,
+    egress: VpnEgress,
     policy: &RoutingPolicy,
     mappings: &[FakeMapping],
     panel_ports: PanelPorts,
@@ -441,7 +482,7 @@ fn render_with_exclusions(
     .unwrap();
     // Sets retain policy intent; only the rule's constant mark changes when VPN is off.
     for (target, set) in FAKE_TARGET_SETS {
-        let mark = target_mark(effective_target(target, vpn_enabled));
+        let mark = target_mark(egress.target(target));
         writeln!(
             script,
             "add rule inet {TABLE} gofro_mark iifname \"{}\" meta mark & {GOFRO_MARK_MASK} == 0 ip daddr @{set} meta mark set (meta mark & {KEEP_FOREIGN_MARKS}) | {mark}",
@@ -465,7 +506,7 @@ fn render_with_exclusions(
             IpMatch::Cidr { value } => value.clone(),
             IpMatch::GeoIp { .. } => format!("@ip_rule_{index}"),
         };
-        let mark = target_mark(effective_target(rule.target, vpn_enabled));
+        let mark = target_mark(egress.target(rule.target));
         writeln!(
             script,
             "add rule inet {TABLE} gofro_mark iifname \"{}\" meta mark & {GOFRO_MARK_MASK} == 0 ip daddr {destination} meta mark set (meta mark & {KEEP_FOREIGN_MARKS}) | {mark}",
@@ -474,14 +515,14 @@ fn render_with_exclusions(
         .unwrap();
     }
     let fallback = policy.effective_fallback();
-    let default_mark = target_mark(effective_target(fallback, vpn_enabled));
+    let default_mark = target_mark(egress.target(fallback));
     writeln!(
         script,
         "add rule inet {TABLE} gofro_mark iifname \"{}\" meta mark & {GOFRO_MARK_MASK} == 0 meta mark set (meta mark & {KEEP_FOREIGN_MARKS}) | {default_mark}",
         lan.device,
     )
     .unwrap();
-    for mark in [DIRECT_MARK, VPN_MARK, BLOCK_MARK] {
+    for mark in [DIRECT_MARK, VPN_MARK, WARP_MARK, BLOCK_MARK] {
         writeln!(
             script,
             "add rule inet {TABLE} gofro_mark iifname \"{}\" meta mark & {GOFRO_MARK_MASK} == {mark} ct mark set (ct mark & {KEEP_FOREIGN_MARKS}) | {mark}",
@@ -535,7 +576,7 @@ fn render_with_exclusions(
         lan.device,
     )
     .unwrap();
-    if vpn_enabled {
+    if egress.enabled {
         // fw4's ingress rt-mtu clamp follows the LAN route rather than the
         // tunnel. Bambu and other clients must not send oversized TCP segments.
         writeln!(
@@ -552,6 +593,8 @@ fn render_with_exclusions(
             )
             .unwrap();
         }
+    }
+    if egress.enabled || policy.uses_warp() {
         writeln!(
             script,
             "add chain inet {TABLE} gofro_ipv6 {{ type filter hook forward priority filter; policy accept; }}"
@@ -564,12 +607,23 @@ fn render_with_exclusions(
         )
         .unwrap();
     }
+    // This SNAT runs before fw4 masquerading. Never reuse an established
+    // non-WARP NAT binding when a rule changes to WARP (or the reverse).
+    writeln!(script, "add chain inet {TABLE} gofro_warp_guard {{ type filter hook forward priority -150; policy accept; }}").unwrap();
+    writeln!(script, "add rule inet {TABLE} gofro_warp_guard iifname \"{}\" ct direction original ct reply ip daddr {} meta mark & {GOFRO_MARK_MASK} != {WARP_MARK} drop", lan.device, wireguard_status::warp::SOURCE_SUBNET).unwrap();
+    if let Some(source) = egress.warp_source.filter(|_| egress.enabled) {
+        writeln!(script, "add rule inet {TABLE} gofro_warp_guard iifname \"{}\" meta mark & {GOFRO_MARK_MASK} == {WARP_MARK} oifname != \"gt0\" drop", lan.device).unwrap();
+        writeln!(script, "add rule inet {TABLE} gofro_warp_guard iifname \"{}\" meta mark & {GOFRO_MARK_MASK} == {WARP_MARK} ct status confirmed ct reply ip daddr != {source} drop", lan.device).unwrap();
+        writeln!(script, "add chain inet {TABLE} gofro_warp_snat {{ type nat hook postrouting priority 99; policy accept; }}").unwrap();
+        writeln!(script, "add rule inet {TABLE} gofro_warp_snat iifname \"{}\" oifname \"gt0\" meta mark & {GOFRO_MARK_MASK} == {WARP_MARK} snat ip to {source}", lan.device).unwrap();
+    }
     script
 }
 
 pub(crate) fn effective_target(target: RouteTarget, vpn_enabled: bool) -> RouteTarget {
     match target {
         RouteTarget::Vpn if !vpn_enabled => RouteTarget::Direct,
+        RouteTarget::Warp if !vpn_enabled => RouteTarget::Block,
         target => target,
     }
 }
@@ -578,6 +632,7 @@ pub(crate) fn target_mark(target: RouteTarget) -> u32 {
     match target {
         RouteTarget::Direct => DIRECT_MARK,
         RouteTarget::Vpn => VPN_MARK,
+        RouteTarget::Warp => WARP_MARK,
         RouteTarget::Block => BLOCK_MARK,
     }
 }

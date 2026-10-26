@@ -1,0 +1,332 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# WARP owns a network namespace, never the VPS default route or resolver.
+NS=gofro-warp
+VETH=gofro-warp0
+UPLINK=gofro-warp1
+HOST=169.254.203.1
+PEER=169.254.203.2
+SOURCES=10.202.1.0/24
+TABLE=10900
+STATE=/etc/gofro/warp
+WG_INTERFACE=gt0
+WAN_INTERFACE=
+
+die() { printf 'gofro WARP: %s\n' "$*" >&2; exit 1; }
+valid_interface() { [[ $1 =~ ^[a-zA-Z0-9_.:-]{1,15}$ ]]; }
+# Drain command-output filters: grep -q can make a match fail via SIGPIPE/pipefail.
+protected_file() {
+  [[ -f $1 && ! -L $1 && $(stat -c '%u:%h' "$1") == 0:1 ]] &&
+    (( (8#$(stat -c '%a' "$1") & 8#022) == 0 ))
+}
+read_network() {
+  protected_file "$STATE/network" || die 'unsafe or missing WARP network configuration'
+  local key value seen_wg=0 seen_wan=0
+  while IFS='=' read -r key value; do
+    valid_interface "$value" || die 'invalid WARP network configuration'
+    case $key in
+      WG_INTERFACE) [[ $value == "$WG_INTERFACE" && $seen_wg == 0 ]] || die 'WireGuard interface mismatch'; seen_wg=1 ;;
+      WAN_INTERFACE) [[ $seen_wan == 0 ]] || die 'duplicate WAN interface'; WAN_INTERFACE=$value; seen_wan=1 ;;
+      *) die 'unrecognized WARP network setting' ;;
+    esac
+  done < "$STATE/network"
+  [[ $seen_wg == 1 && $seen_wan == 1 && $WAN_INTERFACE != "$VETH" ]] || die 'incomplete WARP network configuration'
+}
+
+render_firewall() {
+  cat <<EOF
+table inet gofro_server {
+  chain input { type filter hook input priority filter; policy accept; iifname "$WG_INTERFACE" drop; }
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    iifname "$WG_INTERFACE" ip saddr $SOURCES oifname != "$VETH" drop
+    iifname "$WG_INTERFACE" ip saddr $SOURCES oifname "$VETH" accept
+    iifname "$VETH" oifname "$WG_INTERFACE" ct state established,related accept
+    iifname "$WG_INTERFACE" oifname "$WAN_INTERFACE" accept
+    iifname "$WAN_INTERFACE" oifname "$WG_INTERFACE" ct state established,related accept
+    iifname "$WG_INTERFACE" drop
+    oifname "$WG_INTERFACE" drop
+  }
+  chain postrouting { type nat hook postrouting priority srcnat; policy accept; iifname "$WG_INTERFACE" oifname "$WAN_INTERFACE" masquerade; iifname "$VETH" ip saddr $PEER oifname "$WAN_INTERFACE" masquerade; }
+}
+EOF
+}
+render_legacy_firewall() {
+  # Exact recognition prevents replacing operator-added firewall rules.
+  cat <<EOF
+table inet gofro_server {
+  chain input { type filter hook input priority filter; policy accept; iifname "$WG_INTERFACE" drop; }
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    iifname "$WG_INTERFACE" oifname "$WAN_INTERFACE" accept
+    iifname "$WAN_INTERFACE" oifname "$WG_INTERFACE" ct state established,related accept
+    iifname "$WG_INTERFACE" drop
+    oifname "$WG_INTERFACE" drop
+  }
+  chain postrouting { type nat hook postrouting priority srcnat; policy accept; iifname "$WG_INTERFACE" oifname "$WAN_INTERFACE" masquerade; }
+}
+EOF
+}
+render_namespace_firewall() {
+  cat <<EOF
+table inet gofro_warp {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    iifname "lo" accept
+    ct state established,related accept
+  }
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+    iifname "$UPLINK" oifname "CloudflareWARP" ip saddr $SOURCES accept
+    iifname "CloudflareWARP" oifname "$UPLINK" ct state established,related accept
+  }
+  chain mss {
+    type filter hook forward priority mangle; policy accept;
+    tcp flags & (syn | rst) == syn tcp option maxseg size > 1240 tcp option maxseg size set 1240
+  }
+  chain postrouting { type nat hook postrouting priority srcnat; policy accept; ip saddr $SOURCES oifname "CloudflareWARP" masquerade; }
+}
+EOF
+}
+
+prepare() {
+  local temporary wan
+  protected_file /etc/gofro/server.nft || die 'managed server firewall is missing or unsafe'
+  wan=$(awk -v interface="\"$WG_INTERFACE\"" '$1 == "iifname" && $2 == interface && $3 == "oifname" && $5 == "accept" { gsub(/"/, "", $4); print $4; count++ } END { if (count != 1) exit 1 }' /etc/gofro/server.nft) || die 'cannot identify managed WAN'
+  valid_interface "$wan" || die 'invalid managed WAN'
+  WAN_INTERFACE=$wan
+  temporary=$(mktemp -d)
+  render_firewall > "$temporary/new"
+  render_legacy_firewall > "$temporary/old"
+  if ! cmp -s /etc/gofro/server.nft "$temporary/new" && ! cmp -s /etc/gofro/server.nft "$temporary/old"; then
+    rm -rf "$temporary"
+    die 'server firewall has custom changes; refusing automatic replacement'
+  fi
+  { printf 'delete table inet gofro_server\n'; cat "$temporary/new"; } > "$temporary/apply"
+  if ! nft -c -f "$temporary/apply" || ! nft -f "$temporary/apply"; then
+    rm -rf "$temporary"
+    die 'could not atomically install WARP source isolation'
+  fi
+  install -m 600 "$temporary/new" /etc/gofro/server.nft
+  install -d -m 700 "$STATE"
+  printf 'WG_INTERFACE=%s\nWAN_INTERFACE=%s\n' "$WG_INTERFACE" "$WAN_INTERFACE" > "$temporary/network"
+  install -m 600 "$temporary/network" "$STATE/network"
+  rm -rf "$temporary"
+}
+
+check_routes() {
+  local rules routes line existing
+  rules=$(ip -4 -N rule show)
+  existing=$(awk '$1 == "10900:" { $1=$1; print }' <<< "$rules")
+  [[ -z $existing || $existing == "10900: from $SOURCES iif $WG_INTERFACE lookup $TABLE" ]] || die 'foreign policy rule at priority 10900'
+  routes=$(LC_ALL=C ip -4 -N -o route show table "$TABLE" 2>&1) || {
+    [[ $routes == 'Error: ipv4: FIB table does not exist.
+Dump terminated' ]] || die 'cannot inspect WARP routing table'
+    routes=
+  }
+  routes=$(awk '{$1=$1; if (NF) print}' <<< "$routes")
+  while IFS= read -r line; do
+    [[ -z $line || $line == "unreachable default proto 186 metric 32767" || $line == "7 default proto 186 metric 32767" || $line == "default via $PEER dev $VETH proto 186 metric 10" ]] || die 'foreign routes in WARP routing table'
+  done <<< "$routes"
+  existing=$(ip -4 -N -o route show exact "$SOURCES" | awk '{$1=$1; if (NF) print}')
+  [[ -z $existing || $existing == "$SOURCES dev $WG_INTERFACE proto 186 scope 253" ]] || die 'foreign WARP source return route'
+  [[ -n $(ip -4 -o route show exact 169.254.203.0/30) ]] && {
+    ip -d link show dev "$VETH" | grep -F 'alias gofro-warp-v1' >/dev/null || die 'WARP link network is already in use'
+  }
+  return 0
+}
+
+network_up() {
+  read_network
+  check_routes
+  if ip link show dev "$VETH" >/dev/null 2>&1; then
+    ip -d link show dev "$VETH" | grep -F 'alias gofro-warp-v1' >/dev/null || die 'foreign WARP veth interface'
+    die 'WARP namespace still exists; stop its services before repair'
+  fi
+  if ip netns list | grep -E '^gofro-warp( |$)' >/dev/null; then die 'foreign or stale WARP namespace; manual inspection required'; fi
+  ip route replace unreachable default table "$TABLE" metric 32767 proto 186
+  if ! ip -4 -N rule show | grep '^10900:' >/dev/null; then ip rule add pref "$TABLE" from "$SOURCES" iif "$WG_INTERFACE" lookup "$TABLE"; fi
+  ip netns add "$NS"
+  # Install the namespace kill switch BEFORE links, forwarding or WARP start.
+  render_namespace_firewall | ip netns exec "$NS" nft -f -
+  ip link add "$VETH" type veth peer name "$UPLINK"
+  ip link set dev "$VETH" alias gofro-warp-v1
+  ip link set "$UPLINK" netns "$NS"
+  ip address add "$HOST/30" dev "$VETH"
+  ip link set "$VETH" up
+  ip -n "$NS" address add "$PEER/30" dev "$UPLINK"
+  ip -n "$NS" link set lo up
+  ip -n "$NS" link set "$UPLINK" up
+  ip -n "$NS" route add "$SOURCES" via "$HOST"
+  ip -n "$NS" route add default via "$HOST"
+  ip netns exec "$NS" sysctl -qw net.ipv4.ip_forward=1 net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0
+  sysctl -qw "net.ipv4.conf.$VETH.rp_filter=2"
+  ip route replace "$SOURCES" dev "$WG_INTERFACE" proto 186
+  ip route replace default via "$PEER" dev "$VETH" table "$TABLE" metric 10 proto 186
+}
+
+network_down() {
+  read_network
+  check_routes
+  # The policy rule and unreachable default intentionally survive shutdown.
+  ip route replace unreachable default table "$TABLE" metric 32767 proto 186
+  if ip link show dev "$VETH" >/dev/null 2>&1; then
+    ip -d link show dev "$VETH" | grep -F 'alias gofro-warp-v1' >/dev/null || die 'refusing to delete a foreign veth'
+    ip route del default via "$PEER" dev "$VETH" table "$TABLE" metric 10 proto 186 2>/dev/null || true
+    ip link delete "$VETH"
+    ip netns delete "$NS"
+  elif ip netns list | grep -E '^gofro-warp( |$)' >/dev/null; then
+    die 'namespace without its owned veth requires manual inspection'
+  fi
+}
+
+write_units() {
+  install -d -m 755 /etc/netns/gofro-warp /etc/systemd/system/warp-svc.service.d
+  printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /etc/netns/gofro-warp/resolv.conf
+  cat > /etc/systemd/system/gofro-warp-network.service <<EOF
+[Unit]
+Description=Gofro isolated WARP egress network
+Requires=wg-quick@$WG_INTERFACE.service
+After=wg-quick@$WG_INTERFACE.service
+Before=warp-svc.service
+PartOf=wg-quick@$WG_INTERFACE.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/gofro-warp network-up $WG_INTERFACE
+ExecStopPost=/usr/local/sbin/gofro-warp network-down $WG_INTERFACE
+[Install]
+WantedBy=multi-user.target
+EOF
+  cat > /etc/systemd/system/warp-svc.service.d/gofro.conf <<'EOF'
+[Unit]
+Requires=gofro-warp-network.service
+After=gofro-warp-network.service
+PartOf=gofro-warp-network.service
+[Service]
+NetworkNamespacePath=/run/netns/gofro-warp
+BindPaths=/etc/netns/gofro-warp/resolv.conf:/etc/resolv.conf
+Restart=on-failure
+RestartSec=5
+EOF
+  cat > /etc/systemd/system/gofro-warp-connect.service <<EOF
+[Unit]
+Description=Connect Gofro WARP egress
+Requires=warp-svc.service
+After=warp-svc.service
+PartOf=warp-svc.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/gofro-warp connect $WG_INTERFACE
+TimeoutStartSec=120
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+}
+
+cli() { timeout 15 ip netns exec "$NS" warp-cli --accept-tos "$@"; }
+wait_daemon() {
+  local attempt
+  for ((attempt=0; attempt<20; attempt++)); do
+    if cli status >/dev/null 2>&1; then return; fi
+    sleep 1
+  done
+  die 'WARP daemon did not become ready'
+}
+connect() {
+  read_network
+  wait_daemon
+  cli mode warp >/dev/null
+  cli tunnel protocol set MASQUE >/dev/null
+  cli connect >/dev/null
+  local attempt trace
+  for ((attempt=0; attempt<12; attempt++)); do
+    if trace=$(ip netns exec "$NS" curl -4 --noproxy '*' --interface CloudflareWARP --fail --silent --show-error --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null) && grep -Eq '^warp=(on|plus)$' <<< "$trace"; then return; fi
+    sleep 2
+  done
+  die 'WARP connection could not be verified; selected traffic remains blocked'
+}
+
+enable() {
+  local codename
+  if [[ ! -e $STATE/network ]]; then
+    if command -v warp-svc >/dev/null 2>&1 || [[ -e /var/lib/cloudflare-warp/reg.json || -e /etc/systemd/system/warp-svc.service.d/gofro.conf ]]; then
+      die 'existing unmanaged WARP installation; refusing to take it over'
+    fi
+  else
+    read_network
+  fi
+  # shellcheck disable=SC1091
+  source /etc/os-release
+  case "${ID:-}:${VERSION_CODENAME:-}" in
+    debian:bookworm|debian:trixie|ubuntu:jammy|ubuntu:noble|ubuntu:resolute) codename=$VERSION_CODENAME ;;
+    *) die 'WARP automatic installation supports Debian 12/13 and Ubuntu 22.04/24.04/26.04' ;;
+  esac
+  prepare
+  write_units
+  systemctl enable --now gofro-warp-network.service >/dev/null
+  if ! command -v warp-cli >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl gnupg iproute2 >/dev/null
+    local temporary
+    temporary=$(mktemp -d)
+    if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-time 60 https://pkg.cloudflareclient.com/pubkey.gpg -o "$temporary/key" || ! gpg --batch --yes --dearmor --output "$temporary/keyring" "$temporary/key"; then
+      rm -rf "$temporary"
+      die 'could not obtain the Cloudflare package signing key'
+    fi
+    install -m 644 "$temporary/keyring" /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    rm -rf "$temporary"
+    printf 'deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ %s main\n' "$codename" > /etc/apt/sources.list.d/cloudflare-client.list
+    apt-get update >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cloudflare-warp >/dev/null
+  fi
+  systemctl start warp-svc.service
+  wait_daemon
+  if ! cli registration show >/dev/null 2>&1; then cli registration new >/dev/null; fi
+  # A failed connect is an enabled-but-disconnected, fail-closed desired state.
+  install -m 600 /dev/null "$STATE/enabled"
+  systemctl enable warp-svc.service gofro-warp-connect.service >/dev/null
+  systemctl restart gofro-warp-connect.service
+}
+
+disable() {
+  [[ -e $STATE/network ]] || return 0
+  read_network
+  # Remove intent first so a concurrent status never reports a live exit.
+  rm -f "$STATE/enabled"
+  systemctl disable --now gofro-warp-connect.service warp-svc.service >/dev/null
+  # Leave namespace firewall, source return routes and blackhole protection intact.
+}
+status() {
+  local installed=false enabled=false connected=false
+  if [[ -e $STATE/network ]]; then
+    read_network
+    command -v warp-cli >/dev/null 2>&1 && installed=true
+    [[ ! -f $STATE/enabled ]] || enabled=true
+    if [[ $installed == true && $enabled == true ]] && systemctl is-active --quiet warp-svc.service &&
+      cli status 2>/dev/null | grep -E '^Status update: Connected[[:space:]]*$' >/dev/null; then connected=true; fi
+  fi
+  printf '{"installed":%s,"enabled":%s,"connected":%s}\n' "$installed" "$enabled" "$connected"
+}
+
+case ${1:-} in
+  render-firewall|render-legacy-firewall)
+    if [[ $# != 3 ]] || ! valid_interface "$2" || ! valid_interface "$3"; then die 'invalid render arguments'; fi
+    WG_INTERFACE=$2; WAN_INTERFACE=$3
+    if [[ $1 == render-firewall ]]; then render_firewall; else render_legacy_firewall; fi
+    exit 0 ;;
+  render-namespace-firewall) render_namespace_firewall; exit 0 ;;
+esac
+if [[ $EUID != 0 || $# != 2 ]] || ! valid_interface "$2"; then die 'usage: gofro-warp enable|disable|status|connect|network-up|network-down INTERFACE (as root)'; fi
+WG_INTERFACE=$2
+case $1 in
+  enable) enable ;;
+  disable) disable ;;
+  status) status ;;
+  connect) connect ;;
+  network-up) network_up ;;
+  network-down) network_down ;;
+  *) die 'unknown WARP operation' ;;
+esac

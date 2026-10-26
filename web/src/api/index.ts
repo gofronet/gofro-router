@@ -150,6 +150,8 @@ export const api = {
       request(managedServerStatusSchema, () => http.post("/servers/management", { public_key: publicKey }, inspection)),
     restart: (publicKey: string): Promise<ManagedServerStatus> =>
       request(managedServerStatusSchema, () => http.post("/servers/restart", { public_key: publicKey }, mutation)),
+    setWarp: (publicKey: string, enabled: boolean, acceptTerms = false): Promise<ManagedServerStatus> =>
+      request(managedServerStatusSchema, () => http.post("/servers/warp", { public_key: publicKey, enabled, accept_terms: acceptTerms }, managedUpdate)),
     createFriend: (publicKey: string, name: string): Promise<ManagedServerStatus> =>
       request(managedServerStatusSchema, () => http.post("/servers/friends", { public_key: publicKey, name: friendNameSchema.parse(name) }, mutation)),
     renameFriend: (publicKey: string, peerKey: string, name: string): Promise<ManagedServerStatus> =>
