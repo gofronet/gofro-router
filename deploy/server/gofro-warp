@@ -252,7 +252,9 @@ connect() {
 enable() {
   local codename
   if [[ ! -e $STATE/network ]]; then
-    ! command -v warp-svc >/dev/null 2>&1 && [[ ! -e /var/lib/cloudflare-warp/reg.json && ! -e /etc/systemd/system/warp-svc.service.d/gofro.conf ]] || die 'existing unmanaged WARP installation; refusing to take it over'
+    if command -v warp-svc >/dev/null 2>&1 || [[ -e /var/lib/cloudflare-warp/reg.json || -e /etc/systemd/system/warp-svc.service.d/gofro.conf ]]; then
+      die 'existing unmanaged WARP installation; refusing to take it over'
+    fi
   else
     read_network
   fi
