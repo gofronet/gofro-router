@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "gofro-agent"
-version = "0.5.23"
+version = "0.5.24"
 dependencies = [
  "anyhow",
  "axum",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "gofro-kdf"
-version = "0.5.23"
+version = "0.5.24"
 dependencies = [
  "openssl",
  "zeroize",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "gofro-relay"
-version = "0.5.23"
+version = "0.5.24"
 dependencies = [
  "anyhow",
  "clap",
@@ -490,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "gofro-server"
-version = "0.5.23"
+version = "0.5.24"
 dependencies = [
  "anyhow",
  "clap",
@@ -1655,7 +1655,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "wireguard-status"
-version = "0.5.23"
+version = "0.5.24"
 dependencies = [
  "anyhow",
  "serde",

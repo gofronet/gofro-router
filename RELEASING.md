@@ -3,8 +3,8 @@
 The next release workflow cross-compiles static musl binaries for eight
 supported OpenWrt 25.12 ABIs and one x86_64 VPS target: nine signed bundles,
 nine manifests, nine signatures and two installers (29 release assets total).
-The next signed candidate workspace version is `0.5.23`. The published signed
-v0.5.22 release is the immutable, pinned baseline; changes require a new
+The next signed candidate workspace version is `0.5.24`. The published signed
+v0.5.23 release is the immutable, pinned baseline; changes require a new
 candidate, not modification of its artifact.
 
 ## Create a release
@@ -13,7 +13,7 @@ candidate, not modification of its artifact.
    `Cargo.toml` and the workspace package versions in `Cargo.lock`.
 2. Run the checks below and squash-merge the pull request into `main`.
 3. Open **Actions -> Release -> Run workflow**, select `main`, and enter the
-   version without the `v` prefix (`0.5.23`). Leave **publish** unchecked
+   version without the `v` prefix (`0.5.24`). Leave **publish** unchecked
    (the default) to build a candidate.
 
 The workflow requires the latest `main` commit and a matching Cargo workspace
@@ -46,7 +46,7 @@ are scoped to a workflow run; record the run ID and artifact IDs as well.
    and router-to-VPS tunnel. Record untested ABIs explicitly. CI/emulation alone
    is not hardware qualification.
 
-For v0.5.23, also record the upgrade from the pinned signed v0.5.22 baseline.
+For v0.5.24, record the upgrade from the pinned signed v0.5.23 baseline.
 Verify router and VPS MTU 1379 after installation/update, native UCI MTU after
 agent restart/server selection, 1350/1351-byte QUIC datagrams and HTTP/3 responses,
 TCP MSS in both VPN directions and prompt IPv4 fallback for unsupported IPv6.
@@ -65,7 +65,7 @@ LAN IP, proxy or listener is introduced. The candidate requires native router
 `conntrack` and adds a Gofro-owned dnsmasq `hostrecord` for the panel alias.
 Check `https://<LAN-address>:8443` as the direct-IP fallback, especially after
 an initial reconcile failure when VIP rules may not yet be installed. Candidate
-qualification must not overwrite the v0.5.22 artifact or change published Latest.
+qualification must not overwrite the v0.5.23 artifact or change published Latest.
 
 Qualify **Rules -> Devices -> Direct**, manual MAC entry and removal with VPN
 on/off, rules/all modes, VPN failure, restart and guard retention. Verify full

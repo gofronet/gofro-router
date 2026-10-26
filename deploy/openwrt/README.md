@@ -4,7 +4,7 @@ Gofro installs on official OpenWrt 25.12 without replacing the firmware. It is
 not tied to a router vendor or model: the bootstrap selects a signed static
 bundle from OpenWrt's `DISTRIB_ARCH`.
 
-This describes the next candidate, v0.5.23. The published signed v0.5.22 release
+This describes the next candidate, v0.5.24. The published signed v0.5.23 release
 remains the immutable, pinned baseline; new changes require a new candidate
 artifact. Download links select the published Latest, not unshipped workspace
 changes.
