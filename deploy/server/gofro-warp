@@ -136,7 +136,7 @@ table inet gofro_warp {
     iifname "$UPLINK" oifname "CloudflareWARP" ip saddr $SOURCES accept
     iifname "CloudflareWARP" oifname "$UPLINK" ct state established,related accept
   }
-  chain mss {
+  chain gofro_mss {
     type filter hook forward priority mangle; policy accept;
     tcp flags & (syn | rst) == syn tcp option maxseg size > $((WARP_MTU - 40)) tcp option maxseg size set $((WARP_MTU - 40))
   }

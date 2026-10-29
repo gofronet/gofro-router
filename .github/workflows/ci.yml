@@ -13,6 +13,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  warp-jammy:
+    name: WARP Ubuntu 22.04
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends nftables iproute2 wireguard-tools
+      # Exercise Jammy's actual nft parser and lifecycle in an isolated network.
+      - run: |
+          sudo unshare --mount --net --pid --fork --mount-proc bash -eu -c '
+            mkdir -p /run/netns
+            mount -t tmpfs tmpfs /run/netns
+            exec bash deploy/server/tests/warp-network.sh
+          '
+
   rust:
     name: Rust
     needs: web

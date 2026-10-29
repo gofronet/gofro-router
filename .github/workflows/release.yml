@@ -24,6 +24,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  warp-jammy:
+    name: WARP Ubuntu 22.04
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends nftables iproute2 wireguard-tools
+      - run: |
+          sudo unshare --mount --net --pid --fork --mount-proc bash -eu -c '
+            mkdir -p /run/netns
+            mount -t tmpfs tmpfs /run/netns
+            exec bash deploy/server/tests/warp-network.sh
+          '
+
   validate:
     name: Validate release
     runs-on: ubuntu-24.04
@@ -178,7 +193,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.target }}
-    needs: validate
+    needs: [validate, warp-jammy]
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
