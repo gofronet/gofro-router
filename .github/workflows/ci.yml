@@ -40,6 +40,7 @@ jobs:
           trap 'rm -rf "$FIXTURES"' EXIT
           bash deploy/openwrt/tests/dataplane-netns.sh --emit-only
           GOFRO_NFT_FIXTURE_DIR="$FIXTURES" cargo test --locked -p gofro-agent dataplane::tests::emit_warp_fixtures -- --exact --ignored
+          GOFRO_NFT_FIXTURE_DIR="$FIXTURES" cargo test --locked -p gofro-agent dataplane::tests::emit_dns_egress_fixtures -- --exact --ignored
           sudo -n docker build -t gofro-native-test -f deploy/openwrt/tests/Dockerfile deploy/openwrt/tests
           sudo -n docker build -t gofro-mode-test - <<'EOF'
           FROM gofro-native-test
@@ -70,6 +71,12 @@ jobs:
             -v "$GITHUB_WORKSPACE:/src:ro" -v "$FIXTURES:/fixtures:ro" \
             -e AGENT_BIN=/src/target/debug/gofro-agent -e FIXTURES=/fixtures \
             -w /src gofro-mode-test sh deploy/openwrt/tests/dns-netns.sh
+          sudo -n docker run --rm --network none --user 0:0 \
+            --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN \
+            --security-opt apparmor=unconfined \
+            -v "$GITHUB_WORKSPACE:/src:ro" -v "$FIXTURES:/fixtures:ro" \
+            -e AGENT_BIN=/src/target/debug/gofro-agent -e FIXTURES=/fixtures \
+            -w /src gofro-mode-test sh deploy/openwrt/tests/dns-egress-netns.sh
           sudo -n docker run --rm --network none --user 0:0 \
             --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN \
             --security-opt apparmor=unconfined \

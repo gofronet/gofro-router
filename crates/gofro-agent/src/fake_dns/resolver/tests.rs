@@ -17,6 +17,306 @@ fn test_lan() -> LanContext {
     }
 }
 
+fn dns_policy(target: RouteTarget, fallback: RouteTarget, mode: RoutingMode) -> RoutingPolicy {
+    RoutingPolicy::compile(
+        RoutingConfig {
+            domain_rules: vec![DomainRule {
+                name: "DNS path".into(),
+                enabled: true,
+                matcher: DomainMatch::Suffix {
+                    value: "routed.example".into(),
+                },
+                target,
+            }],
+            ip_rules: vec![],
+            default_target: fallback,
+            mode,
+            rule_order: None,
+        },
+        Arc::new(GeoData::default()),
+    )
+    .unwrap()
+}
+
+#[test]
+fn dns_egress_uses_separate_direct_vpn_and_warp_paths_without_direct_fallback() {
+    let local = "100.64.0.1:53".parse().unwrap();
+    let public = "1.1.1.1:53".parse().unwrap();
+    for target in [
+        RouteTarget::Direct,
+        RouteTarget::Vpn,
+        RouteTarget::Warp,
+        RouteTarget::Block,
+    ] {
+        for enabled in [false, true] {
+            let policy = dns_policy(target, RouteTarget::Direct, RoutingMode::Rules);
+            let actual = upstream_route("sub.routed.example", &policy, local, enabled, &test_lan());
+            let effective = dataplane::effective_target(target, enabled);
+            let expected = match effective {
+                RouteTarget::Direct => Some(UpstreamRoute {
+                    address: local,
+                    mark: 0x10000,
+                }),
+                RouteTarget::Vpn => Some(UpstreamRoute {
+                    address: public,
+                    mark: 0x20000,
+                }),
+                RouteTarget::Warp => Some(UpstreamRoute {
+                    address: "1.0.0.1:53".parse().unwrap(),
+                    mark: 0x60000,
+                }),
+                RouteTarget::Block => None,
+            };
+            assert_eq!(actual, expected, "{target:?}, VPN enabled={enabled}");
+        }
+    }
+}
+
+#[test]
+fn dns_egress_follows_fallback_and_all_mode_without_an_isp_probe() {
+    let local = "100.64.0.1:53".parse().unwrap();
+    for fallback in [
+        RouteTarget::Direct,
+        RouteTarget::Vpn,
+        RouteTarget::Warp,
+        RouteTarget::Block,
+    ] {
+        for mode in [RoutingMode::Rules, RoutingMode::All] {
+            let policy = dns_policy(RouteTarget::Direct, fallback, mode);
+            let actual = upstream_route("unmatched.example", &policy, local, true, &test_lan());
+            let target = if mode == RoutingMode::All {
+                RouteTarget::Vpn
+            } else {
+                fallback
+            };
+            if target == RouteTarget::Block {
+                assert!(actual.is_none());
+            } else {
+                let route = actual.unwrap();
+                assert_eq!(route.mark, dataplane::target_mark(target));
+                assert_eq!(route.address == local, target == RouteTarget::Direct);
+            }
+        }
+    }
+}
+
+#[test]
+fn vpn_and_warp_dns_endpoints_cannot_share_an_ephemeral_conntrack_tuple() {
+    let policy = dns_policy(RouteTarget::Warp, RouteTarget::Vpn, RoutingMode::Rules);
+    let local = "100.64.0.1:53".parse().unwrap();
+    let vpn = upstream_route("fallback.example", &policy, local, true, &test_lan()).unwrap();
+    let warp = upstream_route("routed.example", &policy, local, true, &test_lan()).unwrap();
+    assert_ne!(vpn.address, warp.address);
+    assert_ne!(vpn.mark, warp.mark);
+}
+
+#[test]
+fn local_hostnames_and_private_reverse_zones_never_leave_the_local_resolver() {
+    let policy = dns_policy(RouteTarget::Warp, RouteTarget::Warp, RoutingMode::Rules);
+    let local = "100.64.0.1:53".parse().unwrap();
+    for name in [
+        "printer",
+        "localhost",
+        "host.localhost",
+        "nas.homelab.lan",
+        "_services._dns-sd._udp.local",
+        "router.home.arpa",
+        "nas.internal",
+        "1.0.64.100.in-addr.arpa",
+        "1.1.168.192.in-addr.arpa",
+        "168.192.in-addr.arpa",
+        "c.f.ip6.arpa",
+        "0.8.e.f.ip6.arpa",
+    ] {
+        assert!(local_dns_name(name, &test_lan()), "{name}");
+        assert_eq!(
+            upstream_route(name, &policy, local, true, &test_lan()),
+            Some(UpstreamRoute {
+                address: local,
+                mark: 0x10000
+            })
+        );
+    }
+    for name in [
+        "example.com",
+        "notlocal.com",
+        "printer.lan.evil",
+        "1.1.1.1.in-addr.arpa",
+        "8.8.8.8.in-addr.arpa",
+        "8.8.8.8.ip6.arpa",
+    ] {
+        assert!(!local_dns_name(name, &test_lan()), "{name}");
+        assert_eq!(
+            upstream_route(name, &policy, local, true, &test_lan())
+                .unwrap()
+                .mark,
+            0x60000
+        );
+    }
+}
+
+#[test]
+fn block_and_disabled_warp_dns_are_refused_without_contacting_an_upstream() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").unwrap();
+    upstream.set_nonblocking(true).unwrap();
+    let dns = FakeDns {
+        store: Mutex::new(
+            Store::from_connection(rusqlite::Connection::open_in_memory().unwrap()).unwrap(),
+        ),
+        updates: RwLock::new(()),
+        active: AtomicBool::new(false),
+        vpn_enabled: AtomicBool::new(false),
+    };
+    for (target, enabled) in [(RouteTarget::Block, true), (RouteTarget::Warp, false)] {
+        let policy = dns_policy(target, RouteTarget::Vpn, RoutingMode::Rules);
+        dns.set_vpn_enabled(enabled);
+        for kind in [
+            RecordType::A,
+            RecordType::AAAA,
+            RecordType::HTTPS,
+            RecordType::TXT,
+        ] {
+            let mut request = Message::new();
+            request
+                .set_id(29)
+                .add_query(hickory_proto::op::Query::query(
+                    Name::from_ascii("Sub.Routed.Example.").unwrap(),
+                    kind,
+                ));
+            let response = Message::from_vec(
+                &dns.process(
+                    &request.to_vec().unwrap(),
+                    &policy,
+                    upstream.local_addr().unwrap(),
+                    &test_lan(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(response.id(), 29);
+            assert_eq!(response.queries(), request.queries());
+            assert_eq!(response.response_code(), ResponseCode::Refused);
+            assert!(response.answers().is_empty());
+        }
+    }
+    assert_eq!(
+        upstream.recv(&mut [0; 512]).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn protected_queries_remove_client_subnets_but_keep_dnssec_and_other_edns_options() {
+    use hickory_proto::rr::rdata::opt::EdnsOption;
+    let mut request = Message::new();
+    request
+        .set_id(29)
+        .set_recursion_desired(true)
+        .add_query(hickory_proto::op::Query::query(
+            Name::from_ascii("routed.example.").unwrap(),
+            RecordType::A,
+        ));
+    let edns = request.extensions_mut().get_or_insert_default();
+    edns.set_dnssec_ok(true).set_max_payload(1232);
+    edns.options_mut()
+        .insert(EdnsOption::Subnet("203.0.113.0/24".parse().unwrap()));
+    edns.options_mut()
+        .insert(EdnsOption::Subnet("2001:db8::/48".parse().unwrap()));
+    edns.options_mut()
+        .insert(EdnsOption::Unknown(65001, vec![1, 2, 3]));
+    let original = request.to_vec().unwrap();
+    for target in [RouteTarget::Vpn, RouteTarget::Warp] {
+        let route = UpstreamRoute {
+            address: TUNNEL_DNS_UPSTREAM,
+            mark: dataplane::target_mark(target),
+        };
+        let outgoing = upstream_packet(&original, &request, route).unwrap();
+        assert!(matches!(outgoing, Cow::Owned(_)));
+        let decoded = Message::from_vec(&outgoing).unwrap();
+        assert_eq!(decoded.id(), request.id());
+        assert_eq!(decoded.queries(), request.queries());
+        assert_eq!(decoded.recursion_desired(), request.recursion_desired());
+        let edns = decoded.extensions().as_ref().unwrap();
+        assert!(edns.flags().dnssec_ok);
+        assert_eq!(edns.max_payload(), 1232);
+        assert!(edns.options().get(EdnsCode::Subnet).is_none());
+        assert_eq!(
+            edns.options().get(EdnsCode::Unknown(65001)),
+            Some(&EdnsOption::Unknown(65001, vec![1, 2, 3]))
+        );
+    }
+    let direct = UpstreamRoute {
+        address: "127.0.0.1:53".parse().unwrap(),
+        mark: 0x10000,
+    };
+    assert!(matches!(
+        upstream_packet(&original, &request, direct).unwrap(),
+        Cow::Borrowed(_)
+    ));
+    assert_eq!(
+        request.to_vec().unwrap(),
+        original,
+        "do not mutate the original request"
+    );
+    request
+        .extensions_mut()
+        .as_mut()
+        .unwrap()
+        .options_mut()
+        .remove(EdnsCode::Subnet);
+    let without_subnet = request.to_vec().unwrap();
+    let protected = UpstreamRoute {
+        address: TUNNEL_DNS_UPSTREAM,
+        mark: 0x60000,
+    };
+    assert!(matches!(
+        upstream_packet(&without_subnet, &request, protected).unwrap(),
+        Cow::Borrowed(_)
+    ));
+}
+
+#[test]
+fn ambiguous_question_sets_cannot_disclose_protected_names_through_a_direct_first_question() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").unwrap();
+    upstream.set_nonblocking(true).unwrap();
+    let dns = FakeDns {
+        store: Mutex::new(
+            Store::from_connection(rusqlite::Connection::open_in_memory().unwrap()).unwrap(),
+        ),
+        updates: RwLock::new(()),
+        active: AtomicBool::new(false),
+        vpn_enabled: AtomicBool::new(true),
+    };
+    let policy = dns_policy(RouteTarget::Warp, RouteTarget::Direct, RoutingMode::Rules);
+    for names in [vec![], vec!["direct.example.", "routed.example."]] {
+        let mut request = Message::new();
+        request.set_id(29003);
+        for name in names {
+            request.add_query(hickory_proto::op::Query::query(
+                Name::from_ascii(name).unwrap(),
+                RecordType::A,
+            ));
+        }
+        let response = Message::from_vec(
+            &dns.process(
+                &request.to_vec().unwrap(),
+                &policy,
+                upstream.local_addr().unwrap(),
+                &test_lan(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(response.id(), request.id());
+        assert_eq!(response.queries(), request.queries());
+        assert_eq!(response.response_code(), ResponseCode::FormErr);
+    }
+    assert_eq!(
+        upstream.recv(&mut [0; 512]).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
 #[test]
 fn overload_returns_servfail() {
     let mut request = Message::new();

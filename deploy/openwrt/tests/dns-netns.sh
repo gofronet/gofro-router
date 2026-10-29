@@ -59,6 +59,7 @@ ip -n "$c" route add default via 192.168.0.1
 ip -n "$w" route add default via 192.0.2.1
 ip -n "$r" addr add 10.0.0.1/24 dev gt0
 ip -n "$v" addr add 10.0.0.2/24 dev vpn0
+ip -n "$v" addr add 1.1.1.1/32 dev lo
 ip -n "$v" route add default via 10.0.0.1
 ip -n "$r" route add default via 192.0.2.2
 ip -n "$r" rule add pref 80 fwmark 0x10000/0x30000 lookup main
@@ -456,7 +457,12 @@ with socket.socket(type=socket.SOCK_STREAM if transport == "tcp" else socket.SOC
         print(f"PASS: {panel_checks} real panel/LuCI checks, {alias_checks} mode DNS aliases, {drop_checks} observed VIP drops", flush=True)
 
         # Native OpenWrt host-record contract, including a real AAAA positive
-        # control which FakeDNS filters under the ordinary VPN policy.
+        # control which FakeDNS filters under the ordinary VPN policy. Ordinary
+        # DNS must now use the VPN responder, never the native dnsmasq cache.
+        protected = subprocess.Popen(["ip", "netns", "exec", v, "dnsmasq", "--keep-in-foreground",
+            "--no-resolv", "--no-hosts", "--bind-interfaces", "--listen-address=1.1.1.1",
+            "--port=53", "--user=root", f"--pid-file={root / 'protected-dnsmasq.pid'}", "--local-ttl=30",
+            "--host-record=full-direct.test,2001:db8:99::1"], stderr=subprocess.PIPE)
         native = subprocess.Popen(["ip", "netns", "exec", r, "dnsmasq", "--keep-in-foreground",
             "--no-resolv", "--no-hosts", "--bind-interfaces", "--interface=lan0", "--interface=lo",
             "--port=53", "--user=root", f"--pid-file={root / 'dnsmasq.pid'}", "--local-ttl=30",
@@ -485,9 +491,22 @@ with socket.socket(socket.AF_INET6 if ":" in address else socket.AF_INET,
         try:
             time.sleep(.15)
             assert native.poll() is None, native.stderr.read().decode()
+            assert protected.poll() is None, protected.stderr.read().decode()
+            run(r, "nft", "-f", "-", input='''
+add table inet native_dns_egress_probe
+add counter inet native_dns_egress_probe protected
+add counter inet native_dns_egress_probe local
+add chain inet native_dns_egress_probe output { type filter hook output priority 10; }
+add rule inet native_dns_egress_probe output ip daddr 1.1.1.1 meta l4proto { tcp, udp } th dport 53 meta mark & 0x70000 == 0x20000 oifname "gt0" counter name protected
+add rule inet native_dns_egress_probe output ip daddr 127.0.0.1 meta l4proto { tcp, udp } th dport 53 counter name local
+''')
+            def native_dns_counts():
+                table = json.loads(run(r, "nft", "-j", "list", "table", "inet", "native_dns_egress_probe", capture_output=True).stdout)
+                return {item["counter"]["name"]: item["counter"]["packets"] for item in table["nftables"] if "counter" in item}
             run(r, "nft", "-f", str(pathlib.Path(fixtures) / "excluded.nft"))
             run(r, "nft", "-f", str(pathlib.Path(fixtures) / "guard-excluded.nft"))
             for excluded in (False, True, False):
+                before_dns = native_dns_counts()
                 run(c, "ip", "link", "set", "client0", "address", "02:00:00:00:00:02" if excluded else "02:00:00:00:00:01")
                 run(r, "sh", str(pathlib.Path(guard_helper).with_name("dns-flows")), "cleanup", "lan0", "5353")
                 for source, address in (("192.168.0.2", "192.168.0.1"), ("2001:db8:1::2", "2001:db8:1::1")):
@@ -495,11 +514,16 @@ with socket.socket(socket.AF_INET6 if ":" in address else socket.AF_INET,
                         run(c, "python3", "-c", query, source, address, "53", transport, str(3000 + native_checks), "")
                         run(c, "python3", "-c", aaaa, address, transport, "1" if excluded else "0")
                         native_checks += 2
+                after_dns = native_dns_counts()
+                assert after_dns["protected"] - before_dns["protected"] == (0 if excluded else 4), (excluded, before_dns, after_dns)
+                assert after_dns["local"] == 0, "ordinary protected DNS used the native resolver"
             print(f"PASS: {native_checks} native dnsmasq/FakeDNS checks: excluded panel VIP and unfiltered AAAA, ordinary MAC filters AAAA", flush=True)
+            print("PASS: ordinary MAC DNS uses the protected VPN responder; excluded MAC retains native resolution", flush=True)
         finally:
-            native.terminate()
-            try: native.wait(timeout=5)
-            except subprocess.TimeoutExpired: native.kill(); native.wait()
+            for responder in (native, protected):
+                responder.terminate()
+                try: responder.wait(timeout=5)
+                except subprocess.TimeoutExpired: responder.kill(); responder.wait()
         # Restore the old helper ownership controls' original empty guard.
         run(r, "nft", "-f", str(pathlib.Path(fixtures) / "all.nft"))
         run(r, "nft", "-f", str(pathlib.Path(fixtures) / "guard.nft"))

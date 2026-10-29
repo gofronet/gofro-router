@@ -1,8 +1,9 @@
 use std::{
+    borrow::Cow,
     collections::HashSet,
     fs,
     io::{Read, Write},
-    net::{SocketAddr, TcpStream, UdpSocket},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket},
     path::Path,
     sync::{
         Mutex, RwLock,
@@ -14,7 +15,10 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use hickory_proto::{
     op::{Message, MessageType, ResponseCode},
-    rr::{RData, Record, RecordType, rdata::A},
+    rr::{
+        RData, Record, RecordType,
+        rdata::{A, opt::EdnsCode},
+    },
 };
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -31,6 +35,17 @@ use super::store::Store;
 const DNS_TIMEOUT: Duration = Duration::from_secs(4);
 pub(super) const MAX_DNS_PACKET: usize = u16::MAX as usize;
 const UDP_RESPONSE_BUFFER: usize = 4096;
+// Protected lookups must bypass dnsmasq and its shared ISP-backed cache. The
+// two Cloudflare endpoints keep VPN/WARP conntrack tuples separate even when
+// short-lived UDP sockets happen to reuse an ephemeral source port.
+const TUNNEL_DNS_UPSTREAM: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 53);
+const WARP_DNS_UPSTREAM: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)), 53);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UpstreamRoute {
+    address: SocketAddr,
+    mark: u32,
+}
 
 pub(crate) struct FakeDns {
     store: Mutex<Store>,
@@ -129,12 +144,28 @@ impl FakeDns {
         lan: &LanContext,
     ) -> Result<Vec<u8>> {
         let request = Message::from_vec(packet).context("invalid DNS request")?;
+        // A shared upstream cannot apply different policies to several names.
+        // Refuse malformed/multi-question packets instead of letting a Direct
+        // first question disclose later VPN/WARP questions to the local DNS.
+        if request.queries().len() != 1 {
+            return empty_response(&request, ResponseCode::FormErr);
+        }
         let query = request.query().context("DNS request has no question")?;
         let domain = query_domain(&query.name().to_utf8());
         if domain == AP_DOMAIN {
             return panel_response(&request);
         }
-        let response = query_upstream(packet, upstream)?;
+        let Some(route) = upstream_route(
+            &domain,
+            policy,
+            upstream,
+            self.vpn_enabled.load(Ordering::Relaxed),
+            lan,
+        ) else {
+            return empty_response(&request, ResponseCode::Refused);
+        };
+        let outgoing = upstream_packet(packet, &request, route)?;
+        let response = query_upstream_with_mark(&outgoing, route.address, route.mark)?;
         let mut message = Message::from_vec(&response).context("invalid upstream DNS response")?;
         if message.message_type() != MessageType::Response
             || message.id() != request.id()
@@ -275,12 +306,105 @@ fn relevant_names(records: &[Record], domain: &str) -> HashSet<String> {
     names
 }
 
-fn query_upstream(packet: &[u8], upstream: SocketAddr) -> Result<Vec<u8>> {
-    query_upstream_with_mark(
-        packet,
-        upstream,
-        dataplane::target_mark(RouteTarget::Direct),
-    )
+fn upstream_route(
+    domain: &str,
+    policy: &RoutingPolicy,
+    local_upstream: SocketAddr,
+    vpn_enabled: bool,
+    lan: &LanContext,
+) -> Option<UpstreamRoute> {
+    // An IP-only rule cannot classify an unknown A answer before resolving it.
+    // Protect every possible policy outcome rather than sending a preliminary
+    // Direct lookup that would already disclose the name to the ISP.
+    let target = if local_dns_name(domain, lan) {
+        RouteTarget::Direct
+    } else {
+        policy.dns_target(domain)
+    };
+    let target = dataplane::effective_target(target, vpn_enabled);
+    match target {
+        RouteTarget::Block => None,
+        RouteTarget::Direct | RouteTarget::Vpn | RouteTarget::Warp => Some(UpstreamRoute {
+            address: match target {
+                RouteTarget::Direct => local_upstream,
+                RouteTarget::Warp => WARP_DNS_UPSTREAM,
+                RouteTarget::Vpn | RouteTarget::Block => TUNNEL_DNS_UPSTREAM,
+            },
+            mark: dataplane::target_mark(target),
+        }),
+    }
+}
+
+fn upstream_packet<'a>(
+    packet: &'a [u8],
+    request: &Message,
+    route: UpstreamRoute,
+) -> Result<Cow<'a, [u8]>> {
+    if route.mark == dataplane::target_mark(RouteTarget::Direct)
+        || !request
+            .extensions()
+            .as_ref()
+            .is_some_and(|edns| edns.options().get(EdnsCode::Subnet).is_some())
+    {
+        return Ok(Cow::Borrowed(packet));
+    }
+    // Moving DNS into a tunnel is insufficient if the client explicitly embeds
+    // its original subnet. Keep every other EDNS option, including DNSSEC DO.
+    let mut request = request.clone();
+    if let Some(edns) = request.extensions_mut() {
+        edns.options_mut().remove(EdnsCode::Subnet);
+    }
+    Ok(Cow::Owned(request.to_vec()?))
+}
+
+fn local_dns_name(domain: &str, lan: &LanContext) -> bool {
+    if !domain.contains('.')
+        || ["localhost", "lan", "local", "home", "home.arpa", "internal"]
+            .iter()
+            .any(|suffix| {
+                domain == *suffix
+                    || domain
+                        .strip_suffix(suffix)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            })
+    {
+        return true;
+    }
+    if let Some(reverse) = domain.strip_suffix(".in-addr.arpa") {
+        let labels = reverse.split('.').collect::<Vec<_>>();
+        if labels.len() <= 4 {
+            let mut octets = [0; 4];
+            for (index, label) in labels.iter().rev().enumerate() {
+                let Ok(octet) = label.parse::<u8>() else {
+                    return false;
+                };
+                octets[index] = octet;
+            }
+            let address = Ipv4Addr::from(octets);
+            return is_lan_destination(address) || lan.subnet.contains(&address);
+        }
+    }
+    if let Some(reverse) = domain.strip_suffix(".ip6.arpa") {
+        let labels = reverse.split('.').collect::<Vec<_>>();
+        if labels.len() <= 32 {
+            let mut address = 0u128;
+            for (index, label) in labels.iter().rev().enumerate() {
+                if label.len() != 1 {
+                    return false;
+                }
+                let Ok(nibble) = u128::from_str_radix(label, 16) else {
+                    return false;
+                };
+                address |= nibble << (124 - index * 4);
+            }
+            let address = std::net::Ipv6Addr::from(address);
+            return address.is_loopback()
+                || address.is_unique_local()
+                || address.is_unicast_link_local()
+                || address.is_multicast();
+        }
+    }
+    false
 }
 
 fn query_upstream_with_mark(packet: &[u8], upstream: SocketAddr, mark: u32) -> Result<Vec<u8>> {

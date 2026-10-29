@@ -146,6 +146,53 @@ impl RoutingPolicy {
         }
     }
 
+    pub(crate) fn dns_target(&self, domain: &str) -> RouteTarget {
+        if self.config.mode == RoutingMode::All {
+            return RouteTarget::Vpn;
+        }
+        // DNS runs before an answer IP exists. Earlier IP rules are therefore
+        // possible outcomes, not a reason to resolve through the ISP first.
+        // Pick the most protected possible path until a domain rule (or an
+        // IPv4 catch-all) makes the remaining rules irrelevant.
+        let mut possible = RouteTarget::Block;
+        let protect = |left, right| {
+            let rank = |target| match target {
+                RouteTarget::Block => 0,
+                RouteTarget::Direct => 1,
+                RouteTarget::Vpn => 2,
+                RouteTarget::Warp => 3,
+            };
+            if rank(left) >= rank(right) {
+                left
+            } else {
+                right
+            }
+        };
+        for reference in self.rule_refs() {
+            match reference {
+                RuleRef::Domain { index } => {
+                    if let Some(rule) = self.config.domain_rules.get(index)
+                        && rule.enabled
+                        && self.matches_domain(rule, domain)
+                    {
+                        return protect(possible, rule.target);
+                    }
+                }
+                RuleRef::Ip { index } => {
+                    if let Some(rule) = self.config.ip_rules.get(index)
+                        && rule.enabled
+                    {
+                        possible = protect(possible, rule.target);
+                        if self.ip_rules[index].is_some_and(|network| network.prefix_len() == 0) {
+                            return possible;
+                        }
+                    }
+                }
+            }
+        }
+        protect(possible, self.config.default_target)
+    }
+
     pub(crate) fn uses_warp(&self) -> bool {
         self.config.mode == RoutingMode::Rules
             && (self.config.default_target == RouteTarget::Warp
@@ -235,6 +282,107 @@ impl RoutingPolicy {
 mod tests {
     use super::*;
     use crate::model::{DomainRule, IpRule};
+
+    #[test]
+    fn dns_respects_order_and_protects_unknown_ip_rule_outcomes() {
+        let domain = |value: &str, target| DomainRule {
+            name: value.into(),
+            enabled: true,
+            matcher: DomainMatch::Exact {
+                value: value.into(),
+            },
+            target,
+        };
+        let mut config = RoutingConfig {
+            domain_rules: vec![
+                domain("direct.example", RouteTarget::Direct),
+                domain("blocked.example", RouteTarget::Block),
+                domain("warp.example", RouteTarget::Warp),
+            ],
+            ip_rules: vec![IpRule {
+                name: "Possible WARP IP".into(),
+                enabled: true,
+                matcher: IpMatch::Cidr {
+                    value: "203.0.113.0/24".into(),
+                },
+                target: RouteTarget::Warp,
+            }],
+            default_target: RouteTarget::Vpn,
+            mode: RoutingMode::Rules,
+            rule_order: Some(vec![
+                RuleRef::Domain { index: 0 },
+                RuleRef::Ip { index: 0 },
+                RuleRef::Domain { index: 1 },
+                RuleRef::Domain { index: 2 },
+            ]),
+        };
+        let compile =
+            |config| RoutingPolicy::compile(config, Arc::new(GeoData::default())).unwrap();
+        let policy = compile(config.clone());
+        assert_eq!(policy.dns_target("direct.example"), RouteTarget::Direct);
+        assert_eq!(policy.dns_target("warp.example"), RouteTarget::Warp);
+        assert_eq!(
+            policy.dns_target("blocked.example"),
+            RouteTarget::Warp,
+            "the earlier IP rule can permit the eventual answer"
+        );
+        assert_eq!(policy.dns_target("unknown.example"), RouteTarget::Warp);
+        config.rule_order.as_mut().unwrap().swap(0, 2);
+        assert_eq!(
+            compile(config.clone()).dns_target("blocked.example"),
+            RouteTarget::Block
+        );
+        config.ip_rules[0].enabled = false;
+        assert_eq!(
+            compile(config.clone()).dns_target("unknown.example"),
+            RouteTarget::Vpn
+        );
+        config.mode = RoutingMode::All;
+        assert_eq!(
+            compile(config).dns_target("blocked.example"),
+            RouteTarget::Vpn
+        );
+    }
+
+    #[test]
+    fn dns_protects_ip_only_routes_and_stops_at_an_ipv4_catch_all() {
+        for target in [RouteTarget::Vpn, RouteTarget::Warp] {
+            let mut config = RoutingConfig {
+                domain_rules: vec![],
+                ip_rules: vec![IpRule {
+                    name: "Protected IP".into(),
+                    enabled: true,
+                    matcher: IpMatch::Cidr {
+                        value: "203.0.113.0/24".into(),
+                    },
+                    target,
+                }],
+                default_target: RouteTarget::Direct,
+                ..RoutingConfig::default()
+            };
+            let compile =
+                |config| RoutingPolicy::compile(config, Arc::new(GeoData::default())).unwrap();
+            assert_eq!(
+                compile(config.clone()).dns_target("unknown.example"),
+                target
+            );
+            config.ip_rules.insert(
+                0,
+                IpRule {
+                    name: "All external IPv4".into(),
+                    enabled: true,
+                    matcher: IpMatch::Cidr {
+                        value: "0.0.0.0/0".into(),
+                    },
+                    target: RouteTarget::Direct,
+                },
+            );
+            assert_eq!(
+                compile(config).dns_target("unknown.example"),
+                RouteTarget::Direct
+            );
+        }
+    }
 
     #[test]
     fn warp_is_domain_scoped_even_when_sites_share_an_ip() {
