@@ -3,7 +3,7 @@
 The next release workflow cross-compiles static musl binaries for eight
 supported OpenWrt 25.12 ABIs and one x86_64 VPS target: nine signed bundles,
 nine manifests, nine signatures and two installers (29 release assets total).
-The next signed candidate workspace version is `0.5.24`. The published signed
+The next signed candidate workspace version is `0.5.25`. The published signed
 v0.5.23 release is the immutable, pinned baseline; changes require a new
 candidate, not modification of its artifact.
 
@@ -13,7 +13,7 @@ candidate, not modification of its artifact.
    `Cargo.toml` and the workspace package versions in `Cargo.lock`.
 2. Run the checks below and squash-merge the pull request into `main`.
 3. Open **Actions -> Release -> Run workflow**, select `main`, and enter the
-   version without the `v` prefix (`0.5.24`). Leave **publish** unchecked
+   version without the `v` prefix (`0.5.25`). Leave **publish** unchecked
    (the default) to build a candidate.
 
 The workflow requires the latest `main` commit and a matching Cargo workspace
@@ -47,6 +47,11 @@ are scoped to a workflow run; record the run ID and artifact IDs as well.
    is not hardware qualification.
 
 For v0.5.24, record the upgrade from the pinned signed v0.5.23 baseline.
+For v0.5.25, also record the selective DNS upgrade from the signed v0.5.24
+candidate, including per-target DNS egress, fail-closed behavior and unchanged
+local/device-exclusion resolution. This router-only DNS change can use the
+existing native-WARP v0.5.24 VPS; do not label uninstalled v0.5.25 server assets
+as hardware-qualified.
 Verify router and VPS MTU 1379 after installation/update, native UCI MTU after
 agent restart/server selection, 1350/1351-byte QUIC datagrams and HTTP/3 responses,
 TCP MSS in both VPN directions and prompt IPv4 fallback for unsupported IPv6.
@@ -199,6 +204,14 @@ production packet-info reply path, not just a socket test double; local panel
 DNS must not query upstream. It does not validate upstream DNS delegation.
 See the workflow commands for the complete checks. Namespace tests simulate
 devices, not real PPPoE negotiation or OpenWrt hardware/boot qualification.
+
+`dns-egress-netns.sh` additionally runs the real agent against isolated Direct,
+VPN and WAN DNS responders. Qualify router-originated UDP/TCP upstream marks,
+WARP source SNAT, EDNS Client Subnet removal, local names, large/truncated UDP
+fallback, missing WARP alias, missing policy rule and unavailable tunnel without
+any protected query reaching WAN or the local resolver as a fallback. Both CI
+and candidate signing validation run it. These controlled responders do not
+replace real-router/VPS native WARP egress qualification.
 
 ## Upgrade a router
 

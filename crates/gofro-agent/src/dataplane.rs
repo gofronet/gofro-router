@@ -616,8 +616,30 @@ fn render_with_exclusions(
         writeln!(script, "add rule inet {TABLE} gofro_warp_guard iifname \"{}\" meta mark & {GOFRO_MARK_MASK} == {WARP_MARK} ct status confirmed ct reply ip daddr != {source} drop", lan.device).unwrap();
         writeln!(script, "add chain inet {TABLE} gofro_warp_snat {{ type nat hook postrouting priority 99; policy accept; }}").unwrap();
         writeln!(script, "add rule inet {TABLE} gofro_warp_snat iifname \"{}\" oifname \"gt0\" meta mark & {GOFRO_MARK_MASK} == {WARP_MARK} snat ip to {source}", lan.device).unwrap();
+        // FakeDNS originates on the router, so the LAN-ingress SNAT rule above
+        // cannot give its WARP lookups the source alias required by the VPS.
+        writeln!(script, "add rule inet {TABLE} gofro_warp_snat oifname \"gt0\" meta nfproto ipv4 meta l4proto {{ tcp, udp }} th dport 53 meta mark & {GOFRO_MARK_MASK} == {WARP_MARK} snat ip to {source}").unwrap();
     }
+    append_dns_egress_guard(&mut script, egress.warp_source.filter(|_| egress.enabled));
     script
+}
+
+fn append_dns_egress_guard(script: &mut String, warp_source: Option<Ipv4Addr>) {
+    // SO_MARK chooses the DNS path before connect(). Guard OUTPUT as well as
+    // FORWARD: missing policy routes or a missing WARP alias must never turn a
+    // protected router-originated lookup into ordinary VPN or WAN traffic.
+    writeln!(script, "add chain inet {TABLE} gofro_dns_egress {{ type filter hook output priority filter; policy accept; }}").unwrap();
+    let dns = "meta nfproto ipv4 meta l4proto { tcp, udp } th dport 53";
+    for mark in [VPN_MARK, WARP_MARK] {
+        writeln!(script, "add rule inet {TABLE} gofro_dns_egress {dns} meta mark & {GOFRO_MARK_MASK} == {mark} ct mark set (ct mark & {KEEP_FOREIGN_MARKS}) | {mark}").unwrap();
+        writeln!(script, "add rule inet {TABLE} gofro_dns_egress {dns} meta mark & {GOFRO_MARK_MASK} == {mark} oifname != \"gt0\" drop").unwrap();
+    }
+    writeln!(script, "add rule inet {TABLE} gofro_dns_egress {dns} ct reply ip daddr {} meta mark & {GOFRO_MARK_MASK} != {WARP_MARK} drop", wireguard_status::warp::SOURCE_SUBNET).unwrap();
+    if let Some(source) = warp_source {
+        writeln!(script, "add rule inet {TABLE} gofro_dns_egress {dns} meta mark & {GOFRO_MARK_MASK} == {WARP_MARK} ct status confirmed ct reply ip daddr != {source} drop").unwrap();
+    } else {
+        writeln!(script, "add rule inet {TABLE} gofro_dns_egress {dns} meta mark & {GOFRO_MARK_MASK} == {WARP_MARK} drop").unwrap();
+    }
 }
 
 pub(crate) fn effective_target(target: RouteTarget, vpn_enabled: bool) -> RouteTarget {

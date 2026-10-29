@@ -44,6 +44,19 @@ fn warp_uses_the_existing_vpn_table_but_never_a_direct_or_stale_nat_exit() {
                 &[],
             );
             let ready = enabled && source.is_some();
+            assert!(script.contains(
+                "gofro_dns_egress { type filter hook output priority filter; policy accept; }"
+            ));
+            for mark in [VPN_MARK, WARP_MARK] {
+                assert!(script.contains(&format!(
+                    "th dport 53 meta mark & 0x70000 == {mark} oifname != \"gt0\" drop"
+                )));
+            }
+            assert_eq!(script.contains("gofro_warp_snat oifname \"gt0\" meta nfproto ipv4 meta l4proto { tcp, udp } th dport 53 meta mark & 0x70000 == 393216 snat ip to 10.202.1.2"), ready);
+            assert_eq!(
+                script.contains("th dport 53 meta mark & 0x70000 == 393216 drop"),
+                !ready
+            );
             assert_eq!(script.contains("snat ip to 10.202.1.2"), ready);
             assert_eq!(
                 script.contains("ct status confirmed ct reply ip daddr != 10.202.1.2 drop"),
@@ -71,6 +84,48 @@ fn warp_uses_the_existing_vpn_table_but_never_a_direct_or_stale_nat_exit() {
         effective_target(RouteTarget::Warp, false),
         RouteTarget::Block
     );
+}
+
+#[test]
+#[ignore = "emits DNS egress fixtures for the real-agent namespace regression"]
+fn emit_dns_egress_fixtures() {
+    let directory = env::var("GOFRO_NFT_FIXTURE_DIR").unwrap();
+    let lan = LanContext {
+        device: "lan0".into(),
+        address: "192.168.0.1".parse().unwrap(),
+        subnet: "192.168.0.0/24".parse().unwrap(),
+    };
+    let policy = RoutingPolicy::compile(
+        RoutingConfig {
+            domain_rules: vec![],
+            ip_rules: vec![],
+            ..RoutingConfig::default()
+        },
+        Arc::new(GeoData::default()),
+    )
+    .unwrap();
+    for (name, enabled, warp_source) in [
+        ("dns-egress", true, Some("10.202.1.2".parse().unwrap())),
+        ("dns-egress-no-alias", true, None),
+        ("dns-egress-off", false, Some("10.202.1.2".parse().unwrap())),
+    ] {
+        fs::write(
+            format!("{directory}/{name}.nft"),
+            render_with_exclusions(
+                &lan,
+                5353,
+                VpnEgress {
+                    enabled,
+                    warp_source,
+                },
+                &policy,
+                &[],
+                PANEL_PORTS,
+                &[],
+            ),
+        )
+        .unwrap();
+    }
 }
 
 #[test]
