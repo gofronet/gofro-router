@@ -90,25 +90,29 @@ else:
             print(asset.get('url', ''))
 PY
 }
-# Mock the executable's hyphenated name in the fixture's supported shells.
-# shellcheck disable=SC3033
-uclient-fetch() {
-	fetch_output='' fetch_header=''
-	while [ "$#" -gt 0 ]; do
-		case "$1" in
-			-T) shift 2 ;;
-			-O) fetch_output=$2; shift 2 ;;
-			--header=*) fetch_header=${1#--header=}; shift ;;
-			*) fetch_url=$1; shift ;;
-		esac
-	done
-	printf '%s %s\n' "$fetch_url" "$fetch_header" >> "$TMP/fetch.log"
-	[ "${FETCH_FAIL:-0}" = 0 ] || return 4
-	case "$fetch_url" in
-		"$GITHUB_API/releases/latest") cp "$TMP/release.fixture" "$fetch_output" ;;
-		*) printf '%s\n' asset-bytes > "$fetch_output" ;;
+mkdir "$TMP/bin"
+export GOFRO_TEST_TMP="$TMP" GITHUB_API FETCH_FAIL=0
+cat > "$TMP/bin/uclient-fetch" <<'SH'
+#!/bin/sh
+set -eu
+fetch_output='' fetch_header=''
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		-T) shift 2 ;;
+		-O) fetch_output=$2; shift 2 ;;
+		--header=*) fetch_header=${1#--header=}; shift ;;
+		*) fetch_url=$1; shift ;;
 	esac
-}
+done
+printf '%s %s\n' "$fetch_url" "$fetch_header" >> "$GOFRO_TEST_TMP/fetch.log"
+[ "$FETCH_FAIL" = 0 ] || exit 4
+case "$fetch_url" in
+	"$GITHUB_API/releases/latest") cp "$GOFRO_TEST_TMP/release.fixture" "$fetch_output" ;;
+	*) printf '%s\n' asset-bytes > "$fetch_output" ;;
+esac
+SH
+chmod 700 "$TMP/bin/uclient-fetch"
+export PATH="$TMP/bin:$PATH"
 release_metadata
 [ "$RELEASE_TAG" = v0.5.28 ]
 for asset in manifest.json manifest.json.sig bundle.tar.gz; do
