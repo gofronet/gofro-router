@@ -9,11 +9,11 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.5.26"
+version = "0.5.27"
 
-edition = "2024"
+edition      = "2024"
 rust-version = "1.99"
-publish = false
+publish      = false
 
 [workspace.dependencies]
 anyhow = "1"
@@ -30,7 +30,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 socket2 = { version = "0.6", features = ["all"] }
 openssl = { version = "0.10", features = ["vendored"] }
-tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = [
+  "io-util",
+  "macros",
+  "net",
+  "process",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wireguard-status = { path = "crates/wireguard-status" }
@@ -39,10 +48,10 @@ gofro-kdf = { path = "crates/gofro-kdf" }
 zeroize = "1"
 
 [profile.release]
-lto = true
+lto           = true
 codegen-units = 1
-panic = "abort"
-strip = true
+panic         = "abort"
+strip         = true
 
 # ROMix is CPU-intensive even in developer builds; keep authentication tests
 # representative without optimizing the rest of the debug workspace.
