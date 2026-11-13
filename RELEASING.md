@@ -3,7 +3,7 @@
 The next release workflow cross-compiles static musl binaries for eight
 supported OpenWrt 25.12 ABIs and one x86_64 VPS target: nine signed bundles,
 nine manifests, nine signatures and two installers (29 release assets total).
-The next signed candidate workspace version is `0.5.25`. The published signed
+The next signed candidate workspace version is `0.5.28`. The published signed
 v0.5.23 release is the immutable, pinned baseline; changes require a new
 candidate, not modification of its artifact.
 
@@ -127,6 +127,18 @@ releases are immutable. Signed artifacts are never overwritten; if a full rerun
 hits an existing artifact name, dispatch a new run rather than replacing it.
 
 ## Checks
+
+### v0.5.28 recovery qualification
+
+Qualify the signed aarch64 router bundle on the ASUS TUF-AX6000: update from
+v0.5.26, retained configuration, panel and tunnel health, API-based release
+downloads when github.com is unreachable, and useful download failure logs.
+Check bootstrap capability negotiation against the exact VPS binary response
+including `warp_protocol`; newer capabilities must not invalidate owner protocol
+2. Qualify the signed x86_64 VPS update without replacing its operator-owned DNS
+or health services. Verify WARP endpoint cache permissions, successful fallback
+under a simulated DNS failure, and unchanged host default routes and resolver.
+Record other router ABIs as CI/emulation-tested, not hardware-qualified.
 
 Build the web UI before any Cargo check, test or build: `gofro-agent` embeds
 `web/dist` at compile time. CI builds it from source and passes it to the Rust

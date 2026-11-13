@@ -191,7 +191,8 @@ printf 'GOFRO_STAGE inspect\n'
 compatible() {{
   [ -x /usr/local/bin/gofro-router-server ] &&
   [ -x /usr/local/sbin/gofro-managed ] &&
-  [ "$(SSH_ORIGINAL_COMMAND=capabilities /usr/local/sbin/gofro-managed 2>/dev/null)" = '{{"owner_protocol":2}}' ]
+  capabilities=$(SSH_ORIGINAL_COMMAND=capabilities /usr/local/sbin/gofro-managed 2>/dev/null) &&
+  printf '%s\n' "$capabilities" | jq -e 'type == "object" and .owner_protocol == 2' >/dev/null
 }}
 if ! compatible; then
   printf 'GOFRO_STAGE install\n'
@@ -219,7 +220,6 @@ grep -qxF {} /root/.ssh/authorized_keys || printf '\n%s\n' {} >> /root/.ssh/auth
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Capabilities {
     owner_protocol: u8,
 }
@@ -344,7 +344,7 @@ mod tests {
         fake_ssh(
             &root.join("usr/local/sbin"),
             "gofro-managed",
-            "#!/bin/sh\n[ -f \"$FIXTURE/compatible\" ] || exit 126\nprintf '{\"owner_protocol\":2}\\n'\n",
+            "#!/bin/sh\n[ -f \"$FIXTURE/compatible\" ] || exit 126\nprintf '{ \"warp_protocol\": 1, \"owner_protocol\": 2 }\\n'\n",
         );
         fake_ssh(&root.join("bin"), "wg", "#!/bin/sh\nexit 0\n");
         fake_ssh(
@@ -450,8 +450,13 @@ mod tests {
     #[test]
     fn requires_exact_owner_protocol_two() {
         assert!(require_owner_protocol(r#"{"owner_protocol":2}"#).is_ok());
+        assert!(require_owner_protocol(r#"{"owner_protocol":2,"warp_protocol":1}"#).is_ok());
+        assert!(require_owner_protocol(r#"{"future_capability":true,"owner_protocol":2}"#).is_ok());
         assert!(require_owner_protocol(r#"{"owner_protocol":1}"#).is_err());
-        assert!(require_owner_protocol(r#"{"owner_protocol":2,"extra":true}"#).is_err());
+        assert!(require_owner_protocol(r#"{"owner_protocol":3}"#).is_err());
+        assert!(require_owner_protocol(r#"{"warp_protocol":1}"#).is_err());
+        assert!(require_owner_protocol(r#"{"owner_protocol":"2"}"#).is_err());
+        assert!(require_owner_protocol(r#"{"owner_protocol":2,"owner_protocol":1}"#).is_err());
         assert!(require_owner_protocol("gofro-server 0.5.15").is_err());
     }
 

@@ -6,6 +6,8 @@ MANIFEST=
 TARGET=
 DEFAULT_BASE_URL=https://github.com/gofronet/gofro-router/releases/latest/download
 BASE_URL=${GOFRO_RELEASE_URL:-$DEFAULT_BASE_URL}
+GITHUB_API=https://api.github.com/repos/gofronet/gofro-router
+RELEASE_TAG=
 GITHUB_ASSETS_CIDR=185.199.108.0/22
 KEY=/etc/gofro/update-public.pem
 LOCK=/tmp/gofro-update.lock
@@ -74,6 +76,34 @@ route_release_assets() {
 	# ponytail: The ISP blocks GitHub's current assets CIDR; update this if GitHub moves it.
 	if ip route add "$GITHUB_ASSETS_CIDR" dev "$interface" 2>/dev/null; then
 		ASSET_ROUTE=$interface
+	fi
+}
+
+release_metadata() {
+	[ "$BASE_URL" = "$DEFAULT_BASE_URL" ] || return 0
+	# The API is reachable on networks which filter github.com itself. Asset
+	# IDs pin all files to one release, even if Latest changes during download.
+	uclient-fetch -T 60 -O "$TMP/release.json" "$GITHUB_API/releases/latest" ||
+		die 'cannot fetch GitHub release metadata; check network access or API rate limits'
+	RELEASE_TAG="$(jsonfilter -i "$TMP/release.json" -e '@.tag_name')"
+	case "$RELEASE_TAG" in v*) valid_version "${RELEASE_TAG#v}" ;; *) die 'GitHub release tag is invalid' ;; esac ||
+		die 'GitHub release tag is invalid'
+}
+
+download_asset() {
+	asset_name=$1 asset_timeout=$2 asset_output=$3
+	if [ "$BASE_URL" = "$DEFAULT_BASE_URL" ]; then
+		asset_api_url="$(jsonfilter -i "$TMP/release.json" -e "@.assets[@.name=\"$asset_name\"].url")"
+		case "$asset_api_url" in
+			"$GITHUB_API/releases/assets/"*) asset_id=${asset_api_url#"$GITHUB_API/releases/assets/"} ;;
+			*) die "release asset is missing or invalid: $asset_name" ;;
+		esac
+		case "$asset_id" in ''|*[!0-9]*) die "release asset ID is invalid: $asset_name" ;; esac
+		uclient-fetch -T "$asset_timeout" -O "$asset_output" --header='Accept: application/octet-stream' "$asset_api_url" ||
+			die "cannot download release asset: $asset_name"
+	else
+		uclient-fetch -T "$asset_timeout" -O "$asset_output" "$BASE_URL/$asset_name" ||
+			die "cannot download release asset: $asset_name"
 	fi
 }
 
@@ -162,9 +192,10 @@ if [ "$mode" = install ]; then
 	write_public_key "$KEY"
 fi
 route_release_assets
+release_metadata
 
-uclient-fetch -q -T 60 -O "$TMP/$MANIFEST" "$BASE_URL/$MANIFEST"
-uclient-fetch -q -T 60 -O "$TMP/$MANIFEST.sig" "$BASE_URL/$MANIFEST.sig"
+download_asset "$MANIFEST" 60 "$TMP/$MANIFEST"
+download_asset "$MANIFEST.sig" 60 "$TMP/$MANIFEST.sig"
 openssl pkeyutl -verify -pubin -inkey "$KEY" -rawin \
 	-in "$TMP/$MANIFEST" -sigfile "$TMP/$MANIFEST.sig" >/dev/null \
 	|| die 'release signature is invalid'
@@ -176,6 +207,7 @@ archive="$(jsonfilter -i "$TMP/$MANIFEST" -e '@.archive')"
 sha256="$(jsonfilter -i "$TMP/$MANIFEST" -e '@.sha256')"
 [ "$schema" = 1 ] || die 'release schema is invalid'
 valid_version "$version" || die 'release version is invalid'
+[ -z "$RELEASE_TAG" ] || [ "$RELEASE_TAG" = "v$version" ] || die 'signed manifest does not match selected release'
 [ "$target" = "$TARGET" ] || die 'release target is invalid'
 [ "$archive" = "$ARCHIVE" ] || die 'release archive is invalid'
 case "$sha256" in ''|*[!0-9a-f]*) die 'release checksum is invalid' ;; esac
@@ -190,9 +222,7 @@ if [ "$mode" = update ]; then
 	[ "$version" = "$installed" ] || version_newer "$version" "$installed" || die "Gofro $version is older than $installed"
 fi
 
-asset_url=$BASE_URL
-[ "$BASE_URL" != "$DEFAULT_BASE_URL" ] || asset_url="https://github.com/gofronet/gofro-router/releases/download/v$version"
-uclient-fetch -q -T 300 -O "$TMP/$ARCHIVE" "$asset_url/$ARCHIVE"
+download_asset "$ARCHIVE" 300 "$TMP/$ARCHIVE"
 printf '%s  %s\n' "$sha256" "$TMP/$ARCHIVE" | sha256sum -c - >/dev/null \
 	|| die 'release checksum does not match'
 

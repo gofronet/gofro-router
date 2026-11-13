@@ -57,7 +57,7 @@ MTU = 1280
 [Peer]
 PublicKey = $cloud_public
 AllowedIPs = 0.0.0.0/0, ::/0
-Endpoint = 203.0.113.2:2408
+Endpoint = warp-fixture.invalid:2408
 PersistentKeepalive = 25
 EOF
 read_network
@@ -92,11 +92,28 @@ PY
 ip netns exec warp-test-cloud python3 "$TMP/server.py" &
 PIDS+=("$!")
 mkdir "$TMP/bin"
+export WARP_FIXTURE_DNS_DOWN=$TMP/dns-down
+cat > "$TMP/bin/getent" <<'SH'
+#!/bin/sh
+[ ! -e "$WARP_FIXTURE_DNS_DOWN" ] || exit 2
+printf '203.0.113.2 STREAM warp-fixture.invalid\n203.0.113.2 DGRAM\n'
+SH
+chmod 700 "$TMP/bin/getent"
 real_curl=$(command -v curl)
 printf '#!/bin/sh\nexec "%s" -4 --noproxy "*" --fail --silent --max-time 2 http://198.51.100.1:8080/trace\n' "$real_curl" > "$TMP/bin/curl"
 chmod 700 "$TMP/bin/curl"
 export PATH="$TMP/bin:$PATH"
 connect
+[[ $(cached_endpoint) == 203.0.113.2 && $(stat -c '%a' "$STATE/endpoint.cache") == 600 ]]
+PROFILE_HOST=foreign.invalid
+if cached_endpoint >/dev/null; then exit 1; fi
+# Consumed by the dynamically sourced production helpers.
+# shellcheck disable=SC2034
+PROFILE_HOST=warp-fixture.invalid
+chmod 666 "$STATE/endpoint.cache"
+if cached_endpoint >/dev/null; then exit 1; fi
+if cache_endpoint 203.0.113.2; then exit 1; fi
+chmod 600 "$STATE/endpoint.cache"
 [[ $(ip -4 route show default) == "$default_before" && $(sha256sum /etc/resolv.conf) == "$resolver_before" ]]
 owned_wireguard -n gofro-warp
 [[ $(ip -n gofro-warp -o link show CloudflareWARP) == *'mtu 1420'* ]]
@@ -149,6 +166,7 @@ for mode in tcp udp; do
 done
 network_down
 network_up
+touch "$WARP_FIXTURE_DNS_DOWN"
 connect
 probe 10.202.1.6 172.16.0.2 udp
 network_down
